@@ -18,10 +18,19 @@ forward_mlp :: proc(
 	mlp: ^Mlp($T),
 	x: ^tensor.Tensor(T),
 	allocator := context.allocator,
+	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
-	out := nn.forward_linear(mlp.fc1, x, context.temp_allocator)
-	out = nn.forward_linear(mlp.fc2, out, context.temp_allocator)
-	return out
+	// TODO(Aria): layer norm
+	// ...
+
+	fc1_out := nn.forward_linear(mlp.fc1, x, allocator, loc)
+	defer tensor.free_tensor(fc1_out, allocator)
+
+	gelu_out = tensor.tensor_gelu(fc1_out, allocator, loc)
+	defer tensor.free_tensor(gelu_out, allocator)
+
+	fc2_out = nn.forward_linear(gelu_out, out, allocator)
+	return fc2_out
 }
 
 Patch_Embed :: struct {}
