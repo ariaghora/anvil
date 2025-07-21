@@ -22,6 +22,7 @@ Tensor :: struct($T: typeid) where intrinsics.type_is_numeric(T) {
 	shape:      []uint,
 	strides:    []uint,
 	contiguous: bool,
+	parent:     ^Tensor(T),  // Reference to parent tensor (nil if owns data)
 }
 
 // Compute total size of an tensor by multiplying dimensions in shape
@@ -49,6 +50,7 @@ tensor_alloc :: proc(
 	res.shape = make([]uint, len(shape), allocator)
 	res.strides = make([]uint, len(shape), allocator)
 	res.contiguous = true
+	res.parent = nil  // This tensor owns its data
 
 	// initialize shape and strides
 	copy(res.shape, shape)
@@ -106,6 +108,7 @@ clone :: proc(arr: ^Tensor($T), allocator := context.allocator) -> (res: ^Tensor
 	res.shape = make([]uint, len(arr.shape), allocator)
 	res.strides = make([]uint, len(arr.strides), allocator)
 	res.contiguous = arr.contiguous
+	res.parent = nil  // Clone owns its own data
 
 	copy(res.data, arr.data)
 	copy(res.shape, arr.shape)
@@ -196,7 +199,11 @@ free_tensor :: proc {
 
 @(private = "file")
 free_tensor_one :: proc(arr: ^Tensor($T), allocator := context.allocator) {
-	delete(arr.data, allocator)
+	// Only free data if this tensor owns it (parent == nil)
+	if arr.parent == nil {
+		delete(arr.data, allocator)
+	}
+	// Always free shape and strides (each tensor owns these)
 	delete(arr.shape, allocator)
 	delete(arr.strides, allocator)
 	free(arr, allocator)
@@ -457,4 +464,100 @@ matmul :: proc(
 	loc := #caller_location,
 ) -> ^Tensor(T) {
 	return tensor_matmul(a, b, allocator, loc)
+}
+
+// General dimension permutation - specify new order of ALL dimensions
+// Example: permute(tensor, [2, 0, 1]) reorders dims so that dim 0->2, dim 1->0, dim 2->1
+permute :: proc(
+	tensor: ^Tensor($T),
+	dims: []int,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	// Validate input
+	if len(dims) != len(tensor.shape) {
+		panic("Number of dims must equal tensor dimensions")
+	}
+
+	// Check that dims contains each dimension exactly once
+	used := make([]bool, len(tensor.shape), context.temp_allocator)
+	defer delete(used, context.temp_allocator)
+	
+	for dim in dims {
+		if dim < 0 || dim >= len(tensor.shape) {
+			panic("Dimension index out of range")
+		}
+		if used[dim] {
+			panic("Dimension specified multiple times")
+		}
+		used[dim] = true
+	}
+
+	// Create view tensor
+	result := new(Tensor(T), allocator)
+	result.data = tensor.data  // Share the data
+	result.shape = make([]uint, len(tensor.shape), allocator)
+	result.strides = make([]uint, len(tensor.strides), allocator)
+	result.contiguous = false  // Views are typically not contiguous
+	result.parent = tensor     // This is a view of the original tensor
+
+	// Reorder shape and strides according to dims
+	for result_dim in 0..<len(dims) {
+		source_dim := dims[result_dim]
+		result.shape[result_dim] = tensor.shape[source_dim]
+		result.strides[result_dim] = tensor.strides[source_dim]
+	}
+
+	return result
+}
+
+// Swap two specific dimensions (PyTorch-style transpose)
+// Example: transpose(tensor, 0, 1) swaps dimensions 0 and 1
+transpose :: proc(
+	tensor: ^Tensor($T),
+	dim0, dim1: int,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	// Validate dimensions
+	if dim0 < 0 || dim0 >= len(tensor.shape) || dim1 < 0 || dim1 >= len(tensor.shape) {
+		panic("Dimension indices out of range")
+	}
+
+	// Create view tensor
+	result := new(Tensor(T), allocator)
+	result.data = tensor.data  // Share the data
+	result.shape = make([]uint, len(tensor.shape), allocator)
+	result.strides = make([]uint, len(tensor.strides), allocator)
+	result.parent = tensor     // This is a view of the original tensor
+
+	// Copy original shape and strides
+	copy(result.shape, tensor.shape)
+	copy(result.strides, tensor.strides)
+
+	// Swap the specified dimensions
+	result.shape[dim0], result.shape[dim1] = result.shape[dim1], result.shape[dim0]
+	result.strides[dim0], result.strides[dim1] = result.strides[dim1], result.strides[dim0]
+
+	// Check if result is contiguous (only true if no actual swap or specific cases)
+	result.contiguous = (dim0 == dim1) && tensor.contiguous
+
+	return result
+}
+
+// Matrix transpose convenience function - swaps last two dimensions
+// Equivalent to transpose(tensor, -2, -1) but without negative index support
+matrix_transpose :: proc(
+	tensor: ^Tensor($T),
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	if len(tensor.shape) < 2 {
+		panic("Matrix transpose requires at least 2D tensor")
+	}
+	
+	last := len(tensor.shape) - 1
+	second_last := len(tensor.shape) - 2
+	
+	return transpose(tensor, second_last, last, allocator, loc)
 }
