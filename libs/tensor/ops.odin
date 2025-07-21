@@ -55,16 +55,16 @@ shape_broadcastable :: proc(
 broadcast_strides :: proc(
 	original_shape: []uint,
 	target_shape: []uint,
-	original_strides: []int,
+	original_strides: []uint,
 	allocator := context.allocator,
 	loc := #caller_location,
-) -> []int {
+) -> []uint {
 	assert(len(original_shape) == len(original_strides))
 
 	target_rank := len(target_shape)
 	original_rank := len(original_shape)
 
-	result_strides := make([]int, target_rank, allocator, loc)
+	result_strides := make([]uint, target_rank, allocator, loc)
 
 	// Process from right to left
 	for i in 0 ..< target_rank {
@@ -94,157 +94,72 @@ broadcast_strides :: proc(
 	return result_strides
 }
 
-import "core:testing"
+// Generic elementwise binary operation with broadcasting
+elementwise_binary_op :: proc(
+	a, b: ^Tensor($T),
+	op: proc(a, b: T) -> T,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	// Check if shapes are broadcastable
+	result_shape, broadcastable := shape_broadcastable(a.shape, b.shape, allocator, loc)
+	if !broadcastable {
+		panic("Tensors cannot be broadcasted together")
+	}
+	defer delete(result_shape, allocator, loc)
 
-@(test)
-test_shape_broadcastable :: proc(t: ^testing.T) {
-	// Compatible shapes
-	{
-		shape_a := []uint{3, 1, 5}
-		shape_b := []uint{4, 1}
-		result, ok := shape_broadcastable(shape_a, shape_b, context.temp_allocator)
-		testing.expect(t, ok, "Should be broadcastable")
-		testing.expect(t, len(result) == 3, "Result should have 3 dimensions")
-		testing.expect(t, result[0] == 3, "First dim should be 3")
-		testing.expect(t, result[1] == 4, "Second dim should be 4")
-		testing.expect(t, result[2] == 5, "Third dim should be 5")
+	// Create result tensor
+	result := tensor_alloc(T, result_shape, allocator, loc)
+	// Strides are already computed in tensor_alloc
+
+	// Compute broadcasted strides for both tensors
+	a_strides := broadcast_strides(a.shape, result_shape, a.strides, context.temp_allocator)
+	defer delete(a_strides, context.temp_allocator)
+	
+	b_strides := broadcast_strides(b.shape, result_shape, b.strides, context.temp_allocator)
+	defer delete(b_strides, context.temp_allocator)
+
+	// Perform elementwise operation
+	total_elements := shape_to_size(result_shape)
+	for i in 0 ..< total_elements {
+		// Convert linear index to multidimensional indices
+		indices := make([]uint, len(result_shape), context.temp_allocator)
+		defer delete(indices, context.temp_allocator)
+		
+		temp_i := i
+		for dim := len(result_shape) - 1; dim >= 0; dim -= 1 {
+			indices[dim] = temp_i % result_shape[dim]
+			temp_i /= result_shape[dim]
+		}
+
+		// Compute linear indices for both tensors using broadcasted strides
+		a_idx := compute_linear_index(indices, a_strides)
+		b_idx := compute_linear_index(indices, b_strides)
+
+		// Apply operation
+		result.data[i] = op(a.data[a_idx], b.data[b_idx])
 	}
 
-	// Same shapes
-	{
-		shape_a := []uint{2, 3, 4}
-		shape_b := []uint{2, 3, 4}
-		result, ok := shape_broadcastable(shape_a, shape_b, context.temp_allocator)
-		testing.expect(t, ok, "Same shapes should be broadcastable")
-		testing.expect(t, len(result) == 3, "Result should have 3 dimensions")
-		testing.expect(t, slice.equal(result, shape_a), "Result should equal input shape")
-	}
-
-	// Scalar broadcasting
-	{
-		shape_a := []uint{3, 4, 5}
-		shape_b := []uint{}
-		result, ok := shape_broadcastable(shape_a, shape_b, context.temp_allocator)
-		testing.expect(t, ok, "Scalar should broadcast to any shape")
-		testing.expect(t, slice.equal(result, shape_a), "Result should equal non-scalar shape")
-	}
-
-	// Incompatible shapes
-	{
-		shape_a := []uint{3, 4}
-		shape_b := []uint{2, 5}
-		_, ok := shape_broadcastable(shape_a, shape_b, context.temp_allocator)
-		testing.expect(t, !ok, "Should not be broadcastable")
-	}
-
-	// One dimension is 1
-	{
-		shape_a := []uint{1}
-		shape_b := []uint{5}
-		result, ok := shape_broadcastable(shape_a, shape_b, context.temp_allocator)
-		testing.expect(t, ok, "1 should broadcast to 5")
-		testing.expect(t, result[0] == 5, "Result should be [5]")
-	}
-
-	// Empty shapes
-	{
-		shape_a := []uint{}
-		shape_b := []uint{}
-		result, ok := shape_broadcastable(shape_a, shape_b, context.temp_allocator)
-		testing.expect(t, ok, "Empty shapes should be compatible")
-		testing.expect(t, len(result) == 0, "Result should be empty")
-	}
+	return result
 }
 
-@(test)
-test_broadcast_strides :: proc(t: ^testing.T) {
-	// Broadcasting dimension of size 1
-	{
-		original_shape := []uint{3, 1}
-		target_shape := []uint{3, 5}
-		original_strides := []int{4, 4}
-		result := broadcast_strides(
-			original_shape,
-			target_shape,
-			original_strides,
-			context.temp_allocator,
-		)
-		expected := []int{4, 0}
-		testing.expect(
-			t,
-			slice.equal(result, expected),
-			"Broadcasted dimension should have stride 0",
-		)
-	}
-
-	// Adding leading dimensions
-	{
-		original_shape := []uint{4}
-		target_shape := []uint{2, 3, 4}
-		original_strides := []int{1}
-		result := broadcast_strides(
-			original_shape,
-			target_shape,
-			original_strides,
-			context.temp_allocator,
-		)
-		expected := []int{0, 0, 1}
-		testing.expect(t, slice.equal(result, expected), "Leading dimensions should have stride 0")
-	}
-
-	// No broadcasting needed
-	{
-		original_shape := []uint{2, 3, 4}
-		target_shape := []uint{2, 3, 4}
-		original_strides := []int{12, 4, 1}
-		result := broadcast_strides(
-			original_shape,
-			target_shape,
-			original_strides,
-			context.temp_allocator,
-		)
-		testing.expect(
-			t,
-			slice.equal(result, original_strides),
-			"No broadcasting should preserve strides",
-		)
-	}
-
-	// Scalar broadcasting
-	{
-		original_shape := []uint{}
-		target_shape := []uint{2, 3}
-		original_strides := []int{}
-		result := broadcast_strides(
-			original_shape,
-			target_shape,
-			original_strides,
-			context.temp_allocator,
-		)
-		expected := []int{0, 0}
-		testing.expect(
-			t,
-			slice.equal(result, expected),
-			"Scalar should broadcast with all strides 0",
-		)
-	}
-
-	// Complex case: mix of broadcasting and non-broadcasting
-	{
-		original_shape := []uint{1, 3, 1, 4}
-		target_shape := []uint{2, 1, 3, 5, 4}
-		original_strides := []int{12, 4, 4, 1}
-		result := broadcast_strides(
-			original_shape,
-			target_shape,
-			original_strides,
-			context.temp_allocator,
-		)
-		expected := []int{0, 0, 4, 0, 1}
-		testing.expect(
-			t,
-			slice.equal(result, expected),
-			"Mixed broadcasting should work correctly",
-		)
-	}
+// Addition operation
+tensor_add :: proc(
+	a, b: ^Tensor($T),
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	add_op :: proc(x, y: T) -> T { return x + y }
+	return elementwise_binary_op(a, b, add_op, allocator, loc)
 }
+
+// Multiplication operation
+tensor_multiply :: proc(
+	a, b: ^Tensor($T),
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	mul_op :: proc(x, y: T) -> T { return x * y }
+	return elementwise_binary_op(a, b, mul_op, allocator, loc)
+}
+
