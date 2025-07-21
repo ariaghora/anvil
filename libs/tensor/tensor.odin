@@ -314,21 +314,147 @@ reshape :: proc(
 }
 
 
+// Tensor-aware matrix multiplication with batch support and broadcasting
+// Supports 2D+ tensors: (...batch_dims, m, k) @ (...batch_dims, k, n) -> (...batch_dims, m, n)
+tensor_matmul :: proc(
+	a, b: ^Tensor($T),
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	// Validate minimum dimensions
+	if len(a.shape) < 2 || len(b.shape) < 2 {
+		panic("tensor_matmul requires at least 2D tensors")
+	}
+
+	// Extract matrix dimensions (last 2 dimensions)
+	a_matrix_dims := a.shape[len(a.shape) - 2:]
+	b_matrix_dims := b.shape[len(b.shape) - 2:]
+	a_m, a_k := a_matrix_dims[0], a_matrix_dims[1]
+	b_k, b_n := b_matrix_dims[0], b_matrix_dims[1]
+
+	// Validate inner matrix dimensions match
+	if a_k != b_k {
+		panic("Matrix dimensions incompatible for multiplication")
+	}
+
+	// Extract batch dimensions (all but last 2)
+	a_batch := a.shape[:len(a.shape) - 2] if len(a.shape) > 2 else []uint{}
+	b_batch := b.shape[:len(b.shape) - 2] if len(b.shape) > 2 else []uint{}
+
+	// Check if batch dimensions are broadcastable
+	result_batch, broadcastable := shape_broadcastable(a_batch, b_batch, context.temp_allocator)
+	if !broadcastable {
+		panic("Batch dimensions cannot be broadcasted")
+	}
+	defer delete(result_batch, context.temp_allocator)
+
+	// Construct result shape: [...batch_dims, m, n]
+	result_shape := make([]uint, len(result_batch) + 2, allocator, loc)
+	copy(result_shape[:len(result_batch)], result_batch)
+	result_shape[len(result_batch)] = a_m
+	result_shape[len(result_batch) + 1] = b_n
+
+	// Create result tensor
+	result := tensor_alloc(T, result_shape, allocator, loc)
+
+	// Calculate total batch size and matrix sizes
+	batch_size := shape_to_size(result_batch) if len(result_batch) > 0 else 1
+	matrix_size_a := a_m * a_k
+	matrix_size_b := b_k * b_n
+	matrix_size_result := a_m * b_n
+
+	// Compute broadcasted strides for batch dimensions
+	a_full_batch := make([]uint, len(result_batch), context.temp_allocator)
+	b_full_batch := make([]uint, len(result_batch), context.temp_allocator)
+	defer delete(a_full_batch, context.temp_allocator)
+	defer delete(b_full_batch, context.temp_allocator)
+
+	// Pad batch dimensions with 1s if needed for stride calculation
+	if len(a_batch) < len(result_batch) {
+		for i in 0 ..< len(result_batch) - len(a_batch) {
+			a_full_batch[i] = 1
+		}
+		copy(a_full_batch[len(result_batch) - len(a_batch):], a_batch)
+	} else {
+		copy(a_full_batch, a_batch)
+	}
+
+	if len(b_batch) < len(result_batch) {
+		for i in 0 ..< len(result_batch) - len(b_batch) {
+			b_full_batch[i] = 1
+		}
+		copy(b_full_batch[len(result_batch) - len(b_batch):], b_batch)
+	} else {
+		copy(b_full_batch, b_batch)
+	}
+
+	// Create temporary strides for batch dimensions only
+	a_batch_strides := make([]uint, len(result_batch), context.temp_allocator)
+	b_batch_strides := make([]uint, len(result_batch), context.temp_allocator)
+	defer delete(a_batch_strides, context.temp_allocator)
+	defer delete(b_batch_strides, context.temp_allocator)
+
+	// Compute strides for batch dimensions manually
+	if len(result_batch) > 0 {
+		a_stride: uint = matrix_size_a
+		for i := len(result_batch) - 1; i >= 0; i -= 1 {
+			if a_full_batch[i] == 1 {
+				a_batch_strides[i] = 0 // Broadcasting: no movement
+			} else {
+				a_batch_strides[i] = a_stride
+				a_stride *= a_full_batch[i]
+			}
+		}
+
+		b_stride: uint = matrix_size_b
+		for i := len(result_batch) - 1; i >= 0; i -= 1 {
+			if b_full_batch[i] == 1 {
+				b_batch_strides[i] = 0 // Broadcasting: no movement
+			} else {
+				b_batch_strides[i] = b_stride
+				b_stride *= b_full_batch[i]
+			}
+		}
+	}
+
+	// Process each batch
+	for batch_idx in 0 ..< batch_size {
+		// Calculate batch indices
+		batch_indices := make([]uint, len(result_batch), context.temp_allocator)
+		defer delete(batch_indices, context.temp_allocator)
+
+		temp_idx := batch_idx
+		for dim := len(result_batch) - 1; dim >= 0; dim -= 1 {
+			batch_indices[dim] = temp_idx % result_batch[dim]
+			temp_idx /= result_batch[dim]
+		}
+
+		// Calculate linear offsets for this batch
+		a_offset: uint = 0
+		b_offset: uint = 0
+		for i in 0 ..< len(result_batch) {
+			a_offset += batch_indices[i] * a_batch_strides[i]
+			b_offset += batch_indices[i] * b_batch_strides[i]
+		}
+
+		// Get slices for this batch's matrices
+		a_matrix := a.data[a_offset:a_offset + matrix_size_a]
+		b_matrix := b.data[b_offset:b_offset + matrix_size_b]
+		result_matrix := result.data[batch_idx *
+		matrix_size_result:(batch_idx + 1) *
+		matrix_size_result]
+
+		// Perform 2D matrix multiplication using BLAS
+		matmul.matmul_2d(a_matrix, b_matrix, a_m, b_n, a_k, result_matrix, allocator)
+	}
+
+	return result
+}
+
 matmul :: proc(
 	a, b: ^Tensor($T),
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
-	assert(len(a.shape) == 2 && len(b.shape) == 2)
-	out := tensor_alloc(T, []uint{a.shape[0], b.shape[1]}, allocator = allocator, loc = loc)
-	matmul.matmul(
-		a.data,
-		b.data,
-		a.shape[0],
-		b.shape[1],
-		a.shape[1],
-		out.data,
-		allocator = allocator,
-	)
-	return out
+	return tensor_matmul(a, b, allocator, loc)
 }

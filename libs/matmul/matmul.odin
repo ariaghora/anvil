@@ -1,5 +1,7 @@
 package matmul
 
+import "core:slice"
+
 foreign import blas "system:Accelerate.framework"
 
 CBLAS_ORDER :: enum i32 {
@@ -22,10 +24,8 @@ foreign blas {
 	dgemm :: proc(order: CBLAS_ORDER, transa, transb: CBLAS_TRANSPOSE, m, n, k: i32, alpha: f64, a: [^]f64, lda: i32, b: [^]f64, ldb: i32, beta: f64, c: [^]f64, ldc: i32) ---
 }
 
-
-// ... foreign imports ...
-
-matmul :: proc(a: []$T, b: []T, m, n, k: uint, c: []T, allocator := context.allocator) {
+// Legacy 2D matrix multiplication using raw arrays
+matmul_2d :: proc(a: []$T, b: []T, m, n, k: uint, c: []T, allocator := context.allocator) {
 	assert(len(a) == int(m * k), "A matrix size mismatch")
 	assert(len(b) == int(k * n), "B matrix size mismatch")
 
@@ -70,3 +70,4 @@ matmul :: proc(a: []$T, b: []T, m, n, k: uint, c: []T, allocator := context.allo
 
 	// return result
 }
+
