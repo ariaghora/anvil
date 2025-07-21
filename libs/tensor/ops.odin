@@ -5,6 +5,14 @@ import "core:math"
 import "core:mem"
 import "core:slice"
 
+// Binary operation types for compile-time dispatch
+BinaryOp :: enum {
+	ADD,
+	MULTIPLY,
+	SUBTRACT,
+	DIVIDE,
+}
+
 shape_broadcastable :: proc(
 	shape_a, shape_b: []uint,
 	allocator := context.allocator,
@@ -94,14 +102,6 @@ broadcast_strides :: proc(
 	return result_strides
 }
 
-// Binary operation types for compile-time dispatch
-BinaryOp :: enum {
-	ADD,
-	MULTIPLY,
-	SUBTRACT,
-	DIVIDE,
-}
-
 // Generic elementwise binary operation with broadcasting using compile-time enum dispatch
 elementwise_binary_op :: proc(
 	a, b: ^Tensor($T),
@@ -113,7 +113,7 @@ elementwise_binary_op :: proc(
 	if slice.equal(a.shape, b.shape) && a.contiguous && b.contiguous {
 		result := tensor_alloc(T, a.shape, allocator, loc)
 		total_elements := len(a.data)
-		
+
 		for i in 0 ..< total_elements {
 			switch op {
 			case .ADD:
@@ -173,7 +173,7 @@ elementwise_binary_op :: proc(
 	if slice.equal(a.shape, b.shape) && slice.equal(a.strides, b.strides) {
 		result := tensor_alloc(T, a.shape, allocator, loc)
 		total_elements := shape_to_size(a.shape)
-		
+
 		for i in 0 ..< total_elements {
 			idx := compute_strided_index(a.shape, a.strides, i)
 			switch op {
@@ -200,7 +200,7 @@ elementwise_binary_op :: proc(
 	result := tensor_alloc(T, result_shape, allocator, loc)
 	a_strides := broadcast_strides(a.shape, result_shape, a.strides, context.temp_allocator)
 	defer delete(a_strides, context.temp_allocator)
-	
+
 	b_strides := broadcast_strides(b.shape, result_shape, b.strides, context.temp_allocator)
 	defer delete(b_strides, context.temp_allocator)
 
@@ -263,7 +263,7 @@ tensor_divide :: proc(
 // Reduction operation types for compile-time dispatch
 ReduceOp :: enum {
 	SUM,
-	MEAN, 
+	MEAN,
 	MAX,
 	MIN,
 }
@@ -282,11 +282,11 @@ tensor_reduce :: proc(
 	if axis == nil {
 		result := tensor_alloc(T, []uint{}, allocator, loc) // Scalar tensor
 		total_elements := data_len(tensor)
-		
+
 		if total_elements == 0 {
 			panic("Cannot reduce empty tensor")
 		}
-		
+
 		// Initialize with appropriate identity value
 		initial_value: T
 		switch op {
@@ -296,9 +296,9 @@ tensor_reduce :: proc(
 			// For max/min, initialize with first element
 			initial_value = tensor.data[0] if len(tensor.data) > 0 else T(0)
 		}
-		
+
 		result_value := initial_value
-		
+
 		// Fast path for contiguous tensors
 		if tensor.contiguous {
 			switch op {
@@ -355,17 +355,17 @@ tensor_reduce :: proc(
 				}
 			}
 		}
-		
+
 		result.data[0] = result_value
 		return result
 	}
-	
+
 	// Handle reduction along specific axis
 	axis_val := axis.(int)
 	if axis_val < 0 || axis_val >= len(tensor.shape) {
 		panic("Axis out of range")
 	}
-	
+
 	// Compute result shape (remove the reduced dimension)
 	result_shape := make([]uint, len(tensor.shape) - 1, allocator)
 	result_idx := 0
@@ -375,16 +375,16 @@ tensor_reduce :: proc(
 			result_idx += 1
 		}
 	}
-	
+
 	// Handle edge case: 1D tensor reduction results in scalar
 	if len(result_shape) == 0 {
 		result_shape = []uint{}
 	}
-	
+
 	result := tensor_alloc(T, result_shape, allocator, loc)
 	result_size := data_len(result)
 	axis_size := tensor.shape[axis_val]
-	
+
 	// Initialize result values
 	switch op {
 	case .SUM, .MEAN:
@@ -392,15 +392,15 @@ tensor_reduce :: proc(
 			result.data[i] = T(0)
 		}
 	case .MAX, .MIN:
-		// Will be set in the first iteration of the reduction loop
+	// Will be set in the first iteration of the reduction loop
 	}
-	
+
 	// Perform reduction
 	for result_linear_idx in 0 ..< result_size {
 		// Convert result linear index to multi-dimensional coordinates
 		result_coords := make([]uint, len(result.shape), context.temp_allocator)
 		defer delete(result_coords, context.temp_allocator)
-		
+
 		temp_idx := result_linear_idx
 		for dim := len(result.shape) - 1; dim >= 0; dim -= 1 {
 			if len(result.shape) > 0 {
@@ -408,11 +408,11 @@ tensor_reduce :: proc(
 				temp_idx /= result.shape[dim]
 			}
 		}
-		
+
 		// Map result coordinates to input tensor coordinates
 		input_coords := make([]uint, len(tensor.shape), context.temp_allocator)
 		defer delete(input_coords, context.temp_allocator)
-		
+
 		input_coord_idx := 0
 		for dim in 0 ..< len(tensor.shape) {
 			if dim != axis_val {
@@ -420,7 +420,7 @@ tensor_reduce :: proc(
 				input_coord_idx += 1
 			}
 		}
-		
+
 		// Reduce along the specified axis
 		switch op {
 		case .SUM, .MEAN:
@@ -434,7 +434,7 @@ tensor_reduce :: proc(
 			if op == .MEAN {
 				result.data[result_linear_idx] /= T(axis_size)
 			}
-			
+
 		case .MAX:
 			input_coords[axis_val] = 0
 			linear_idx := compute_linear_index(input_coords, tensor.strides)
@@ -447,7 +447,7 @@ tensor_reduce :: proc(
 				}
 			}
 			result.data[result_linear_idx] = max_value
-			
+
 		case .MIN:
 			input_coords[axis_val] = 0
 			linear_idx := compute_linear_index(input_coords, tensor.strides)
@@ -462,7 +462,7 @@ tensor_reduce :: proc(
 			result.data[result_linear_idx] = min_value
 		}
 	}
-	
+
 	return result
 }
 
@@ -508,3 +508,106 @@ tensor_min :: proc(
 	return tensor_reduce(tensor, .MIN, axis, allocator, loc)
 }
 
+// Unary operation types for compile-time dispatch
+UnaryOp :: enum {
+	NEG, // Negation: -x
+	RELU, // ReLU: max(x, 0)
+	GELU, // GELU activation function
+}
+
+// Individual operation implementations - forced inline for zero overhead
+@(private)
+unary_neg :: #force_inline proc($T: typeid, x: T) -> T {
+	return -x
+}
+
+@(private)
+unary_relu :: #force_inline proc($T: typeid, x: T) -> T {
+	return math.max(x, T(0))
+}
+
+@(private)
+unary_gelu :: #force_inline proc($T: typeid, x: T) -> T where T == f32 || T == f64 || T == f16 {
+	sqrt_2_over_pi := math.sqrt(T(2.0) / math.PI)
+	inner := sqrt_2_over_pi * (x + T(0.044715) * x * x * x)
+	return T(0.5) * x * (T(1.0) + math.tanh(inner))
+}
+
+// Generic elementwise unary operation with compile-time specialization
+elementwise_unary_op :: proc(
+	tensor: ^Tensor($T),
+	$op: UnaryOp,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	result := tensor_alloc(T, tensor.shape, allocator, loc)
+
+	// Fast path for contiguous tensors
+	if tensor.contiguous {
+		for i in 0 ..< len(tensor.data) {
+			switch op {
+			case .NEG:
+				result.data[i] = unary_neg(T, tensor.data[i])
+			case .RELU:
+				result.data[i] = unary_relu(T, tensor.data[i])
+			case .GELU:
+				when T == f32 || T == f64 || T == f16 {
+					result.data[i] = unary_gelu(T, tensor.data[i])
+				} else {
+					panic("GELU only supports f16, f32, f64")
+				}
+			}
+		}
+	} else {
+		// Strided access for non-contiguous tensors
+		total_elements := data_len(tensor)
+		for i in 0 ..< total_elements {
+			strided_idx := compute_strided_index(tensor.shape, tensor.strides, i)
+			switch op {
+			case .NEG:
+				result.data[i] = unary_neg(T, tensor.data[strided_idx])
+			case .RELU:
+				result.data[i] = unary_relu(T, tensor.data[strided_idx])
+			case .GELU:
+				when T == f32 || T == f64 || T == f16 {
+					result.data[i] = unary_gelu(T, tensor.data[strided_idx])
+				} else {
+					panic("GELU only supports f16, f32, f64")
+				}
+			}
+		}
+	}
+
+	return result
+}
+
+// Convenience wrapper functions
+
+// Negation operation: -x
+tensor_neg :: proc(
+	tensor: ^Tensor($T),
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	return elementwise_unary_op(tensor, .NEG, allocator, loc)
+}
+
+// ReLU activation: max(x, 0)
+tensor_relu :: proc(
+	tensor: ^Tensor($T),
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	return elementwise_unary_op(tensor, .RELU, allocator, loc)
+}
+
+// GELU activation function - only supports floating point types
+tensor_gelu :: proc(
+	tensor: ^Tensor($T),
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) where T == f32 ||
+	T == f64 ||
+	T == f16 {
+	return elementwise_unary_op(tensor, .GELU, allocator, loc)
+}

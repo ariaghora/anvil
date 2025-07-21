@@ -20,16 +20,4 @@ main :: proc() {
 	tensor.print(t2, max_print_elements_per_dim = 4)
 	tensor.free_tensor(t2, allocator = context.temp_allocator)
 
-
-	// // f32
-	// a32 := []f32{1, 2, 3, 4}
-	// b32 := []f32{5, 6, 7, 8}
-	// c32 := matmul.matmul(a32, b32, 2, 2, 2)
-	// fmt.println(c32)
-
-	// // f64
-	// a64 := []f64{1, 2, 3, 4}
-	// b64 := []f64{5, 6, 7, 8}
-	// c64 := matmul.matmul(a64, b64, 2, 2, 2)
-	// fmt.println(c64)
 }
