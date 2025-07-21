@@ -260,3 +260,251 @@ tensor_divide :: proc(
 	return elementwise_binary_op(a, b, .DIVIDE, allocator, loc)
 }
 
+// Reduction operation types for compile-time dispatch
+ReduceOp :: enum {
+	SUM,
+	MEAN, 
+	MAX,
+	MIN,
+}
+
+// Generic tensor reduction with compile-time specialization
+// If axis is nil, reduce all dimensions (return scalar)
+// If axis is specified, reduce along that axis only
+tensor_reduce :: proc(
+	tensor: ^Tensor($T),
+	$op: ReduceOp,
+	axis: Maybe(int) = nil,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	// Handle reduction along all dimensions (result is scalar)
+	if axis == nil {
+		result := tensor_alloc(T, []uint{}, allocator, loc) // Scalar tensor
+		total_elements := data_len(tensor)
+		
+		if total_elements == 0 {
+			panic("Cannot reduce empty tensor")
+		}
+		
+		// Initialize with appropriate identity value
+		initial_value: T
+		switch op {
+		case .SUM, .MEAN:
+			initial_value = T(0)
+		case .MAX, .MIN:
+			// For max/min, initialize with first element
+			initial_value = tensor.data[0] if len(tensor.data) > 0 else T(0)
+		}
+		
+		result_value := initial_value
+		
+		// Fast path for contiguous tensors
+		if tensor.contiguous {
+			switch op {
+			case .SUM, .MEAN:
+				for i in 0 ..< len(tensor.data) {
+					result_value += tensor.data[i]
+				}
+				if op == .MEAN {
+					result_value /= T(total_elements)
+				}
+			case .MAX:
+				result_value = tensor.data[0]
+				for i in 1 ..< len(tensor.data) {
+					if tensor.data[i] > result_value {
+						result_value = tensor.data[i]
+					}
+				}
+			case .MIN:
+				result_value = tensor.data[0]
+				for i in 1 ..< len(tensor.data) {
+					if tensor.data[i] < result_value {
+						result_value = tensor.data[i]
+					}
+				}
+			}
+		} else {
+			// Strided access for non-contiguous tensors
+			switch op {
+			case .SUM, .MEAN:
+				for i in 0 ..< total_elements {
+					strided_idx := compute_strided_index(tensor.shape, tensor.strides, i)
+					result_value += tensor.data[strided_idx]
+				}
+				if op == .MEAN {
+					result_value /= T(total_elements)
+				}
+			case .MAX:
+				strided_idx := compute_strided_index(tensor.shape, tensor.strides, 0)
+				result_value = tensor.data[strided_idx]
+				for i in 1 ..< total_elements {
+					strided_idx = compute_strided_index(tensor.shape, tensor.strides, i)
+					if tensor.data[strided_idx] > result_value {
+						result_value = tensor.data[strided_idx]
+					}
+				}
+			case .MIN:
+				strided_idx := compute_strided_index(tensor.shape, tensor.strides, 0)
+				result_value = tensor.data[strided_idx]
+				for i in 1 ..< total_elements {
+					strided_idx = compute_strided_index(tensor.shape, tensor.strides, i)
+					if tensor.data[strided_idx] < result_value {
+						result_value = tensor.data[strided_idx]
+					}
+				}
+			}
+		}
+		
+		result.data[0] = result_value
+		return result
+	}
+	
+	// Handle reduction along specific axis
+	axis_val := axis.(int)
+	if axis_val < 0 || axis_val >= len(tensor.shape) {
+		panic("Axis out of range")
+	}
+	
+	// Compute result shape (remove the reduced dimension)
+	result_shape := make([]uint, len(tensor.shape) - 1, allocator)
+	result_idx := 0
+	for i in 0 ..< len(tensor.shape) {
+		if i != axis_val {
+			result_shape[result_idx] = tensor.shape[i]
+			result_idx += 1
+		}
+	}
+	
+	// Handle edge case: 1D tensor reduction results in scalar
+	if len(result_shape) == 0 {
+		result_shape = []uint{}
+	}
+	
+	result := tensor_alloc(T, result_shape, allocator, loc)
+	result_size := data_len(result)
+	axis_size := tensor.shape[axis_val]
+	
+	// Initialize result values
+	switch op {
+	case .SUM, .MEAN:
+		for i in 0 ..< len(result.data) {
+			result.data[i] = T(0)
+		}
+	case .MAX, .MIN:
+		// Will be set in the first iteration of the reduction loop
+	}
+	
+	// Perform reduction
+	for result_linear_idx in 0 ..< result_size {
+		// Convert result linear index to multi-dimensional coordinates
+		result_coords := make([]uint, len(result.shape), context.temp_allocator)
+		defer delete(result_coords, context.temp_allocator)
+		
+		temp_idx := result_linear_idx
+		for dim := len(result.shape) - 1; dim >= 0; dim -= 1 {
+			if len(result.shape) > 0 {
+				result_coords[dim] = temp_idx % result.shape[dim]
+				temp_idx /= result.shape[dim]
+			}
+		}
+		
+		// Map result coordinates to input tensor coordinates
+		input_coords := make([]uint, len(tensor.shape), context.temp_allocator)
+		defer delete(input_coords, context.temp_allocator)
+		
+		input_coord_idx := 0
+		for dim in 0 ..< len(tensor.shape) {
+			if dim != axis_val {
+				input_coords[dim] = result_coords[input_coord_idx]
+				input_coord_idx += 1
+			}
+		}
+		
+		// Reduce along the specified axis
+		switch op {
+		case .SUM, .MEAN:
+			sum_value: T = 0
+			for axis_idx in 0 ..< axis_size {
+				input_coords[axis_val] = axis_idx
+				linear_idx := compute_linear_index(input_coords, tensor.strides)
+				sum_value += tensor.data[linear_idx]
+			}
+			result.data[result_linear_idx] = sum_value
+			if op == .MEAN {
+				result.data[result_linear_idx] /= T(axis_size)
+			}
+			
+		case .MAX:
+			input_coords[axis_val] = 0
+			linear_idx := compute_linear_index(input_coords, tensor.strides)
+			max_value := tensor.data[linear_idx]
+			for axis_idx in 1 ..< axis_size {
+				input_coords[axis_val] = axis_idx
+				linear_idx = compute_linear_index(input_coords, tensor.strides)
+				if tensor.data[linear_idx] > max_value {
+					max_value = tensor.data[linear_idx]
+				}
+			}
+			result.data[result_linear_idx] = max_value
+			
+		case .MIN:
+			input_coords[axis_val] = 0
+			linear_idx := compute_linear_index(input_coords, tensor.strides)
+			min_value := tensor.data[linear_idx]
+			for axis_idx in 1 ..< axis_size {
+				input_coords[axis_val] = axis_idx
+				linear_idx = compute_linear_index(input_coords, tensor.strides)
+				if tensor.data[linear_idx] < min_value {
+					min_value = tensor.data[linear_idx]
+				}
+			}
+			result.data[result_linear_idx] = min_value
+		}
+	}
+	
+	return result
+}
+
+// Convenience wrapper functions
+
+// Sum reduction - reduce along all axes or specific axis
+tensor_sum :: proc(
+	tensor: ^Tensor($T),
+	axis: Maybe(int) = nil,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	return tensor_reduce(tensor, .SUM, axis, allocator, loc)
+}
+
+// Mean reduction - reduce along all axes or specific axis
+tensor_mean :: proc(
+	tensor: ^Tensor($T),
+	axis: Maybe(int) = nil,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	return tensor_reduce(tensor, .MEAN, axis, allocator, loc)
+}
+
+// Max reduction - reduce along all axes or specific axis
+tensor_max :: proc(
+	tensor: ^Tensor($T),
+	axis: Maybe(int) = nil,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	return tensor_reduce(tensor, .MAX, axis, allocator, loc)
+}
+
+// Min reduction - reduce along all axes or specific axis
+tensor_min :: proc(
+	tensor: ^Tensor($T),
+	axis: Maybe(int) = nil,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	return tensor_reduce(tensor, .MIN, axis, allocator, loc)
+}
+
