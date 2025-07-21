@@ -257,3 +257,69 @@ test_tensor_multiply :: proc(t: ^testing.T) {
 		testing.expect(t, slice.equal(result.shape, []uint{2, 2}), "Result shape incorrect")
 	}
 }
+
+@(test)
+test_tensor_subtract :: proc(t: ^testing.T) {
+	// Basic subtraction
+	{
+		a := new_with_init([]f32{10, 8, 6, 4}, []uint{2, 2}, context.temp_allocator)
+		defer free_tensor(a, context.temp_allocator)
+		
+		b := new_with_init([]f32{1, 2, 3, 4}, []uint{2, 2}, context.temp_allocator)
+		defer free_tensor(b, context.temp_allocator)
+
+		result := tensor_subtract(a, b, context.temp_allocator)
+		defer free_tensor(result, context.temp_allocator)
+
+		expected := []f32{9, 6, 3, 0}
+		testing.expect(t, slice.equal(result.data, expected), "Subtraction failed")
+	}
+
+	// Broadcasting subtraction
+	{
+		a := new_with_init([]f32{10, 20, 30}, []uint{3}, context.temp_allocator)
+		defer free_tensor(a, context.temp_allocator)
+		
+		b := new_with_init([]f32{5}, []uint{}, context.temp_allocator)  // scalar
+		defer free_tensor(b, context.temp_allocator)
+
+		result := tensor_subtract(a, b, context.temp_allocator)
+		defer free_tensor(result, context.temp_allocator)
+
+		expected := []f32{5, 15, 25}
+		testing.expect(t, slice.equal(result.data, expected), "Broadcasting subtraction failed")
+	}
+}
+
+@(test)
+test_tensor_divide :: proc(t: ^testing.T) {
+	// Basic division
+	{
+		a := new_with_init([]f32{12, 8, 6, 4}, []uint{2, 2}, context.temp_allocator)
+		defer free_tensor(a, context.temp_allocator)
+		
+		b := new_with_init([]f32{3, 2, 2, 1}, []uint{2, 2}, context.temp_allocator)
+		defer free_tensor(b, context.temp_allocator)
+
+		result := tensor_divide(a, b, context.temp_allocator)
+		defer free_tensor(result, context.temp_allocator)
+
+		expected := []f32{4, 4, 3, 4}
+		testing.expect(t, slice.equal(result.data, expected), "Division failed")
+	}
+
+	// Broadcasting division
+	{
+		a := new_with_init([]f32{10, 20, 30}, []uint{3}, context.temp_allocator)
+		defer free_tensor(a, context.temp_allocator)
+		
+		b := new_with_init([]f32{2}, []uint{}, context.temp_allocator)  // scalar
+		defer free_tensor(b, context.temp_allocator)
+
+		result := tensor_divide(a, b, context.temp_allocator)
+		defer free_tensor(result, context.temp_allocator)
+
+		expected := []f32{5, 10, 15}
+		testing.expect(t, slice.equal(result.data, expected), "Broadcasting division failed")
+	}
+}

@@ -94,10 +94,18 @@ broadcast_strides :: proc(
 	return result_strides
 }
 
-// Generic elementwise binary operation with broadcasting
+// Binary operation types for compile-time dispatch
+BinaryOp :: enum {
+	ADD,
+	MULTIPLY,
+	SUBTRACT,
+	DIVIDE,
+}
+
+// Generic elementwise binary operation with broadcasting using compile-time enum dispatch
 elementwise_binary_op :: proc(
 	a, b: ^Tensor($T),
-	op: proc(a, b: T) -> T,
+	$op: BinaryOp,
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
@@ -136,8 +144,17 @@ elementwise_binary_op :: proc(
 		a_idx := compute_linear_index(indices, a_strides)
 		b_idx := compute_linear_index(indices, b_strides)
 
-		// Apply operation
-		result.data[i] = op(a.data[a_idx], b.data[b_idx])
+		// Apply operation with compile-time dispatch
+		switch op {
+		case .ADD:
+			result.data[i] = a.data[a_idx] + b.data[b_idx]
+		case .MULTIPLY:
+			result.data[i] = a.data[a_idx] * b.data[b_idx]
+		case .SUBTRACT:
+			result.data[i] = a.data[a_idx] - b.data[b_idx]
+		case .DIVIDE:
+			result.data[i] = a.data[a_idx] / b.data[b_idx]
+		}
 	}
 
 	return result
@@ -149,8 +166,7 @@ tensor_add :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
-	add_op :: proc(x, y: T) -> T { return x + y }
-	return elementwise_binary_op(a, b, add_op, allocator, loc)
+	return elementwise_binary_op(a, b, .ADD, allocator, loc)
 }
 
 // Multiplication operation
@@ -159,7 +175,24 @@ tensor_multiply :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
-	mul_op :: proc(x, y: T) -> T { return x * y }
-	return elementwise_binary_op(a, b, mul_op, allocator, loc)
+	return elementwise_binary_op(a, b, .MULTIPLY, allocator, loc)
+}
+
+// Subtraction operation
+tensor_subtract :: proc(
+	a, b: ^Tensor($T),
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	return elementwise_binary_op(a, b, .SUBTRACT, allocator, loc)
+}
+
+// Division operation
+tensor_divide :: proc(
+	a, b: ^Tensor($T),
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	return elementwise_binary_op(a, b, .DIVIDE, allocator, loc)
 }
 
