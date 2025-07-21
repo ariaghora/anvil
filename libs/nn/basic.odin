@@ -40,21 +40,21 @@ import "core:testing"
 
 @(test)
 test_new_linear :: proc(t: ^testing.T) {
-	l := new_linear(f32, 10, 10)
+	l := new_linear(f32, 10, 10, allocator = context.temp_allocator)
 	b, ok := l.b.?
 	assert(ok)
 
-	x := tensor.randn(f32, []uint{5, 10}, 0.0, 1.0)
-	out := forward_linear(l, x)
+	x := tensor.randn(f32, []uint{5, 10}, 0.0, 1.0, context.temp_allocator)
+	out := forward_linear(l, x, context.temp_allocator)
 	assert(out.shape[1] == 10)
 
-	tensor.free_tensor(out)
-	tensor.free_tensor(x)
-	free_linear(l)
+	tensor.free_tensor(out, context.temp_allocator)
+	tensor.free_tensor(x, context.temp_allocator)
+	free_linear(l, context.temp_allocator)
 
-	l = new_linear(f32, 10, 10, use_bias = false)
+	l = new_linear(f32, 10, 10, use_bias = false, allocator = context.temp_allocator)
 	b, ok = l.b.?
 	assert(!ok)
 
-	free_linear(l)
+	free_linear(l, context.temp_allocator)
 }
