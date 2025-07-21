@@ -323,3 +323,79 @@ test_tensor_divide :: proc(t: ^testing.T) {
 		testing.expect(t, slice.equal(result.data, expected), "Broadcasting division failed")
 	}
 }
+
+@(test)
+test_fast_path_same_shape_contiguous :: proc(t: ^testing.T) {
+	// 2D case
+	{
+		a := new_with_init([]f32{1, 2, 3, 4}, []uint{2, 2}, context.temp_allocator)
+		defer free_tensor(a, context.temp_allocator)
+		
+		b := new_with_init([]f32{5, 6, 7, 8}, []uint{2, 2}, context.temp_allocator)
+		defer free_tensor(b, context.temp_allocator)
+
+		result := tensor_add(a, b, context.temp_allocator)
+		defer free_tensor(result, context.temp_allocator)
+
+		expected := []f32{6, 8, 10, 12}
+		testing.expect(t, slice.equal(result.data, expected), "Same shape 2D addition failed")
+		testing.expect(t, result.contiguous, "Result should be contiguous")
+	}
+
+	// 4D case - higher dimensions
+	{
+		data_a := []f32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+		data_b := []f32{2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2}
+		
+		a := new_with_init(data_a, []uint{2, 2, 2, 2}, context.temp_allocator)
+		defer free_tensor(a, context.temp_allocator)
+		
+		b := new_with_init(data_b, []uint{2, 2, 2, 2}, context.temp_allocator)
+		defer free_tensor(b, context.temp_allocator)
+
+		result := tensor_multiply(a, b, context.temp_allocator)
+		defer free_tensor(result, context.temp_allocator)
+
+		expected := []f32{2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32}
+		testing.expect(t, slice.equal(result.data, expected), "Same shape 4D multiplication failed")
+		testing.expect(t, slice.equal(result.shape, []uint{2, 2, 2, 2}), "4D shape preserved")
+	}
+}
+
+@(test)
+test_fast_path_scalar_broadcasting :: proc(t: ^testing.T) {
+	// 3D tensor + scalar
+	{
+		data_a := []f32{1, 2, 3, 4, 5, 6, 7, 8}
+		a := new_with_init(data_a, []uint{2, 2, 2}, context.temp_allocator)
+		defer free_tensor(a, context.temp_allocator)
+		
+		b := new_with_init([]f32{10}, []uint{}, context.temp_allocator)  // scalar
+		defer free_tensor(b, context.temp_allocator)
+
+		result := tensor_subtract(a, b, context.temp_allocator)
+		defer free_tensor(result, context.temp_allocator)
+
+		expected := []f32{-9, -8, -7, -6, -5, -4, -3, -2}
+		testing.expect(t, slice.equal(result.data, expected), "3D scalar subtraction failed")
+		testing.expect(t, slice.equal(result.shape, []uint{2, 2, 2}), "3D shape preserved")
+	}
+
+	// 5D tensor + scalar - very high dimensions
+	{
+		// 2x1x3x1x2 = 12 elements
+		data_a := []f32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
+		a := new_with_init(data_a, []uint{2, 1, 3, 1, 2}, context.temp_allocator)
+		defer free_tensor(a, context.temp_allocator)
+		
+		b := new_with_init([]f32{0.5}, []uint{}, context.temp_allocator)  // scalar
+		defer free_tensor(b, context.temp_allocator)
+
+		result := tensor_divide(a, b, context.temp_allocator)
+		defer free_tensor(result, context.temp_allocator)
+
+		expected := []f32{2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24}
+		testing.expect(t, slice.equal(result.data, expected), "5D scalar division failed")
+		testing.expect(t, slice.equal(result.shape, []uint{2, 1, 3, 1, 2}), "5D shape preserved")
+	}
+}

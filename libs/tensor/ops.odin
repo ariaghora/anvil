@@ -109,42 +109,106 @@ elementwise_binary_op :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
-	// Check if shapes are broadcastable
+	// Fast path 1: Same shape and both contiguous (most common case)
+	if slice.equal(a.shape, b.shape) && a.contiguous && b.contiguous {
+		result := tensor_alloc(T, a.shape, allocator, loc)
+		total_elements := len(a.data)
+		
+		for i in 0 ..< total_elements {
+			switch op {
+			case .ADD:
+				result.data[i] = a.data[i] + b.data[i]
+			case .MULTIPLY:
+				result.data[i] = a.data[i] * b.data[i]
+			case .SUBTRACT:
+				result.data[i] = a.data[i] - b.data[i]
+			case .DIVIDE:
+				result.data[i] = a.data[i] / b.data[i]
+			}
+		}
+		return result
+	}
+
+	// Fast path 2: Scalar broadcasting (b is scalar)
+	if len(b.shape) == 0 {
+		result := tensor_alloc(T, a.shape, allocator, loc)
+		scalar_val := b.data[0]
+		total_elements := len(a.data)
+
+		if a.contiguous {
+			// Contiguous case
+			for i in 0 ..< total_elements {
+				switch op {
+				case .ADD:
+					result.data[i] = a.data[i] + scalar_val
+				case .MULTIPLY:
+					result.data[i] = a.data[i] * scalar_val
+				case .SUBTRACT:
+					result.data[i] = a.data[i] - scalar_val
+				case .DIVIDE:
+					result.data[i] = a.data[i] / scalar_val
+				}
+			}
+		} else {
+			// Non-contiguous case
+			shape_size := shape_to_size(a.shape)
+			for i in 0 ..< shape_size {
+				a_idx := compute_strided_index(a.shape, a.strides, i)
+				switch op {
+				case .ADD:
+					result.data[i] = a.data[a_idx] + scalar_val
+				case .MULTIPLY:
+					result.data[i] = a.data[a_idx] * scalar_val
+				case .SUBTRACT:
+					result.data[i] = a.data[a_idx] - scalar_val
+				case .DIVIDE:
+					result.data[i] = a.data[a_idx] / scalar_val
+				}
+			}
+		}
+		return result
+	}
+
+	// Fast path 3: Same shape and same strides (but not necessarily contiguous)
+	if slice.equal(a.shape, b.shape) && slice.equal(a.strides, b.strides) {
+		result := tensor_alloc(T, a.shape, allocator, loc)
+		total_elements := shape_to_size(a.shape)
+		
+		for i in 0 ..< total_elements {
+			idx := compute_strided_index(a.shape, a.strides, i)
+			switch op {
+			case .ADD:
+				result.data[i] = a.data[idx] + b.data[idx]
+			case .MULTIPLY:
+				result.data[i] = a.data[idx] * b.data[idx]
+			case .SUBTRACT:
+				result.data[i] = a.data[idx] - b.data[idx]
+			case .DIVIDE:
+				result.data[i] = a.data[idx] / b.data[idx]
+			}
+		}
+		return result
+	}
+
+	// General case: Full broadcasting
 	result_shape, broadcastable := shape_broadcastable(a.shape, b.shape, allocator, loc)
 	if !broadcastable {
 		panic("Tensors cannot be broadcasted together")
 	}
 	defer delete(result_shape, allocator, loc)
 
-	// Create result tensor
 	result := tensor_alloc(T, result_shape, allocator, loc)
-	// Strides are already computed in tensor_alloc
-
-	// Compute broadcasted strides for both tensors
 	a_strides := broadcast_strides(a.shape, result_shape, a.strides, context.temp_allocator)
 	defer delete(a_strides, context.temp_allocator)
 	
 	b_strides := broadcast_strides(b.shape, result_shape, b.strides, context.temp_allocator)
 	defer delete(b_strides, context.temp_allocator)
 
-	// Perform elementwise operation
 	total_elements := shape_to_size(result_shape)
 	for i in 0 ..< total_elements {
-		// Convert linear index to multidimensional indices
-		indices := make([]uint, len(result_shape), context.temp_allocator)
-		defer delete(indices, context.temp_allocator)
-		
-		temp_i := i
-		for dim := len(result_shape) - 1; dim >= 0; dim -= 1 {
-			indices[dim] = temp_i % result_shape[dim]
-			temp_i /= result_shape[dim]
-		}
+		a_idx := compute_strided_index(result_shape, a_strides, i)
+		b_idx := compute_strided_index(result_shape, b_strides, i)
 
-		// Compute linear indices for both tensors using broadcasted strides
-		a_idx := compute_linear_index(indices, a_strides)
-		b_idx := compute_linear_index(indices, b_strides)
-
-		// Apply operation with compile-time dispatch
 		switch op {
 		case .ADD:
 			result.data[i] = a.data[a_idx] + b.data[b_idx]
