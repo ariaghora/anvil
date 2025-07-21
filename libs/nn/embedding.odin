@@ -1,0 +1,3 @@
+package nn
+
+Embedding :: struct {}
