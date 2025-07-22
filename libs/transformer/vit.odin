@@ -26,7 +26,7 @@ forward_mlp :: proc(
 	fc1_out := nn.forward_linear(mlp.fc1, x, allocator, loc)
 	defer tensor.free_tensor(fc1_out, allocator)
 
-	gelu_out = tensor.tensor_gelu(fc1_out, allocator, loc)
+	gelu_out = tensor.gelu(fc1_out, allocator, loc)
 	defer tensor.free_tensor(gelu_out, allocator)
 
 	fc2_out = nn.forward_linear(gelu_out, out, allocator)

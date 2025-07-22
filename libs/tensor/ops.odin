@@ -233,7 +233,7 @@ elementwise_binary_op :: proc(
 }
 
 // Addition operation
-tensor_add :: proc(
+add :: proc(
 	a, b: ^Tensor($T),
 	allocator := context.allocator,
 	loc := #caller_location,
@@ -242,7 +242,7 @@ tensor_add :: proc(
 }
 
 // Multiplication operation
-tensor_multiply :: proc(
+mul :: proc(
 	a, b: ^Tensor($T),
 	allocator := context.allocator,
 	loc := #caller_location,
@@ -251,7 +251,7 @@ tensor_multiply :: proc(
 }
 
 // Subtraction operation
-tensor_subtract :: proc(
+sub :: proc(
 	a, b: ^Tensor($T),
 	allocator := context.allocator,
 	loc := #caller_location,
@@ -260,7 +260,7 @@ tensor_subtract :: proc(
 }
 
 // Division operation
-tensor_divide :: proc(
+div :: proc(
 	a, b: ^Tensor($T),
 	allocator := context.allocator,
 	loc := #caller_location,
@@ -635,7 +635,7 @@ elementwise_unary_op :: proc(
 // Convenience wrapper functions
 
 // Negation operation: -x
-tensor_neg :: proc(
+neg :: proc(
 	tensor: ^Tensor($T),
 	allocator := context.allocator,
 	loc := #caller_location,
@@ -644,7 +644,7 @@ tensor_neg :: proc(
 }
 
 // ReLU activation: max(x, 0)
-tensor_relu :: proc(
+relu :: proc(
 	tensor: ^Tensor($T),
 	allocator := context.allocator,
 	loc := #caller_location,
@@ -653,7 +653,7 @@ tensor_relu :: proc(
 }
 
 // GELU activation function - only supports floating point types
-tensor_gelu :: proc(
+gelu :: proc(
 	tensor: ^Tensor($T),
 	allocator := context.allocator,
 	loc := #caller_location,

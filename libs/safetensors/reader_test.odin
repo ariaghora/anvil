@@ -89,28 +89,20 @@ test_tensor_ff :: proc(t: ^testing.T) {
 	input_tensor := tensor.new_with_init(input, []uint{1, 28 * 28})
 	defer tensor.free_tensor(input_tensor)
 
-	h1 := tensor.tensor_relu(
-		tensor.tensor_add(
+	h1 := tensor.relu(
+		tensor.add(
 			tensor.matmul(input_tensor, i_wt, context.temp_allocator),
 			i_b,
 			context.temp_allocator,
 		),
 		context.temp_allocator,
 	)
-	h2 := tensor.tensor_relu(
-		tensor.tensor_add(
-			tensor.matmul(h1, m_wt, context.temp_allocator),
-			m_b,
-			context.temp_allocator,
-		),
+	h2 := tensor.relu(
+		tensor.add(tensor.matmul(h1, m_wt, context.temp_allocator), m_b, context.temp_allocator),
 		context.temp_allocator,
 	)
-	out := tensor.tensor_relu(
-		tensor.tensor_add(
-			tensor.matmul(h2, o_wt, context.temp_allocator),
-			o_b,
-			context.temp_allocator,
-		),
+	out := tensor.relu(
+		tensor.add(tensor.matmul(h2, o_wt, context.temp_allocator), o_b, context.temp_allocator),
 		context.temp_allocator,
 	)
 	class, ok_maxidx := slice.max_index(out.data)

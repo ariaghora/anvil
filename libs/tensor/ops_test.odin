@@ -1,7 +1,7 @@
 package tensor
 
-import "core:testing"
 import "core:slice"
+import "core:testing"
 
 @(test)
 test_shape_broadcastable :: proc(t: ^testing.T) {
@@ -162,11 +162,11 @@ test_tensor_add :: proc(t: ^testing.T) {
 	{
 		a := new_with_init([]f32{1, 2, 3, 4}, []uint{2, 2}, context.temp_allocator)
 		defer free_tensor(a, context.temp_allocator)
-		
+
 		b := new_with_init([]f32{5, 6, 7, 8}, []uint{2, 2}, context.temp_allocator)
 		defer free_tensor(b, context.temp_allocator)
 
-		result := tensor_add(a, b, context.temp_allocator)
+		result := add(a, b, context.temp_allocator)
 		defer free_tensor(result, context.temp_allocator)
 
 		expected := []f32{6, 8, 10, 12}
@@ -176,33 +176,41 @@ test_tensor_add :: proc(t: ^testing.T) {
 
 	// Broadcasting: scalar + tensor
 	{
-		a := new_with_init([]f32{5}, []uint{}, context.temp_allocator)  // scalar
+		a := new_with_init([]f32{5}, []uint{}, context.temp_allocator) // scalar
 		defer free_tensor(a, context.temp_allocator)
-		
+
 		b := new_with_init([]f32{1, 2, 3}, []uint{3}, context.temp_allocator)
 		defer free_tensor(b, context.temp_allocator)
 
-		result := tensor_add(a, b, context.temp_allocator)
+		result := add(a, b, context.temp_allocator)
 		defer free_tensor(result, context.temp_allocator)
 
 		expected := []f32{6, 7, 8}
-		testing.expect(t, slice.equal(result.data, expected), "Scalar broadcasting addition failed")
+		testing.expect(
+			t,
+			slice.equal(result.data, expected),
+			"Scalar broadcasting addition failed",
+		)
 		testing.expect(t, slice.equal(result.shape, []uint{3}), "Result shape incorrect")
 	}
 
 	// Broadcasting: different dimensions
 	{
-		a := new_with_init([]f32{1, 2}, []uint{2, 1}, context.temp_allocator)  // 2x1
+		a := new_with_init([]f32{1, 2}, []uint{2, 1}, context.temp_allocator) // 2x1
 		defer free_tensor(a, context.temp_allocator)
-		
-		b := new_with_init([]f32{10, 20, 30}, []uint{3}, context.temp_allocator)  // 3
+
+		b := new_with_init([]f32{10, 20, 30}, []uint{3}, context.temp_allocator) // 3
 		defer free_tensor(b, context.temp_allocator)
 
-		result := tensor_add(a, b, context.temp_allocator)
+		result := add(a, b, context.temp_allocator)
 		defer free_tensor(result, context.temp_allocator)
 
-		expected := []f32{11, 21, 31, 12, 22, 32}  // broadcast to 2x3
-		testing.expect(t, slice.equal(result.data, expected), "Dimension broadcasting addition failed")
+		expected := []f32{11, 21, 31, 12, 22, 32} // broadcast to 2x3
+		testing.expect(
+			t,
+			slice.equal(result.data, expected),
+			"Dimension broadcasting addition failed",
+		)
 		testing.expect(t, slice.equal(result.shape, []uint{2, 3}), "Result shape incorrect")
 	}
 }
@@ -213,11 +221,11 @@ test_tensor_multiply :: proc(t: ^testing.T) {
 	{
 		a := new_with_init([]f32{2, 3, 4, 5}, []uint{2, 2}, context.temp_allocator)
 		defer free_tensor(a, context.temp_allocator)
-		
+
 		b := new_with_init([]f32{3, 4, 5, 6}, []uint{2, 2}, context.temp_allocator)
 		defer free_tensor(b, context.temp_allocator)
 
-		result := tensor_multiply(a, b, context.temp_allocator)
+		result := mul(a, b, context.temp_allocator)
 		defer free_tensor(result, context.temp_allocator)
 
 		expected := []f32{6, 12, 20, 30}
@@ -227,33 +235,41 @@ test_tensor_multiply :: proc(t: ^testing.T) {
 
 	// Broadcasting: scalar * tensor
 	{
-		a := new_with_init([]f32{3}, []uint{}, context.temp_allocator)  // scalar
+		a := new_with_init([]f32{3}, []uint{}, context.temp_allocator) // scalar
 		defer free_tensor(a, context.temp_allocator)
-		
+
 		b := new_with_init([]f32{1, 2, 3}, []uint{3}, context.temp_allocator)
 		defer free_tensor(b, context.temp_allocator)
 
-		result := tensor_multiply(a, b, context.temp_allocator)
+		result := mul(a, b, context.temp_allocator)
 		defer free_tensor(result, context.temp_allocator)
 
 		expected := []f32{3, 6, 9}
-		testing.expect(t, slice.equal(result.data, expected), "Scalar broadcasting multiplication failed")
+		testing.expect(
+			t,
+			slice.equal(result.data, expected),
+			"Scalar broadcasting multiplication failed",
+		)
 		testing.expect(t, slice.equal(result.shape, []uint{3}), "Result shape incorrect")
 	}
 
 	// Broadcasting: matrix * vector
 	{
-		a := new_with_init([]f32{1, 2, 3, 4}, []uint{2, 2}, context.temp_allocator)  // 2x2
+		a := new_with_init([]f32{1, 2, 3, 4}, []uint{2, 2}, context.temp_allocator) // 2x2
 		defer free_tensor(a, context.temp_allocator)
-		
-		b := new_with_init([]f32{10, 20}, []uint{2}, context.temp_allocator)  // 2 (broadcasts to 1x2)
+
+		b := new_with_init([]f32{10, 20}, []uint{2}, context.temp_allocator) // 2 (broadcasts to 1x2)
 		defer free_tensor(b, context.temp_allocator)
 
-		result := tensor_multiply(a, b, context.temp_allocator)
+		result := mul(a, b, context.temp_allocator)
 		defer free_tensor(result, context.temp_allocator)
 
-		expected := []f32{10, 40, 30, 80}  // broadcast to 2x2
-		testing.expect(t, slice.equal(result.data, expected), "Matrix-vector broadcasting multiplication failed")
+		expected := []f32{10, 40, 30, 80} // broadcast to 2x2
+		testing.expect(
+			t,
+			slice.equal(result.data, expected),
+			"Matrix-vector broadcasting multiplication failed",
+		)
 		testing.expect(t, slice.equal(result.shape, []uint{2, 2}), "Result shape incorrect")
 	}
 }
@@ -264,11 +280,11 @@ test_tensor_subtract :: proc(t: ^testing.T) {
 	{
 		a := new_with_init([]f32{10, 8, 6, 4}, []uint{2, 2}, context.temp_allocator)
 		defer free_tensor(a, context.temp_allocator)
-		
+
 		b := new_with_init([]f32{1, 2, 3, 4}, []uint{2, 2}, context.temp_allocator)
 		defer free_tensor(b, context.temp_allocator)
 
-		result := tensor_subtract(a, b, context.temp_allocator)
+		result := sub(a, b, context.temp_allocator)
 		defer free_tensor(result, context.temp_allocator)
 
 		expected := []f32{9, 6, 3, 0}
@@ -279,11 +295,11 @@ test_tensor_subtract :: proc(t: ^testing.T) {
 	{
 		a := new_with_init([]f32{10, 20, 30}, []uint{3}, context.temp_allocator)
 		defer free_tensor(a, context.temp_allocator)
-		
-		b := new_with_init([]f32{5}, []uint{}, context.temp_allocator)  // scalar
+
+		b := new_with_init([]f32{5}, []uint{}, context.temp_allocator) // scalar
 		defer free_tensor(b, context.temp_allocator)
 
-		result := tensor_subtract(a, b, context.temp_allocator)
+		result := sub(a, b, context.temp_allocator)
 		defer free_tensor(result, context.temp_allocator)
 
 		expected := []f32{5, 15, 25}
@@ -297,11 +313,11 @@ test_tensor_divide :: proc(t: ^testing.T) {
 	{
 		a := new_with_init([]f32{12, 8, 6, 4}, []uint{2, 2}, context.temp_allocator)
 		defer free_tensor(a, context.temp_allocator)
-		
+
 		b := new_with_init([]f32{3, 2, 2, 1}, []uint{2, 2}, context.temp_allocator)
 		defer free_tensor(b, context.temp_allocator)
 
-		result := tensor_divide(a, b, context.temp_allocator)
+		result := div(a, b, context.temp_allocator)
 		defer free_tensor(result, context.temp_allocator)
 
 		expected := []f32{4, 4, 3, 4}
@@ -312,11 +328,11 @@ test_tensor_divide :: proc(t: ^testing.T) {
 	{
 		a := new_with_init([]f32{10, 20, 30}, []uint{3}, context.temp_allocator)
 		defer free_tensor(a, context.temp_allocator)
-		
-		b := new_with_init([]f32{2}, []uint{}, context.temp_allocator)  // scalar
+
+		b := new_with_init([]f32{2}, []uint{}, context.temp_allocator) // scalar
 		defer free_tensor(b, context.temp_allocator)
 
-		result := tensor_divide(a, b, context.temp_allocator)
+		result := div(a, b, context.temp_allocator)
 		defer free_tensor(result, context.temp_allocator)
 
 		expected := []f32{5, 10, 15}
@@ -330,11 +346,11 @@ test_fast_path_same_shape_contiguous :: proc(t: ^testing.T) {
 	{
 		a := new_with_init([]f32{1, 2, 3, 4}, []uint{2, 2}, context.temp_allocator)
 		defer free_tensor(a, context.temp_allocator)
-		
+
 		b := new_with_init([]f32{5, 6, 7, 8}, []uint{2, 2}, context.temp_allocator)
 		defer free_tensor(b, context.temp_allocator)
 
-		result := tensor_add(a, b, context.temp_allocator)
+		result := add(a, b, context.temp_allocator)
 		defer free_tensor(result, context.temp_allocator)
 
 		expected := []f32{6, 8, 10, 12}
@@ -346,18 +362,22 @@ test_fast_path_same_shape_contiguous :: proc(t: ^testing.T) {
 	{
 		data_a := []f32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
 		data_b := []f32{2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2}
-		
+
 		a := new_with_init(data_a, []uint{2, 2, 2, 2}, context.temp_allocator)
 		defer free_tensor(a, context.temp_allocator)
-		
+
 		b := new_with_init(data_b, []uint{2, 2, 2, 2}, context.temp_allocator)
 		defer free_tensor(b, context.temp_allocator)
 
-		result := tensor_multiply(a, b, context.temp_allocator)
+		result := mul(a, b, context.temp_allocator)
 		defer free_tensor(result, context.temp_allocator)
 
 		expected := []f32{2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32}
-		testing.expect(t, slice.equal(result.data, expected), "Same shape 4D multiplication failed")
+		testing.expect(
+			t,
+			slice.equal(result.data, expected),
+			"Same shape 4D multiplication failed",
+		)
 		testing.expect(t, slice.equal(result.shape, []uint{2, 2, 2, 2}), "4D shape preserved")
 	}
 }
@@ -369,11 +389,11 @@ test_fast_path_scalar_broadcasting :: proc(t: ^testing.T) {
 		data_a := []f32{1, 2, 3, 4, 5, 6, 7, 8}
 		a := new_with_init(data_a, []uint{2, 2, 2}, context.temp_allocator)
 		defer free_tensor(a, context.temp_allocator)
-		
-		b := new_with_init([]f32{10}, []uint{}, context.temp_allocator)  // scalar
+
+		b := new_with_init([]f32{10}, []uint{}, context.temp_allocator) // scalar
 		defer free_tensor(b, context.temp_allocator)
 
-		result := tensor_subtract(a, b, context.temp_allocator)
+		result := sub(a, b, context.temp_allocator)
 		defer free_tensor(result, context.temp_allocator)
 
 		expected := []f32{-9, -8, -7, -6, -5, -4, -3, -2}
@@ -387,11 +407,11 @@ test_fast_path_scalar_broadcasting :: proc(t: ^testing.T) {
 		data_a := []f32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
 		a := new_with_init(data_a, []uint{2, 1, 3, 1, 2}, context.temp_allocator)
 		defer free_tensor(a, context.temp_allocator)
-		
-		b := new_with_init([]f32{0.5}, []uint{}, context.temp_allocator)  // scalar
+
+		b := new_with_init([]f32{0.5}, []uint{}, context.temp_allocator) // scalar
 		defer free_tensor(b, context.temp_allocator)
 
-		result := tensor_divide(a, b, context.temp_allocator)
+		result := div(a, b, context.temp_allocator)
 		defer free_tensor(result, context.temp_allocator)
 
 		expected := []f32{2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24}

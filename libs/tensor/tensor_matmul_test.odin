@@ -14,7 +14,7 @@ test_tensor_matmul_2d :: proc(t: ^testing.T) {
 	defer free_tensor(a, context.temp_allocator)
 	defer free_tensor(b, context.temp_allocator)
 
-	result := tensor_matmul(a, b, context.temp_allocator)
+	result := matmul(a, b, context.temp_allocator)
 	defer free_tensor(result, context.temp_allocator)
 
 	// Expected: [[1*5+2*8, 1*6+2*9, 1*7+2*10], [3*5+4*8, 3*6+4*9, 3*7+4*10]]
@@ -68,7 +68,7 @@ test_tensor_matmul_3d_same_batch :: proc(t: ^testing.T) {
 	defer free_tensor(a, context.temp_allocator)
 	defer free_tensor(b, context.temp_allocator)
 
-	result := tensor_matmul(a, b, context.temp_allocator)
+	result := matmul(a, b, context.temp_allocator)
 	defer free_tensor(result, context.temp_allocator)
 
 	// Check shape
@@ -106,7 +106,7 @@ test_tensor_matmul_3d_broadcast :: proc(t: ^testing.T) {
 	defer free_tensor(a, context.temp_allocator)
 	defer free_tensor(b, context.temp_allocator)
 
-	result := tensor_matmul(a, b, context.temp_allocator)
+	result := matmul(a, b, context.temp_allocator)
 	defer free_tensor(result, context.temp_allocator)
 
 	expected_shape := []uint{2, 2, 2}
@@ -151,7 +151,7 @@ test_tensor_matmul_4d :: proc(t: ^testing.T) {
 	defer free_tensor(a, context.temp_allocator)
 	defer free_tensor(b, context.temp_allocator)
 
-	result := tensor_matmul(a, b, context.temp_allocator)
+	result := matmul(a, b, context.temp_allocator)
 	defer free_tensor(result, context.temp_allocator)
 
 	expected_shape := []uint{2, 3, 2, 2}

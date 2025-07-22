@@ -332,7 +332,7 @@ reshape :: proc(
 
 // Tensor-aware matrix multiplication with batch support and broadcasting
 // Supports 2D+ tensors: (...batch_dims, m, k) @ (...batch_dims, k, n) -> (...batch_dims, m, n)
-tensor_matmul :: proc(
+matmul :: proc(
 	a, b: ^Tensor($T),
 	allocator := context.allocator,
 	loc := #caller_location,
@@ -472,13 +472,6 @@ tensor_matmul :: proc(
 	return result
 }
 
-matmul :: proc(
-	a, b: ^Tensor($T),
-	allocator := context.allocator,
-	loc := #caller_location,
-) -> ^Tensor(T) {
-	return tensor_matmul(a, b, allocator, loc)
-}
 
 // General dimension permutation - specify new order of ALL dimensions
 // Example: permute(tensor, [2, 0, 1]) reorders dims so that dim 0->2, dim 1->0, dim 2->1
