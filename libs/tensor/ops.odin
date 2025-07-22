@@ -614,38 +614,17 @@ elementwise_unary_op :: proc(
 ) -> ^Tensor(T) {
 	result := tensor_alloc(T, tensor.shape, true, allocator, loc)
 
-	// Fast path for contiguous tensors
-	if tensor.contiguous {
-		for i in 0 ..< len(tensor.data) {
-			switch op {
-			case .NEG:
-				result.data[i] = unary_neg(T, tensor.data[i])
-			case .RELU:
-				result.data[i] = unary_relu(T, tensor.data[i])
-			case .GELU:
-				when T == f32 || T == f64 || T == f16 {
-					result.data[i] = unary_gelu(T, tensor.data[i])
-				} else {
-					panic("GELU only supports f16, f32, f64")
-				}
-			}
-		}
-	} else {
-		// Strided access for non-contiguous tensors
-		total_elements := data_len(tensor)
-		for i in 0 ..< total_elements {
-			strided_idx := compute_strided_index(tensor.shape, tensor.strides, i)
-			switch op {
-			case .NEG:
-				result.data[i] = unary_neg(T, tensor.data[strided_idx])
-			case .RELU:
-				result.data[i] = unary_relu(T, tensor.data[strided_idx])
-			case .GELU:
-				when T == f32 || T == f64 || T == f16 {
-					result.data[i] = unary_gelu(T, tensor.data[strided_idx])
-				} else {
-					panic("GELU only supports f16, f32, f64")
-				}
+	for i in 0 ..< len(tensor.data) {
+		switch op {
+		case .NEG:
+			result.data[i] = unary_neg(T, tensor.data[i])
+		case .RELU:
+			result.data[i] = unary_relu(T, tensor.data[i])
+		case .GELU:
+			when T == f32 || T == f64 || T == f16 {
+				result.data[i] = unary_gelu(T, tensor.data[i])
+			} else {
+				panic("GELU only supports f16, f32, f64")
 			}
 		}
 	}
