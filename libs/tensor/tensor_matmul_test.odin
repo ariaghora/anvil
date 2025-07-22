@@ -1,5 +1,6 @@
 package tensor
 
+import "../tensor"
 import "core:slice"
 import "core:testing"
 
@@ -188,4 +189,14 @@ test_tensor_matmul_errors :: proc(t: ^testing.T) {
 		// Should panic due to dimension mismatch (3 != 2)
 		// tensor_matmul(a, b, context.temp_allocator) // Should panic
 	}
+}
+
+@(test)
+test_tensor_matmul_noncontiguous :: proc(t: ^testing.T) {
+	a := new_with_init([]f32{1, 2, 3, 4}, []uint{2, 2}, context.temp_allocator)
+	b := new_with_init([]f32{1, 1, 2, 2}, []uint{2, 2}, context.temp_allocator)
+	b = tensor.transpose(b, 0, 1, context.temp_allocator)
+	testing.expect(t, !b.contiguous)
+	c := tensor.matmul(a, b, context.temp_allocator)
+	testing.expect(t, slice.equal(c.data, []f32{3, 6, 7, 14}))
 }

@@ -382,8 +382,8 @@ tensor_matmul :: proc(
 	// Compute broadcasted strides for batch dimensions
 	a_full_batch := make([]uint, len(result_batch), context.temp_allocator)
 	b_full_batch := make([]uint, len(result_batch), context.temp_allocator)
-	defer delete(a_full_batch, context.temp_allocator)
-	defer delete(b_full_batch, context.temp_allocator)
+	// defer delete(a_full_batch, context.temp_allocator)
+	// defer delete(b_full_batch, context.temp_allocator)
 
 	// Pad batch dimensions with 1s if needed for stride calculation
 	if len(a_batch) < len(result_batch) {
@@ -433,6 +433,11 @@ tensor_matmul :: proc(
 		}
 	}
 
+	a_data := a.data
+	b_data := b.data
+	if !a.contiguous do a_data = get_strided_data(a, a.shape, a.strides, context.temp_allocator)
+	if !b.contiguous do b_data = get_strided_data(b, b.shape, b.strides, context.temp_allocator)
+
 	// Process each batch
 	for batch_idx in 0 ..< batch_size {
 		// Calculate batch indices
@@ -454,8 +459,8 @@ tensor_matmul :: proc(
 		}
 
 		// Get slices for this batch's matrices
-		a_matrix := a.data[a_offset:a_offset + matrix_size_a]
-		b_matrix := b.data[b_offset:b_offset + matrix_size_b]
+		a_matrix := a_data[a_offset:a_offset + matrix_size_a]
+		b_matrix := b_data[b_offset:b_offset + matrix_size_b]
 		result_matrix := result.data[batch_idx *
 		matrix_size_result:(batch_idx + 1) *
 		matrix_size_result]
