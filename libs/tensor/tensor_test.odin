@@ -52,7 +52,6 @@ test_strided_index :: proc(t: ^testing.T) {
 	}
 }
 
-import "core:fmt"
 @(test)
 test_matmul :: proc(t: ^testing.T) {
 	a := new_with_init([]f32{1, 2, 3, 4, 5, 6}, []uint{3, 2}, allocator = context.temp_allocator)
@@ -62,5 +61,23 @@ test_matmul :: proc(t: ^testing.T) {
 	expected := []f32{3, 7, 11}
 	for i in 0 ..< len(expected) {
 		assert(expected[i] == res.data[i])
+	}
+}
+
+@(test)
+test_get_strided_data :: proc(t: ^testing.T) {
+	// Test get_strided_data with non-contiguous tensor
+	original := new_with_init([]f32{1, 2, 3, 4}, []uint{2, 2}, allocator = context.temp_allocator)
+	transposed := transpose(original, 0, 1, allocator = context.temp_allocator)
+
+	// Extract data with strided access
+	strided_data := get_strided_data(transposed, allocator = context.temp_allocator)
+
+	// Expected: [1, 3, 2, 4] (transpose of [[1,2],[3,4]] is [[1,3],[2,4]])
+	expected := []f32{1, 3, 2, 4}
+	testing.expect_value(t, len(strided_data), len(expected))
+
+	for i in 0 ..< len(expected) {
+		testing.expect_value(t, strided_data[i], expected[i])
 	}
 }

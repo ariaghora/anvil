@@ -1,5 +1,6 @@
 package tensor
 
+import "core:fmt"
 import "core:math"
 import "core:slice"
 import "core:testing"
@@ -10,7 +11,7 @@ test_tensor_sum_all :: proc(t: ^testing.T) {
 	tensor := new_with_init(data, []uint{2, 3}, context.temp_allocator)
 	defer free_tensor(tensor, context.temp_allocator)
 
-	result := tensor_sum(tensor, nil, context.temp_allocator)
+	result := tensor_sum(tensor, nil, false, context.temp_allocator)
 	defer free_tensor(result, context.temp_allocator)
 
 	// Result should be scalar (empty shape)
@@ -26,7 +27,7 @@ test_tensor_sum_axis :: proc(t: ^testing.T) {
 	defer free_tensor(tensor, context.temp_allocator)
 
 	// Sum along axis 0 (columns): [1+4, 2+5, 3+6] = [5, 7, 9]
-	result0 := tensor_sum(tensor, 0, context.temp_allocator)
+	result0 := tensor_sum(tensor, 0, false, context.temp_allocator)
 	defer free_tensor(result0, context.temp_allocator)
 
 	expected_shape0 := []uint{3}
@@ -35,7 +36,7 @@ test_tensor_sum_axis :: proc(t: ^testing.T) {
 	testing.expect(t, slice.equal(result0.data, expected_data0), "Sum axis 0 values incorrect")
 
 	// Sum along axis 1 (rows): [1+2+3, 4+5+6] = [6, 15]
-	result1 := tensor_sum(tensor, 1, context.temp_allocator)
+	result1 := tensor_sum(tensor, 1, false, context.temp_allocator)
 	defer free_tensor(result1, context.temp_allocator)
 
 	expected_shape1 := []uint{2}
@@ -50,7 +51,7 @@ test_tensor_mean_all :: proc(t: ^testing.T) {
 	tensor := new_with_init(data, []uint{2, 3}, context.temp_allocator)
 	defer free_tensor(tensor, context.temp_allocator)
 
-	result := tensor_mean(tensor, nil, context.temp_allocator)
+	result := tensor_mean(tensor, nil, false, context.temp_allocator)
 	defer free_tensor(result, context.temp_allocator)
 
 	// Result should be scalar
@@ -66,7 +67,7 @@ test_tensor_mean_axis :: proc(t: ^testing.T) {
 	defer free_tensor(tensor, context.temp_allocator)
 
 	// Mean along axis 0: [2.5, 3.5, 4.5]
-	result0 := tensor_mean(tensor, 0, context.temp_allocator)
+	result0 := tensor_mean(tensor, 0, false, context.temp_allocator)
 	defer free_tensor(result0, context.temp_allocator)
 
 	expected_shape0 := []uint{3}
@@ -76,7 +77,7 @@ test_tensor_mean_axis :: proc(t: ^testing.T) {
 	testing.expect(t, math.abs(result0.data[2] - 4.5) < 1e-6, "Mean axis 0 value 2 incorrect")
 
 	// Mean along axis 1: [2.0, 5.0]
-	result1 := tensor_mean(tensor, 1, context.temp_allocator)
+	result1 := tensor_mean(tensor, 1, false, context.temp_allocator)
 	defer free_tensor(result1, context.temp_allocator)
 
 	expected_shape1 := []uint{2}
@@ -91,7 +92,7 @@ test_tensor_max_all :: proc(t: ^testing.T) {
 	tensor := new_with_init(data, []uint{2, 3}, context.temp_allocator)
 	defer free_tensor(tensor, context.temp_allocator)
 
-	result := tensor_max(tensor, nil, context.temp_allocator)
+	result := tensor_max(tensor, nil, false, context.temp_allocator)
 	defer free_tensor(result, context.temp_allocator)
 
 	// Result should be scalar with max value 6
@@ -106,7 +107,7 @@ test_tensor_max_axis :: proc(t: ^testing.T) {
 	defer free_tensor(tensor, context.temp_allocator)
 
 	// Max along axis 0: [max(1,2), max(6,5), max(3,4)] = [2, 6, 4]
-	result0 := tensor_max(tensor, 0, context.temp_allocator)
+	result0 := tensor_max(tensor, 0, false, context.temp_allocator)
 	defer free_tensor(result0, context.temp_allocator)
 
 	expected_shape0 := []uint{3}
@@ -115,7 +116,7 @@ test_tensor_max_axis :: proc(t: ^testing.T) {
 	testing.expect(t, slice.equal(result0.data, expected_data0), "Max axis 0 values incorrect")
 
 	// Max along axis 1: [max(1,6,3), max(2,5,4)] = [6, 5]
-	result1 := tensor_max(tensor, 1, context.temp_allocator)
+	result1 := tensor_max(tensor, 1, false, context.temp_allocator)
 	defer free_tensor(result1, context.temp_allocator)
 
 	expected_shape1 := []uint{2}
@@ -130,7 +131,7 @@ test_tensor_min_all :: proc(t: ^testing.T) {
 	tensor := new_with_init(data, []uint{2, 3}, context.temp_allocator)
 	defer free_tensor(tensor, context.temp_allocator)
 
-	result := tensor_min(tensor, nil, context.temp_allocator)
+	result := tensor_min(tensor, nil, false, context.temp_allocator)
 	defer free_tensor(result, context.temp_allocator)
 
 	// Result should be scalar with min value 1
@@ -145,7 +146,7 @@ test_tensor_min_axis :: proc(t: ^testing.T) {
 	defer free_tensor(tensor, context.temp_allocator)
 
 	// Min along axis 0: [min(5,3), min(2,1), min(7,6)] = [3, 1, 6]
-	result0 := tensor_min(tensor, 0, context.temp_allocator)
+	result0 := tensor_min(tensor, 0, false, context.temp_allocator)
 	defer free_tensor(result0, context.temp_allocator)
 
 	expected_shape0 := []uint{3}
@@ -154,7 +155,7 @@ test_tensor_min_axis :: proc(t: ^testing.T) {
 	testing.expect(t, slice.equal(result0.data, expected_data0), "Min axis 0 values incorrect")
 
 	// Min along axis 1: [min(5,2,7), min(3,1,6)] = [2, 1]
-	result1 := tensor_min(tensor, 1, context.temp_allocator)
+	result1 := tensor_min(tensor, 1, false, context.temp_allocator)
 	defer free_tensor(result1, context.temp_allocator)
 
 	expected_shape1 := []uint{2}
@@ -174,7 +175,7 @@ test_reduce_3d :: proc(t: ^testing.T) {
 	defer free_tensor(tensor, context.temp_allocator)
 
 	// Sum along axis 1 (middle dimension): (2,3,4) -> (2,4)
-	result := tensor_sum(tensor, 1, context.temp_allocator)
+	result := tensor_sum(tensor, 1, false, context.temp_allocator)
 	defer free_tensor(result, context.temp_allocator)
 
 	expected_shape := []uint{2, 4}
@@ -194,7 +195,7 @@ test_reduce_1d_to_scalar :: proc(t: ^testing.T) {
 	defer free_tensor(tensor, context.temp_allocator)
 
 	// Sum along axis 0 should produce scalar
-	result := tensor_sum(tensor, 0, context.temp_allocator)
+	result := tensor_sum(tensor, 0, false, context.temp_allocator)
 	defer free_tensor(result, context.temp_allocator)
 
 	testing.expect(t, len(result.shape) == 0, "1D sum should produce scalar")
@@ -215,7 +216,7 @@ test_reduce_non_contiguous :: proc(t: ^testing.T) {
 	testing.expect(t, !transposed.contiguous, "Transposed tensor should be non-contiguous")
 
 	// Sum all should still work correctly
-	result := tensor_sum(transposed, nil, context.temp_allocator)
+	result := tensor_sum(transposed, nil, false, context.temp_allocator)
 	defer free_tensor(result, context.temp_allocator)
 
 	testing.expect(t, result.data[0] == 21, "Non-contiguous sum all incorrect")
@@ -228,10 +229,10 @@ test_reduce_compile_time_specialization :: proc(t: ^testing.T) {
 	defer free_tensor(tensor, context.temp_allocator)
 
 	// Test direct calls to tensor_reduce with different compile-time ops
-	sum_result := tensor_reduce(tensor, .SUM, nil, context.temp_allocator)
-	mean_result := tensor_reduce(tensor, .MEAN, nil, context.temp_allocator)
-	max_result := tensor_reduce(tensor, .MAX, nil, context.temp_allocator)
-	min_result := tensor_reduce(tensor, .MIN, nil, context.temp_allocator)
+	sum_result := tensor_reduce(tensor, .SUM, nil, false, context.temp_allocator)
+	mean_result := tensor_reduce(tensor, .MEAN, nil, false, context.temp_allocator)
+	max_result := tensor_reduce(tensor, .MAX, nil, false, context.temp_allocator)
+	min_result := tensor_reduce(tensor, .MIN, nil, false, context.temp_allocator)
 
 	defer free_tensor(sum_result, context.temp_allocator)
 	defer free_tensor(mean_result, context.temp_allocator)
@@ -255,4 +256,39 @@ test_reduce_error_cases :: proc(t: ^testing.T) {
 	// tensor_sum(tensor, -1, context.temp_allocator) // Negative axis - should panic
 
 	testing.expect(t, true, "Error cases documented")
+}
+
+@(test)
+test_tensor_sum_keepdims :: proc(t: ^testing.T) {
+	data := []f32{1, 2, 3, 4, 5, 6} // [[1,2,3], [4,5,6]]
+	tensor := new_with_init(data, []uint{2, 3}, context.temp_allocator)
+	defer free_tensor(tensor, context.temp_allocator)
+
+	// Test keepdims=true for all reduction
+	result_all_keepdims := tensor_sum(tensor, nil, true, context.temp_allocator)
+	defer free_tensor(result_all_keepdims, context.temp_allocator)
+	
+	expected_shape_all_keepdims := []uint{1, 1}
+	testing.expect(t, slice.equal(result_all_keepdims.shape, expected_shape_all_keepdims), "Sum all keepdims shape incorrect")
+	testing.expect(t, result_all_keepdims.data[0] == 21, "Sum all keepdims value incorrect")
+
+	// Test keepdims=true for axis 0
+	result_axis0_keepdims := tensor_sum(tensor, 0, true, context.temp_allocator)
+	defer free_tensor(result_axis0_keepdims, context.temp_allocator)
+	
+	expected_shape_axis0_keepdims := []uint{1, 3}
+	expected_data_axis0 := []f32{5, 7, 9}
+	
+	
+	testing.expect(t, slice.equal(result_axis0_keepdims.shape, expected_shape_axis0_keepdims), "Sum axis 0 keepdims shape incorrect")
+	testing.expect(t, slice.equal(result_axis0_keepdims.data, expected_data_axis0), "Sum axis 0 keepdims values incorrect")
+
+	// Test keepdims=true for axis 1
+	result_axis1_keepdims := tensor_sum(tensor, 1, true, context.temp_allocator)
+	defer free_tensor(result_axis1_keepdims, context.temp_allocator)
+	
+	expected_shape_axis1_keepdims := []uint{2, 1}
+	expected_data_axis1 := []f32{6, 15}
+	testing.expect(t, slice.equal(result_axis1_keepdims.shape, expected_shape_axis1_keepdims), "Sum axis 1 keepdims shape incorrect")
+	testing.expect(t, slice.equal(result_axis1_keepdims.data, expected_data_axis1), "Sum axis 1 keepdims values incorrect")
 }

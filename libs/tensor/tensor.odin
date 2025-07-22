@@ -22,7 +22,7 @@ Tensor :: struct($T: typeid) where intrinsics.type_is_numeric(T) {
 	shape:      []uint,
 	strides:    []uint,
 	contiguous: bool,
-	parent:     ^Tensor(T),  // Reference to parent tensor (nil if owns data)
+	owns_data:  bool,
 }
 
 // Compute total size of an tensor by multiplying dimensions in shape
@@ -35,10 +35,10 @@ shape_to_size :: #force_inline proc(shape: []uint) -> uint {
 // Create a new n-dimensional tensor with the given shape. For each dimension i
 // in the tensor shape[i] represents the size of that dimension. After allocation
 // the tensor elements are left uninitialized.
-@(private)
 tensor_alloc :: proc(
 	$T: typeid,
 	shape: []uint,
+	owns_data := true,
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> (
@@ -46,11 +46,12 @@ tensor_alloc :: proc(
 ) {
 	size := shape_to_size(shape)
 	res = new(Tensor(T), allocator)
-	res.data = make([]T, size, allocator, loc)
+	if owns_data do res.data = make([]T, size, allocator, loc)
+
 	res.shape = make([]uint, len(shape), allocator)
 	res.strides = make([]uint, len(shape), allocator)
 	res.contiguous = true
-	res.parent = nil  // This tensor owns its data
+	res.owns_data = owns_data
 
 	// initialize shape and strides
 	copy(res.shape, shape)
@@ -108,7 +109,7 @@ clone :: proc(arr: ^Tensor($T), allocator := context.allocator) -> (res: ^Tensor
 	res.shape = make([]uint, len(arr.shape), allocator)
 	res.strides = make([]uint, len(arr.strides), allocator)
 	res.contiguous = arr.contiguous
-	res.parent = nil  // Clone owns its own data
+	res.owns_data = true
 
 	copy(res.data, arr.data)
 	copy(res.shape, arr.shape)
@@ -141,10 +142,11 @@ randn :: proc(
 	shape: []uint,
 	mean, stddev: T,
 	allocator := context.allocator,
+	loc := #caller_location,
 ) -> (
 	res: ^Tensor(T),
 ) {
-	res = tensor_alloc(T, shape, allocator)
+	res = tensor_alloc(T, shape, true, allocator, loc)
 	for _, i in res.data {
 		// Box-Muller transform to generate normal distribution
 		u1 := rand.float64()
@@ -158,8 +160,15 @@ randn :: proc(
 // Create a new tensor filled with zeros. tensors are initialized for all data types by casting
 // 0 to the target type, so for example this works with floating point data types, integers
 // and even complex data types like bool or void types.
-zeros :: proc($T: typeid, shape: []uint, allocator := context.allocator) -> (res: ^Tensor(T)) {
-	res = tensor_alloc(T, shape, allocator)
+zeros :: proc(
+	$T: typeid,
+	shape: []uint,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> (
+	res: ^Tensor(T),
+) {
+	res = tensor_alloc(T, shape, true, allocator, loc)
 	for _, i in res.data {res.data[i] = T(0)}
 	return res
 }
@@ -174,7 +183,7 @@ new_with_init :: proc(
 ) -> (
 	res: ^Tensor(T),
 ) {
-	res = tensor_alloc(T, shape, allocator, loc)
+	res = tensor_alloc(T, shape, true, allocator, loc)
 	if len(res.data) != len(init) {
 		panic("Input data length must match tensor size computed from shape")
 	}
@@ -199,8 +208,8 @@ free_tensor :: proc {
 
 @(private = "file")
 free_tensor_one :: proc(arr: ^Tensor($T), allocator := context.allocator) {
-	// Only free data if this tensor owns it (parent == nil)
-	if arr.parent == nil {
+	// Only free data if this tensor owns its data
+	if arr.owns_data {
 		delete(arr.data, allocator)
 	}
 	// Always free shape and strides (each tensor owns these)
@@ -362,7 +371,7 @@ tensor_matmul :: proc(
 	result_shape[len(result_batch) + 1] = b_n
 
 	// Create result tensor
-	result := tensor_alloc(T, result_shape, allocator, loc)
+	result := tensor_alloc(T, result_shape, true, allocator, loc)
 
 	// Calculate total batch size and matrix sizes
 	batch_size := shape_to_size(result_batch) if len(result_batch) > 0 else 1
@@ -482,7 +491,7 @@ permute :: proc(
 	// Check that dims contains each dimension exactly once
 	used := make([]bool, len(tensor.shape), context.temp_allocator)
 	defer delete(used, context.temp_allocator)
-	
+
 	for dim in dims {
 		if dim < 0 || dim >= len(tensor.shape) {
 			panic("Dimension index out of range")
@@ -495,14 +504,14 @@ permute :: proc(
 
 	// Create view tensor
 	result := new(Tensor(T), allocator)
-	result.data = tensor.data  // Share the data
+	result.data = tensor.data // Share the data
 	result.shape = make([]uint, len(tensor.shape), allocator)
 	result.strides = make([]uint, len(tensor.strides), allocator)
-	result.contiguous = false  // Views are typically not contiguous
-	result.parent = tensor     // This is a view of the original tensor
+	result.contiguous = false // Views are typically not contiguous
+	result.owns_data = false // This is a view of the original tensor
 
 	// Reorder shape and strides according to dims
-	for result_dim in 0..<len(dims) {
+	for result_dim in 0 ..< len(dims) {
 		source_dim := dims[result_dim]
 		result.shape[result_dim] = tensor.shape[source_dim]
 		result.strides[result_dim] = tensor.strides[source_dim]
@@ -526,10 +535,10 @@ transpose :: proc(
 
 	// Create view tensor
 	result := new(Tensor(T), allocator)
-	result.data = tensor.data  // Share the data
+	result.data = tensor.data // Share the data
 	result.shape = make([]uint, len(tensor.shape), allocator)
 	result.strides = make([]uint, len(tensor.strides), allocator)
-	result.parent = tensor     // This is a view of the original tensor
+	result.owns_data = false // This is a view of the original tensor
 
 	// Copy original shape and strides
 	copy(result.shape, tensor.shape)
@@ -555,9 +564,9 @@ matrix_transpose :: proc(
 	if len(tensor.shape) < 2 {
 		panic("Matrix transpose requires at least 2D tensor")
 	}
-	
+
 	last := len(tensor.shape) - 1
 	second_last := len(tensor.shape) - 2
-	
+
 	return transpose(tensor, second_last, last, allocator, loc)
 }

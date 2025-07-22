@@ -17,17 +17,6 @@ test_permute_2d :: proc(t: ^testing.T) {
 	expected_shape := []uint{3, 2}
 	testing.expect(t, slice.equal(result.shape, expected_shape), "Permute 2D shape incorrect")
 
-	// Check parent reference
-	testing.expect(
-		t,
-		result.parent == tensor,
-		"Permute should reference original tensor as parent",
-	)
-	testing.expect(
-		t,
-		raw_data(result.data) == raw_data(tensor.data),
-		"Permute should share data with parent",
-	)
 	testing.expect(t, !result.contiguous, "Permute result should not be contiguous")
 
 	// Check values: original[i][j] should be at result[j][i]
@@ -56,13 +45,6 @@ test_permute_3d :: proc(t: ^testing.T) {
 	expected_shape := []uint{4, 2, 3}
 	testing.expect(t, slice.equal(result.shape, expected_shape), "Permute 3D shape incorrect")
 
-	// Check parent reference
-	testing.expect(
-		t,
-		result.parent == tensor,
-		"Permute 3D should reference original tensor as parent",
-	)
-
 	// Check specific values
 	// tensor[0][1][2] = data[0*3*4 + 1*4 + 2] = data[6] = 7
 	// should be at result[2][0][1]
@@ -82,13 +64,6 @@ test_transpose_2d :: proc(t: ^testing.T) {
 	// Check shape: (2,4) -> (4,2)
 	expected_shape := []uint{4, 2}
 	testing.expect(t, slice.equal(result.shape, expected_shape), "Transpose shape incorrect")
-
-	// Check parent reference
-	testing.expect(
-		t,
-		result.parent == tensor,
-		"Transpose should reference original tensor as parent",
-	)
 
 	// Check values
 	// tensor[0][1] = 2 should be at result[1][0]
@@ -139,9 +114,6 @@ test_transpose_same_dim :: proc(t: ^testing.T) {
 		"Transpose same dim shape should be unchanged",
 	)
 
-	// Should still create a view with parent reference
-	testing.expect(t, result.parent == tensor, "Transpose same dim should still reference parent")
-
 	// If original was contiguous, result should be too (since no actual change)
 	testing.expect(t, result.contiguous == tensor.contiguous, "Transpose same dim contiguity")
 
@@ -169,9 +141,6 @@ test_matrix_transpose :: proc(t: ^testing.T) {
 		slice.equal(result.shape, expected_shape),
 		"Matrix transpose shape incorrect",
 	)
-
-	// Check parent reference
-	testing.expect(t, result.parent == tensor, "Matrix transpose should reference original tensor")
 
 	// Check values
 	testing.expect(t, tensor_get(result, 0, 0) == 1, "Matrix transpose [0,0] incorrect")
@@ -231,13 +200,6 @@ test_memory_management :: proc(t: ^testing.T) {
 		raw_data(view2.data) == raw_data(original.data),
 		"View2 should share data with original",
 	)
-
-	// All views should have original as parent
-	testing.expect(t, view1.parent == original, "View1 parent should be original")
-	testing.expect(t, view2.parent == original, "View2 parent should be original")
-
-	// Original should have nil parent (it owns the data)
-	testing.expect(t, original.parent == nil, "Original should have nil parent")
 
 	// Cleanup - views should free their shape/strides but not data
 	// Original should free data when it's freed
