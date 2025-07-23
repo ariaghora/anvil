@@ -327,7 +327,7 @@ reshape :: proc(
 		panic(fmt.tprintf("Cannot reshape tensor of size %v to shape %v", old_size, new_shape))
 	}
 
-	res := tensor_alloc(T, new_shape, allocator)
+	res := tensor_alloc(T, new_shape, true, allocator)
 	copy(res.data, arr.data) // Since we're just changing shape, data can be copied directly
 	return res
 }
@@ -478,7 +478,7 @@ matmul :: proc(
 // Example: permute(tensor, [2, 0, 1]) reorders dims so that dim 0->2, dim 1->0, dim 2->1
 permute :: proc(
 	tensor: ^Tensor($T),
-	dims: []int,
+	dims: []uint,
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {

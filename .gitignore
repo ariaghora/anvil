@@ -2,3 +2,5 @@
 .DS_Store
 CLAUDE.md
 .claude
+
+models/mobile_sam-tiny-vitt.safetensors

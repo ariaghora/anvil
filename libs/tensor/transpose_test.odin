@@ -10,7 +10,7 @@ test_permute_2d :: proc(t: ^testing.T) {
 	tensor := new_with_init(data, []uint{2, 3}, context.temp_allocator)
 	defer free_tensor(tensor, context.temp_allocator)
 
-	result := permute(tensor, []int{1, 0}, context.temp_allocator)
+	result := permute(tensor, []uint{1, 0}, context.temp_allocator)
 	defer free_tensor(result, context.temp_allocator)
 
 	// Check shape: (2,3) -> (3,2)
@@ -38,7 +38,7 @@ test_permute_3d :: proc(t: ^testing.T) {
 	tensor := new_with_init(data, []uint{2, 3, 4}, context.temp_allocator)
 	defer free_tensor(tensor, context.temp_allocator)
 
-	result := permute(tensor, []int{2, 0, 1}, context.temp_allocator)
+	result := permute(tensor, []uint{2, 0, 1}, context.temp_allocator)
 	defer free_tensor(result, context.temp_allocator)
 
 	// Check shape: (2,3,4) -> (4,2,3)
@@ -187,7 +187,7 @@ test_memory_management :: proc(t: ^testing.T) {
 
 	// Create multiple views
 	view1 := transpose(original, 0, 1, context.temp_allocator)
-	view2 := permute(original, []int{1, 0}, context.temp_allocator)
+	view2 := permute(original, []uint{1, 0}, context.temp_allocator)
 
 	// All should share the same data pointer
 	testing.expect(
