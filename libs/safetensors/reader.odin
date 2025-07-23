@@ -46,7 +46,18 @@ read_from_file :: proc(
 ) {
 	raw_bytes, ok := os.read_entire_file(fn, allocator)
 	if !ok do return nil, IO_Error{msg = fmt.tprintf("Failed to read safe tensor from %s", fn)}
+	return read_from_bytes(T, raw_bytes, allocator, loc)
+}
 
+read_from_bytes :: proc(
+	$T: typeid,
+	raw_bytes: []u8,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> (
+	res: ^Safe_Tensors(T),
+	er: Safe_Tensors_Error,
+) {
 	header_size := uint(mem.slice_data_cast([]u64, raw_bytes[:8])[0])
 	header_content := transmute(string)raw_bytes[8:8 + header_size]
 	tensors_proto: map[string]Tensor_Info

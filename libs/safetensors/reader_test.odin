@@ -6,7 +6,7 @@ import "core:slice"
 import "core:testing"
 
 @(test)
-test_tensor_max_all :: proc(t: ^testing.T) {
+test_safetensors_read_basic :: proc(t: ^testing.T) {
 	safe_tensors, ok := read_from_file(f32, "models/mnist.safetensors")
 	defer free_safe_tensors(safe_tensors)
 
