@@ -41,7 +41,7 @@ new_conv2d :: proc(
 	fan_in := T(in_channels_per_group * kernel_size[0] * kernel_size[1])
 	fan_out := T(out_channels * kernel_size[0] * kernel_size[1])
 	std := T(2.0 / (fan_in + fan_out))
-	std = T(1.0) // Simplified for now
+	std = T(1.0) // Simplified. This will be replaced with model loader anyway
 
 	w := tensor.randn(T, w_shape, T(0), std, allocator)
 

@@ -67,7 +67,7 @@ read_from_bytes :: proc(
 		allocator = context.temp_allocator,
 	) or_return
 
-	// Exclude __metadata__ entry because who cares (for now)
+	// Exclude __metadata__ entry because who cares
 	delete_key(&tensors_proto, "__metadata__")
 
 	tensor_data_start := header_size + 8

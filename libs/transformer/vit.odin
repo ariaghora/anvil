@@ -641,9 +641,102 @@ forward_tiny_vit_block :: proc(
 
 	res_x := x
 
-	// Apply attention (simplified - no windowing for now)
-	fmt.printf("    Starting attention...\n")
-	attn_out := forward_attention(block.attn, x, context.temp_allocator)
+	window_size := block.window_size
+	use_window := !(h == window_size && w == window_size)
+
+	attn_out: ^tensor.Tensor(T)
+
+	if !use_window {
+		// Global attention (no windowing)
+		fmt.printf("    Using global attention (no windowing)...\n")
+		attn_out = forward_attention(block.attn, x, context.temp_allocator)
+	} else {
+		fmt.printf("    Using windowed attention...\n")
+		// Reshape to (B, H, W, C)
+		xs := tensor.reshape(x, []uint{b, h, w, c}, context.temp_allocator)
+
+		// Calculate padding needed
+		pad_h := (window_size - (h % window_size)) % window_size
+		pad_w := (window_size - (w % window_size)) % window_size
+		padded_h := h + pad_h
+		padded_w := w + pad_w
+
+		// Pad height (dim=1) and width (dim=2) with zeros if needed
+		if pad_h > 0 || pad_w > 0 {
+			// Pad by creating a new tensor and copying data
+			padded_xs := tensor.zeros(T, []uint{b, padded_h, padded_w, c}, context.temp_allocator)
+			for batch in 0 ..< b {
+				for i in 0 ..< h {
+					for j in 0 ..< w {
+						for ch in 0 ..< c {
+							padded_xs.data[
+								batch * padded_h * padded_w * c +
+								i * padded_w * c +
+								j * c +
+								ch
+							] = xs.data[
+								batch * h * w * c +
+								i * w * c +
+								j * c +
+								ch
+							]
+						}
+					}
+				}
+			}
+			xs = padded_xs
+		}
+
+		n_h := padded_h / window_size
+		n_w := padded_w / window_size
+
+		// Reshape to windows: (B, n_h, window_size, n_w, window_size, C)
+		xs = tensor.reshape(xs, []uint{b, n_h, window_size, n_w, window_size, c}, context.temp_allocator)
+		// Transpose to (B, n_h, n_w, window_size, window_size, C)
+		xs = tensor.permute(xs, []uint{0, 1, 3, 2, 4, 5}, context.temp_allocator)
+		// Merge windows: (B * n_h * n_w, window_size * window_size, C)
+		xs = tensor.reshape(xs, []uint{b * n_h * n_w, window_size * window_size, c}, context.temp_allocator)
+
+		// Apply attention per window
+		attn_windows := forward_attention(block.attn, xs, context.temp_allocator)
+
+		// Restore windows: (B, n_h, n_w, window_size, window_size, C)
+		attn_windows = tensor.reshape(attn_windows, []uint{b, n_h, n_w, window_size, window_size, c}, context.temp_allocator)
+		// Transpose back: (B, n_h, window_size, n_w, window_size, C)
+		attn_windows = tensor.permute(attn_windows, []uint{0, 1, 3, 2, 4, 5}, context.temp_allocator)
+		// Merge spatial: (B, padded_h, padded_w, C)
+		attn_windows = tensor.reshape(attn_windows, []uint{b, padded_h, padded_w, c}, context.temp_allocator)
+
+		// Remove padding if needed
+		if pad_h > 0 || pad_w > 0 {
+			// Slice to original h, w
+			attn_no_pad := tensor.zeros(T, []uint{b, h, w, c}, context.temp_allocator)
+			for batch in 0 ..< b {
+				for i in 0 ..< h {
+					for j in 0 ..< w {
+						for ch in 0 ..< c {
+							attn_no_pad.data[
+								batch * h * w * c +
+								i * w * c +
+								j * c +
+								ch
+							] = attn_windows.data[
+								batch * padded_h * padded_w * c +
+								i * padded_w * c +
+								j * c +
+								ch
+							]
+						}
+					}
+				}
+			}
+			attn_windows = attn_no_pad
+		}
+
+		// Reshape back to (B, L, C)
+		attn_out = tensor.reshape(attn_windows, []uint{b, l, c}, context.temp_allocator)
+	}
+
 	fmt.printf("    Attention completed\n")
 
 	// Residual connection
