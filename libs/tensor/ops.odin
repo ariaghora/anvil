@@ -6,7 +6,7 @@ import "core:mem"
 import "core:slice"
 
 // Binary operation types for compile-time dispatch
-BinaryOp :: enum {
+Binary_Op :: enum {
 	ADD,
 	MULTIPLY,
 	SUBTRACT,
@@ -14,7 +14,7 @@ BinaryOp :: enum {
 }
 
 // Reduction operation types for compile-time dispatch
-ReduceOp :: enum {
+Reduce_Op :: enum {
 	SUM,
 	MEAN,
 	MAX,
@@ -113,7 +113,7 @@ broadcast_strides :: proc(
 // Generic elementwise binary operation with broadcasting using compile-time enum dispatch
 elementwise_binary_op :: proc(
 	a, b: ^Tensor($T),
-	$op: BinaryOp,
+	$op: Binary_Op,
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
@@ -272,7 +272,7 @@ div :: proc(
 @(private)
 tensor_reduce_all_axes :: proc(
 	tensor: ^Tensor($T),
-	$op: ReduceOp,
+	$op: Reduce_Op,
 	keepdims: bool,
 	allocator := context.allocator,
 	loc := #caller_location,
@@ -423,7 +423,7 @@ map_coordinates :: proc(result_coords: []uint, input_coords: []uint, axis: int, 
 @(private)
 tensor_reduce_single_axis :: proc(
 	tensor: ^Tensor($T),
-	$op: ReduceOp,
+	$op: Reduce_Op,
 	axis: int,
 	keepdims: bool,
 	allocator := context.allocator,
@@ -521,7 +521,7 @@ tensor_reduce_single_axis :: proc(
 // keepdims: if true, keep reduced dimensions as size 1
 tensor_reduce :: proc(
 	tensor: ^Tensor($T),
-	$op: ReduceOp,
+	$op: Reduce_Op,
 	axis: Maybe(int) = nil,
 	keepdims: bool = false,
 	allocator := context.allocator,
