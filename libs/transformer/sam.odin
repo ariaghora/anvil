@@ -7,8 +7,8 @@ IMAGE_SIZE :: 1024
 PROMPT_EMBED_DIM :: 256
 
 Sam :: struct($T: typeid) {
-	image_encoder:         Image_Encoder,
-	prompt_encoder:        ^Prompt_Encoder,
+	image_encoder:         Image_Encoder(T),
+	prompt_encoder:        ^Prompt_Encoder(T),
 	mask_decoder:          ^Mask_Decoder,
 	pixel_mean, pixel_std: ^tensor.Tensor(T),
 }

@@ -33,6 +33,15 @@ forward_linear :: proc(
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
 	out := tensor.matmul(x, l.w, allocator, loc)
+	
+	// Add bias if present
+	if bias, has_bias := l.b.?; has_bias {
+		// Broadcast bias addition: (batch_size, out_feat) + (out_feat,) -> (batch_size, out_feat)
+		biased_out := tensor.add(out, bias, allocator, loc)
+		tensor.free_tensor(out, allocator)
+		return biased_out
+	}
+	
 	return out
 }
 

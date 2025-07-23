@@ -39,22 +39,22 @@ Basic_Layer :: struct {}
 
 Conv_Layer :: struct {}
 
-Tiny_ViT_5m :: struct {
+Tiny_ViT_5m :: struct($T: typeid) {
 	patch_embed:            ^Patch_Embed,
 	layer0:                 ^Conv_Layer,
 	layers:                 []^Basic_Layer,
-	neck_conv1, neck_conv2: ^nn.Conv_2d,
+	neck_conv1, neck_conv2: ^nn.Conv_2d(T),
 	neck_ln1, neck_ln2:     ^nn.Layer_Norm_2d,
 }
 
-new_vit_5m :: proc($T: typeid, allocator := context.allocator) -> ^Tiny_ViT_5m {
+new_vit_5m :: proc($T: typeid, allocator := context.allocator) -> ^Tiny_ViT_5m(T) {
 	embed_dims := []u64{64, 128, 160, 320}
 	depths := []u64{2, 2, 6, 2}
 	num_heads := []u64{2, 4, 5, 10}
 	window_sizes := []u64{7, 7, 14, 7}
 
 	return new_clone(
-		Tiny_ViT_5m {
+		Tiny_ViT_5m(T) {
 			// embed_dims = embed_dims,
 			// depths = depths,
 			// num_heads = num_heads,
@@ -65,6 +65,6 @@ new_vit_5m :: proc($T: typeid, allocator := context.allocator) -> ^Tiny_ViT_5m {
 	)
 }
 
-free_vit_5m :: proc(vit: ^Tiny_ViT_5m, allocator := context.allocator) {
+free_vit_5m :: proc(vit: ^Tiny_ViT_5m($T), allocator := context.allocator) {
 	free(vit, allocator)
 }

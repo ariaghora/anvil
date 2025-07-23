@@ -5,13 +5,13 @@ import "../tensor"
 
 Position_Embedding_Random :: struct {}
 
-Prompt_Encoder :: struct {
+Prompt_Encoder :: struct($T: typeid) {
 	pe_layer:               ^Position_Embedding_Random,
 	point_embeddings:       []^nn.Embedding,
 	not_a_point_embed:      ^nn.Embedding,
-	mask_downscaling_conv1: ^nn.Conv_2d,
-	mask_downscaling_conv2: ^nn.Conv_2d,
-	mask_downscaling_conv3: ^nn.Conv_2d,
+	mask_downscaling_conv1: ^nn.Conv_2d(T),
+	mask_downscaling_conv2: ^nn.Conv_2d(T),
+	mask_downscaling_conv3: ^nn.Conv_2d(T),
 	mask_downscaling_ln1:   ^nn.Layer_Norm_2d,
 	mask_downscaling_ln2:   ^nn.Layer_Norm_2d,
 	no_mask_embed:          ^nn.Embedding,
@@ -27,9 +27,9 @@ new_prompt_encoder :: proc(
 	input_image_size: [2]u64,
 	mask_in_chans: u64,
 	allocator := context.allocator,
-) -> ^Prompt_Encoder {
+) -> ^Prompt_Encoder(T) {
 	pe := new_clone(
-		Prompt_Encoder {
+		Prompt_Encoder(T) {
 			pe_layer = nil,
 			point_embeddings = nil,
 			not_a_point_embed = nil,
