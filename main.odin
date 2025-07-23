@@ -10,7 +10,7 @@ main :: proc() {
 
 	// Create model
 	fmt.printf("Creating TinyViT-5M model...\n")
-	model := tf.new_tiny_vit_5m(f32, context.temp_allocator)
+	model := tf.new_tiny_vit_5m(f32, 256, context.temp_allocator)
 
 	// Create input: (1, 3, 256, 256)
 	fmt.printf("Creating random input (1, 3, 256, 256)...\n")
@@ -37,43 +37,7 @@ main :: proc() {
 
 	// Check output
 	fmt.printf("Forward pass completed!\n")
-	fmt.printf(
-		"Output shape: [%d, %d, %d, %d]\n",
-		output.shape[0],
-		output.shape[1],
-		output.shape[2],
-		output.shape[3],
-	)
 
-	// Check that output contains reasonable values (not NaN/Inf)
-	has_valid_values := true
-	sample_count := min(100, len(output.data))
-	for i in 0 ..< sample_count {
-		val := output.data[i]
-		// Check for NaN (val != val) or if value is too extreme
-		if val != val || val > 1e10 || val < -1e10 {
-			has_valid_values = false
-			break
-		}
-	}
+	tensor.print(output)
 
-
-	// Print some statistics
-	if len(output.data) > 0 {
-		min_val := output.data[0]
-		max_val := output.data[0]
-		sum_val: f32 = 0
-
-		for val in output.data {
-			if val < min_val do min_val = val
-			if val > max_val do max_val = val
-			sum_val += val
-		}
-		mean_val := sum_val / f32(len(output.data))
-
-		fmt.printf("Output stats: min=%.6f, max=%.6f, mean=%.6f\n", min_val, max_val, mean_val)
-		fmt.printf("Total elements: %d input -> %d output\n", len(input.data), len(output.data))
-	}
-
-	fmt.printf("✅ TinyViT-5M Integration Test COMPLETED!\n")
 }

@@ -822,16 +822,20 @@ Tiny_ViT_5m :: struct($T: typeid) {
 	neck_ln1, neck_ln2:     ^nn.Layer_Norm(T),
 }
 
-new_tiny_vit_5m :: proc($T: typeid, allocator := context.allocator) -> ^Tiny_ViT_5m(T) {
+new_tiny_vit_5m :: proc(
+	$T: typeid,
+	input_size: uint = IMG_SIZE,
+	allocator := context.allocator,
+) -> ^Tiny_ViT_5m(T) {
 	embed_dims := []uint{64, 128, 160, 320}
 	depths := []uint{2, 2, 6, 2}
 	num_heads := []uint{2, 4, 5, 10}
 	window_sizes := []uint{7, 7, 14, 7}
 
 	patch_embed := new_patch_embed(T, IN_CHANNELS, embed_dims[0], allocator)
-	patches_resolution := uint(64) // PatchEmbed outputs 64x64 spatial resolution
+	patches_resolution := uint(input_size / 4) // After patch embedding
 
-	// Layer 0 (ConvLayer) - downsamples 64->32
+	// Layer 0 (ConvLayer) - downsamples 256->128
 	layer0 := new_conv_layer(
 		T,
 		embed_dims[0],
@@ -843,16 +847,14 @@ new_tiny_vit_5m :: proc($T: typeid, allocator := context.allocator) -> ^Tiny_ViT
 		allocator,
 	)
 
-	// After Layer0 downsampling: 64/2 = 32
-	patches_resolution = patches_resolution / 2 // Now 32
-
-	// Remaining layers (BasicLayers)
+	// Remaining layers (BasicLayers) - use original patches_resolution for formula
+	original_patches_resolution := uint(input_size / 4) // Keep original for layer formula
 	num_layers := len(embed_dims)
 	layers := make([]^Basic_Layer(T), num_layers - 1, allocator)
 
 	for i_layer in 1 ..< num_layers {
-		// Calculate current resolution for this layer
-		current_resolution := patches_resolution
+		// Calculate current resolution using Rust formula: original_patches_resolution / (1 << min(i_layer, 2))
+		current_resolution := original_patches_resolution / (1 << min(uint(i_layer), 2))
 
 		layer := new_basic_layer(
 			T,
@@ -866,34 +868,31 @@ new_tiny_vit_5m :: proc($T: typeid, allocator := context.allocator) -> ^Tiny_ViT
 			allocator,
 		)
 		layers[i_layer - 1] = layer
-
-		// Update resolution for next layer if this layer downsamples
-		if i_layer < num_layers - 1 {
-			patches_resolution = patches_resolution / 2
-		}
 	}
 
 	// Neck layers
 	last_embed_dim := embed_dims[len(embed_dims) - 1]
+	// Neck: 320 -> 256 channels (SAM compatible)
 	neck_conv1 := nn.new_conv2d(
 		T,
-		last_embed_dim,
-		last_embed_dim, // Keep the same dimension
-		[2]uint{1, 1},
-		1,
-		0,
-		1,
-		1,
-		false,
-		allocator,
+		last_embed_dim, // 320 input channels
+		256, // 256 output channels (SAM standard)
+		kernel_size = [2]uint{1, 1},
+		stride = 1,
+		padding = 0,
+		dilation = 1,
+		groups = 1,
+		use_bias = false,
+		allocator = allocator,
 	)
-	// Calculate final spatial dimensions: after all layers, we should have 16x16
-	final_spatial_size := uint(16) // Based on the progression: 64->32->16->16
-	neck_ln1 := nn.new_layer_norm_2d(T, []uint{final_spatial_size, final_spatial_size}, allocator)
+	// LayerNorm2d expects spatial dimensions based on final output
+	// Final spatial dimension after all downsampling: input_size / 4 / (1 << min(3,2)) = input_size / 16
+	final_spatial_dim := uint(input_size / 16)
+	neck_ln1 := nn.new_layer_norm_2d(T, []uint{final_spatial_dim, final_spatial_dim}, allocator)
 	neck_conv2 := nn.new_conv2d(
 		T,
-		last_embed_dim,
-		last_embed_dim,
+		256, // 256 input channels
+		256, // 256 output channels
 		[2]uint{3, 3},
 		1,
 		1,
@@ -902,7 +901,7 @@ new_tiny_vit_5m :: proc($T: typeid, allocator := context.allocator) -> ^Tiny_ViT
 		false,
 		allocator,
 	)
-	neck_ln2 := nn.new_layer_norm_2d(T, []uint{final_spatial_size, final_spatial_size}, allocator)
+	neck_ln2 := nn.new_layer_norm_2d(T, []uint{final_spatial_dim, final_spatial_dim}, allocator)
 
 	return new_clone(
 		Tiny_ViT_5m(T) {
@@ -925,7 +924,6 @@ forward_tiny_vit_5m :: proc(
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
 	start_time := time.now()
-	fmt.printf("=== TinyViT-5M Forward Pass ===\n")
 
 	// Patch embedding
 	patch_start := time.now()
@@ -953,11 +951,11 @@ forward_tiny_vit_5m :: proc(
 
 	fmt.printf("Neck input shape: [%d, %d, %d]\n", xs.shape[0], xs.shape[1], xs.shape[2])
 
-	// Calculate actual spatial dimensions from sequence length
+	// Calculate correct spatial dimensions based on actual sequence length
+	// For 1024x1024 input: sequence_length = 4096 (64x64)
+	// For 256x256 input: sequence_length = 1024 (32x32)
 	sequence_length := xs.shape[1]
 	spatial_dim := uint(math.sqrt(f64(sequence_length)))
-
-	// Reshape (B, L, C) -> (B, H, W, C) -> (B, C, H, W)
 	xs_4d := tensor.reshape(xs, []uint{b, spatial_dim, spatial_dim, c}, context.temp_allocator)
 	xs_conv := tensor.permute(xs_4d, []uint{0, 3, 1, 2}, context.temp_allocator)
 
