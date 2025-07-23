@@ -600,10 +600,16 @@ chunk :: proc(
 		chunk_tensor.contiguous = false // Views are typically not contiguous
 		chunk_tensor.owns_data = false // This is a view of the original tensor
 
-		// Copy shape and strides, but modify the chunked dimension
+		// Copy shape and modify the chunked dimension
 		copy(chunk_tensor.shape, tensor.shape)
-		copy(chunk_tensor.strides, tensor.strides)
 		chunk_tensor.shape[dim] = chunk_size
+		
+		// Recalculate strides for the new shape
+		stride: uint = 1
+		for i := len(chunk_tensor.shape) - 1; i >= 0; i -= 1 {
+			chunk_tensor.strides[i] = stride
+			stride *= chunk_tensor.shape[i]
+		}
 
 		// Calculate offset for this chunk
 		offset := i * chunk_size * tensor.strides[dim]

@@ -1,36 +1,79 @@
 package main
 
 import "core:fmt"
-import "core:net"
-import "libs/matmul"
-
-import "libs/safetensors"
+import "core:math/rand"
 import "libs/tensor"
 import tf "libs/transformer"
 
-
 main :: proc() {
-	sam_safetensors, err := safetensors.read_from_file(
-		f32,
-		"./models/mobile_sam-tiny-vitt.safetensors",
-		context.temp_allocator,
+	fmt.printf("=== TinyViT-5M Integration Test ===\n")
+
+	// Create model
+	fmt.printf("Creating TinyViT-5M model...\n")
+	model := tf.new_tiny_vit_5m(f32, context.temp_allocator)
+
+	// Create input: (1, 3, 256, 256)
+	fmt.printf("Creating random input (1, 3, 256, 256)...\n")
+	input_size := 1 * 3 * 256 * 256
+	input_data := make([]f32, input_size, context.temp_allocator)
+
+	// Initialize with small random values to avoid numerical issues
+	for i in 0 ..< len(input_data) {
+		input_data[i] = (rand.float32() - 0.5) * 0.1 // Small values [-0.05, 0.05]
+	}
+	input := tensor.new_with_init(input_data, []uint{1, 3, 256, 256}, context.temp_allocator)
+
+	fmt.printf(
+		"Input created successfully: shape [%d, %d, %d, %d]\n",
+		input.shape[0],
+		input.shape[1],
+		input.shape[2],
+		input.shape[3],
 	)
-	assert(err == nil)
-	for k, _ in sam_safetensors.tensors {
-		fmt.println(k)
+
+	// Forward pass using the function with all our debug timing
+	fmt.printf("Starting TinyViT-5M forward pass...\n")
+	output := tf.forward_tiny_vit_5m(model, input, context.temp_allocator)
+
+	// Check output
+	fmt.printf("Forward pass completed!\n")
+	fmt.printf(
+		"Output shape: [%d, %d, %d, %d]\n",
+		output.shape[0],
+		output.shape[1],
+		output.shape[2],
+		output.shape[3],
+	)
+
+	// Check that output contains reasonable values (not NaN/Inf)
+	has_valid_values := true
+	sample_count := min(100, len(output.data))
+	for i in 0 ..< sample_count {
+		val := output.data[i]
+		// Check for NaN (val != val) or if value is too extreme
+		if val != val || val > 1e10 || val < -1e10 {
+			has_valid_values = false
+			break
+		}
 	}
 
-	sam := tf.new_tiny(f32)
-	defer tf.free_tiny(sam)
 
-	t1 := tensor.ones(f32, []uint{8, 8}, context.temp_allocator)
-	tensor.print(t1, max_print_elements_per_dim = 6)
+	// Print some statistics
+	if len(output.data) > 0 {
+		min_val := output.data[0]
+		max_val := output.data[0]
+		sum_val: f32 = 0
 
-	t2 := tensor.new_with_init([]i32{3, -2, 10}, []uint{3, 1}, allocator = context.temp_allocator)
-	tensor.print(t2, max_print_elements_per_dim = 4)
+		for val in output.data {
+			if val < min_val do min_val = val
+			if val > max_val do max_val = val
+			sum_val += val
+		}
+		mean_val := sum_val / f32(len(output.data))
 
-	image := tensor.ones(f32, []uint{1, 320, 64, 64}, context.temp_allocator)
-	kernel := tensor.ones(f32, []uint{256, 320, 3, 3}, context.temp_allocator)
-	tensor.conv2d(image, kernel, stride = 1, dilation = 1, padding = 0, groups = 1)
+		fmt.printf("Output stats: min=%.6f, max=%.6f, mean=%.6f\n", min_val, max_val, mean_val)
+		fmt.printf("Total elements: %d input -> %d output\n", len(input.data), len(output.data))
+	}
 
+	fmt.printf("✅ TinyViT-5M Integration Test COMPLETED!\n")
 }

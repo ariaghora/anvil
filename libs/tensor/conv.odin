@@ -18,63 +18,41 @@ im2col :: proc(
 
 	// Use original tensor data directly if contiguous
 	src := t.data
-	src_allocated := false
 	if !t.contiguous {
-		src, src_allocated = get_strided_data(t, allocator = context.temp_allocator)
+		// Always use temp_allocator for temporary strided data copy
+		src, _ = get_strided_data(t, allocator = context.temp_allocator)
 	}
 	
 	dst_size := b * h_out * w_out * c * h_k * w_k
 	dst := make([]T, dst_size, allocator, loc)
 
 	for b_idx in 0 ..< b {
+		src_idx_b := b_idx * src_s0
+		dst_idx_b := b_idx * h_out * w_out * c * h_k * w_k
 		for h_idx in 0 ..< h_out {
+			dst_idx_h := dst_idx_b + h_idx * w_out * c * h_k * w_k
 			for w_idx in 0 ..< w_out {
+				dst_idx_w := dst_idx_h + w_idx * c * h_k * w_k
 				for c_idx in 0 ..< c {
+					dst_idx_c := dst_idx_w + c_idx * h_k * w_k
+					src_idx_c := c_idx * src_s1 + src_idx_b
 					for h_k_idx in 0 ..< h_k {
-						src_h := h_idx * stride + h_k_idx * dilation
-						
+						src_h_raw := h_idx * stride + h_k_idx * dilation
+						if padding != 0 && (src_h_raw < padding || src_h_raw >= h + padding) {
+							continue
+						}
+						src_h := src_h_raw - padding
+						src_idx_h := src_idx_c + src_h * src_s2  
+						dst_idx_hk := dst_idx_c + h_k_idx * w_k
 						for w_k_idx in 0 ..< w_k {
-							src_w := w_idx * stride + w_k_idx * dilation
-							
-							// Calculate dst_idx first
-							dst_idx :=
-								b_idx * h_out * w_out * c * h_k * w_k +
-								h_idx * w_out * c * h_k * w_k +
-								w_idx * c * h_k * w_k +
-								c_idx * h_k * w_k +
-								h_k_idx * w_k +
-								w_k_idx
-							
-							// Bounds check dst_idx
-							if dst_idx >= dst_size {
-								panic("dst_idx out of bounds in im2col")
-							}
-							
-							// Handle padding cases - set to zero instead of skipping
-							if padding != 0 && (src_h < padding || src_h >= h + padding ||
-							                   src_w < padding || src_w >= w + padding) {
-								dst[dst_idx] = T(0) // Zero padding
+							src_w_raw := w_idx * stride + w_k_idx * dilation
+							if padding != 0 && (src_w_raw < padding || src_w_raw >= w + padding) {
 								continue
 							}
+							src_w := src_w_raw - padding
+							src_idx := src_idx_h + src_w * src_s3
+							dst_idx := dst_idx_hk + w_k_idx
 							
-							// Adjust for padding
-							adj_src_h := src_h - padding
-							adj_src_w := src_w - padding
-							
-							// Bounds check adjusted coordinates
-							if adj_src_h >= h || adj_src_w >= w {
-								dst[dst_idx] = T(0) // Zero padding
-								continue
-							}
-
-							// Calculate source index
-							src_idx := b_idx * src_s0 + c_idx * src_s1 + adj_src_h * src_s2 + adj_src_w * src_s3
-							
-							// Bounds check src_idx
-							if src_idx >= len(src) {
-								panic("src_idx out of bounds in im2col")
-							}
-
 							dst[dst_idx] = src[src_idx]
 						}
 					}
@@ -82,7 +60,7 @@ im2col :: proc(
 			}
 		}
 	}
-	if src_allocated do delete(src)
+	// temp_allocator memory is managed automatically, no manual free needed
 
 	t_out := tensor_alloc(T, []uint{b, h_out * w_out, c * h_k * w_k}, false, allocator, loc)
 	t_out.data = dst
@@ -119,20 +97,10 @@ conv2d_grouped :: proc(
 
 	// Split input and kernel into groups
 	input_chunks := chunk(input, groups, 1, context.temp_allocator) // Split along channel dimension
-	defer {
-		for chunk_tensor in input_chunks {
-			free_tensor(chunk_tensor, context.temp_allocator)
-		}
-		delete(input_chunks, context.temp_allocator)
-	}
-
+	// Note: temp_allocator chunks will be cleaned up automatically
+	
 	kernel_chunks := chunk(kernel, groups, 0, context.temp_allocator) // Split along output channel dimension
-	defer {
-		for chunk_tensor in kernel_chunks {
-			free_tensor(chunk_tensor, context.temp_allocator)
-		}
-		delete(kernel_chunks, context.temp_allocator)
-	}
+	// Note: temp_allocator chunks will be cleaned up automatically
 
 	// Apply convolution to each group
 	results := make([]^Tensor(T), groups, context.temp_allocator)
@@ -151,11 +119,6 @@ conv2d_grouped :: proc(
 
 	// Concatenate results along output channel dimension (dim=1)
 	final_result := cat(results, 1, allocator, loc)
-
-	// Clean up intermediate results
-	for result in results {
-		free_tensor(result, context.temp_allocator)
-	}
 
 	return final_result
 }
