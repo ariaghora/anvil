@@ -192,6 +192,70 @@ test_tensor_matmul_errors :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_tensor_matmul_higher_rank_first :: proc(t: ^testing.T) {
+	// Test case where first tensor has higher rank than second tensor
+	// a: shape [2, 3, 2, 3] - 4D tensor with batch dimensions [2, 3]
+	// b: shape [3, 2] - 2D matrix
+	// Expected result: [2, 3, 2, 2] - broadcasting b across batch dimensions
+	
+	a_data := []f32 {
+		// Batch [0,0]: [[1,2,3], [4,5,6]]
+		1, 2, 3,
+		4, 5, 6,
+		// Batch [0,1]: [[7,8,9], [10,11,12]]
+		7, 8, 9,
+		10, 11, 12,
+		// Batch [0,2]: [[13,14,15], [16,17,18]]
+		13, 14, 15,
+		16, 17, 18,
+		// Batch [1,0]: [[19,20,21], [22,23,24]]
+		19, 20, 21,
+		22, 23, 24,
+		// Batch [1,1]: [[25,26,27], [28,29,30]]
+		25, 26, 27,
+		28, 29, 30,
+		// Batch [1,2]: [[31,32,33], [34,35,36]]
+		31, 32, 33,
+		34, 35, 36,
+	}
+	
+	b_data := []f32 {
+		1, 2,  // [[1,2],
+		3, 4,  //  [3,4],
+		5, 6,  //  [5,6]]
+	}
+	
+	a := new_with_init(a_data, []uint{2, 3, 2, 3}, context.temp_allocator)
+	b := new_with_init(b_data, []uint{3, 2}, context.temp_allocator)
+	defer free_tensor(a, context.temp_allocator)
+	defer free_tensor(b, context.temp_allocator)
+	
+	result := matmul(a, b, context.temp_allocator)
+	defer free_tensor(result, context.temp_allocator)
+	
+	// Expected shape: [2, 3, 2, 2]
+	expected_shape := []uint{2, 3, 2, 2}
+	testing.expect(t, slice.equal(result.shape, expected_shape), "Higher rank first tensor shape incorrect")
+	
+	// Check first batch [0,0]: [[1,2,3], [4,5,6]] @ [[1,2], [3,4], [5,6]]
+	// Row 0: [1,2,3] @ [[1,2], [3,4], [5,6]] = [1*1+2*3+3*5, 1*2+2*4+3*6] = [22, 28]
+	// Row 1: [4,5,6] @ [[1,2], [3,4], [5,6]] = [4*1+5*3+6*5, 4*2+5*4+6*6] = [49, 64]
+	testing.expect(t, result.data[0] == 22, "Higher rank batch [0,0] row 0 col 0 incorrect")
+	testing.expect(t, result.data[1] == 28, "Higher rank batch [0,0] row 0 col 1 incorrect")
+	testing.expect(t, result.data[2] == 49, "Higher rank batch [0,0] row 1 col 0 incorrect")
+	testing.expect(t, result.data[3] == 64, "Higher rank batch [0,0] row 1 col 1 incorrect")
+	
+	// Check a different batch [1,2] to ensure broadcasting worked correctly
+	// This should be at offset: 1*3*2*2 + 2*2*2 = 12 + 8 = 20
+	// [[31,32,33], [34,35,36]] @ [[1,2], [3,4], [5,6]]
+	// Row 0: [31,32,33] @ [[1,2], [3,4], [5,6]] = [31*1+32*3+33*5, 31*2+32*4+33*6] = [292, 358]
+	// Let me double check: 31*1 + 32*3 + 33*5 = 31 + 96 + 165 = 292 ✓
+	// 31*2 + 32*4 + 33*6 = 62 + 128 + 198 = 388 (not 358!)
+	testing.expect(t, result.data[20] == 292, "Higher rank batch [1,2] row 0 col 0 incorrect")
+	testing.expect(t, result.data[21] == 388, "Higher rank batch [1,2] row 0 col 1 incorrect")
+}
+
+@(test)
 test_tensor_matmul_noncontiguous :: proc(t: ^testing.T) {
 	a := new_with_init([]f32{1, 2, 3, 4}, []uint{2, 2}, context.temp_allocator)
 	b := new_with_init([]f32{1, 1, 2, 2}, []uint{2, 2}, context.temp_allocator)
