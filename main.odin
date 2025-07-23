@@ -28,4 +28,9 @@ main :: proc() {
 
 	t2 := tensor.new_with_init([]i32{3, -2, 10}, []uint{3, 1}, allocator = context.temp_allocator)
 	tensor.print(t2, max_print_elements_per_dim = 4)
+
+	image := tensor.ones(f32, []uint{1, 320, 64, 64}, context.temp_allocator)
+	kernel := tensor.ones(f32, []uint{256, 320, 3, 3}, context.temp_allocator)
+	tensor.conv2d(image, kernel, stride = 1, dilation = 1, padding = 0, groups = 1)
+
 }

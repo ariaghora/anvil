@@ -328,7 +328,8 @@ reshape :: proc(
 	}
 
 	res := tensor_alloc(T, new_shape, true, allocator)
-	copy(res.data, arr.data) // Since we're just changing shape, data can be copied directly
+	arr_data, _ := get_strided_data(arr, allocator = context.temp_allocator)
+	copy(res.data, arr_data) // Since we're just changing shape, data can be copied directly
 	return res
 }
 
