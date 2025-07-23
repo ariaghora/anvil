@@ -71,7 +71,8 @@ test_get_strided_data :: proc(t: ^testing.T) {
 	transposed := transpose(original, 0, 1, allocator = context.temp_allocator)
 
 	// Extract data with strided access
-	strided_data := get_strided_data(transposed, allocator = context.temp_allocator)
+	strided_data, allocated := get_strided_data(transposed, allocator = context.temp_allocator)
+	testing.expect(t, allocated)
 
 	// Expected: [1, 3, 2, 4] (transpose of [[1,2],[3,4]] is [[1,3],[2,4]])
 	expected := []f32{1, 3, 2, 4}

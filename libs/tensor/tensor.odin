@@ -73,7 +73,10 @@ get_strided_data :: proc(
 	shape: []uint = nil,
 	strides: []uint = nil,
 	allocator := context.allocator,
-) -> []T {
+) -> (
+	res: []T,
+	allocated: bool,
+) {
 	target_strides := strides
 	target_shape := shape
 	if (strides == nil) {
@@ -86,7 +89,7 @@ get_strided_data :: proc(
 	if arr.contiguous &&
 	   (slice.equal(arr.shape, target_shape) || shape == nil) &&
 	   (slice.equal(arr.strides, target_strides) || strides == nil) {
-		return slice.clone(arr.data, allocator)
+		return arr.data, false
 	}
 
 	// return strided
@@ -97,7 +100,7 @@ get_strided_data :: proc(
 		i_strided := compute_strided_index(target_shape, target_strides, i)
 		data[i] = arr.data[i_strided]
 	}
-	return data
+	return data, true
 }
 
 // Deep copy of tensor data. The copy will be an exact replica of the original
@@ -130,7 +133,7 @@ data_len :: proc(arr: ^Tensor($T)) -> uint {
 // 1 to the target type, so for example this works with floating point data types, integers
 // and even complex data types like bool or void types.
 ones :: proc($T: typeid, shape: []uint, allocator := context.allocator) -> (res: ^Tensor(T)) {
-	res = tensor_alloc(T, shape, allocator)
+	res = tensor_alloc(T, shape, true, allocator)
 	for _, i in res.data {res.data[i] = T(1)}
 	return res
 }
@@ -433,10 +436,8 @@ matmul :: proc(
 		}
 	}
 
-	a_data := a.data
-	b_data := b.data
-	if !a.contiguous do a_data = get_strided_data(a, a.shape, a.strides, context.temp_allocator)
-	if !b.contiguous do b_data = get_strided_data(b, b.shape, b.strides, context.temp_allocator)
+	a_data, a_allocated := get_strided_data(a, a.shape, a.strides, context.temp_allocator)
+	b_data, b_allocated := get_strided_data(b, b.shape, b.strides, context.temp_allocator)
 
 	// Process each batch
 	for batch_idx in 0 ..< batch_size {
