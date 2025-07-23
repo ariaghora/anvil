@@ -1,5 +1,7 @@
 package tensor
 
+import "core:fmt"
+import "core:slice"
 import "core:testing"
 
 @(test)
@@ -80,5 +82,99 @@ test_get_strided_data :: proc(t: ^testing.T) {
 
 	for i in 0 ..< len(expected) {
 		testing.expect_value(t, strided_data[i], expected[i])
+	}
+}
+
+
+@(test)
+test_chunk :: proc(t: ^testing.T) {
+	// Test chunking a 4D tensor along channel dimension
+	data := make([]f32, 24, context.temp_allocator) // 1x6x2x2 tensor
+	for i in 0 ..< 24 {
+		data[i] = f32(i + 1)
+	}
+	tensor := new_with_init(data, []uint{1, 6, 2, 2}, context.temp_allocator)
+	defer free_tensor(tensor, context.temp_allocator)
+
+	// Split into 2 groups along dimension 1 (channels)
+	chunks := chunk(tensor, 2, 1, context.temp_allocator)
+	defer {
+		for chunk_tensor in chunks {
+			free_tensor(chunk_tensor, context.temp_allocator)
+		}
+		delete(chunks, context.temp_allocator)
+	}
+
+	// Check we have 2 chunks
+	testing.expect(t, len(chunks) == 2, "Should have 2 chunks")
+
+	// Check first chunk shape: [1, 3, 2, 2]
+	expected_shape := []uint{1, 3, 2, 2}
+	testing.expect(t, slice.equal(chunks[0].shape, expected_shape), "First chunk shape incorrect")
+	testing.expect(t, slice.equal(chunks[1].shape, expected_shape), "Second chunk shape incorrect")
+
+	// Check first chunk data (first 12 elements: 1-12)
+	for i in 0 ..< 12 {
+		testing.expect(
+			t,
+			chunks[0].data[i] == f32(i + 1),
+			fmt.tprintf(
+				"First chunk data at %d incorrect: got %f, expected %f",
+				i,
+				chunks[0].data[i],
+				f32(i + 1),
+			),
+		)
+	}
+
+	// Check second chunk data (next 12 elements: 13-24)
+	for i in 0 ..< 12 {
+		testing.expect(
+			t,
+			chunks[1].data[i] == f32(i + 13),
+			fmt.tprintf(
+				"Second chunk data at %d incorrect: got %f, expected %f",
+				i,
+				chunks[1].data[i],
+				f32(i + 13),
+			),
+		)
+	}
+}
+
+@(test)
+test_cat :: proc(t: ^testing.T) {
+	// Create two 2x2 tensors to concatenate
+	data1 := []f32{1, 2, 3, 4}
+	data2 := []f32{5, 6, 7, 8}
+
+	tensor1 := new_with_init(data1, []uint{1, 2, 2}, context.temp_allocator)
+	tensor2 := new_with_init(data2, []uint{1, 2, 2}, context.temp_allocator)
+	defer free_tensor(tensor1, context.temp_allocator)
+	defer free_tensor(tensor2, context.temp_allocator)
+
+	tensors := []^Tensor(f32){tensor1, tensor2}
+
+	// Concatenate along dimension 0 (batch dimension)
+	result := cat(tensors, 0, context.temp_allocator)
+	defer free_tensor(result, context.temp_allocator)
+
+	// Expected shape: [2, 2, 2]
+	expected_shape := []uint{2, 2, 2}
+	testing.expect(t, slice.equal(result.shape, expected_shape), "Cat result shape incorrect")
+
+	// Expected data: [1, 2, 3, 4, 5, 6, 7, 8]
+	expected_data := []f32{1, 2, 3, 4, 5, 6, 7, 8}
+	for i in 0 ..< len(expected_data) {
+		testing.expect(
+			t,
+			result.data[i] == expected_data[i],
+			fmt.tprintf(
+				"Cat result data at %d incorrect: got %f, expected %f",
+				i,
+				result.data[i],
+				expected_data[i],
+			),
+		)
 	}
 }

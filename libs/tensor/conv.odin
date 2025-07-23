@@ -63,8 +63,79 @@ im2col :: proc(
 	return t_out
 }
 
+conv2d_grouped :: proc(
+	input: ^Tensor($T), // (B, C_in, H, W)
+	kernel: ^Tensor(T), // (C_out, C_in_per_group, K_h, K_w)
+	groups: uint,
+	stride, dilation, padding: uint,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	// Extract dimensions
+	b, c_in, h, w := input.shape[0], input.shape[1], input.shape[2], input.shape[3]
+	c_out, c_in_k, k_h, k_w := kernel.shape[0], kernel.shape[1], kernel.shape[2], kernel.shape[3]
+
+	// Validate group constraints
+	if c_in % groups != 0 {
+		panic("Input channels must be divisible by groups")
+	}
+	if c_out % groups != 0 {
+		panic("Output channels must be divisible by groups")
+	}
+	if c_in_k != c_in / groups {
+		panic("Kernel input channels must equal input channels per group")
+	}
+
+	if groups == 1 {
+		return conv2d_single(input, kernel, stride, dilation, padding, allocator, loc)
+	}
+
+	// Split input and kernel into groups
+	input_chunks := chunk(input, groups, 1, context.temp_allocator) // Split along channel dimension
+	defer {
+		for chunk_tensor in input_chunks {
+			free_tensor(chunk_tensor, context.temp_allocator)
+		}
+		delete(input_chunks, context.temp_allocator)
+	}
+
+	kernel_chunks := chunk(kernel, groups, 0, context.temp_allocator) // Split along output channel dimension
+	defer {
+		for chunk_tensor in kernel_chunks {
+			free_tensor(chunk_tensor, context.temp_allocator)
+		}
+		delete(kernel_chunks, context.temp_allocator)
+	}
+
+	// Apply convolution to each group
+	results := make([]^Tensor(T), groups, context.temp_allocator)
+	defer delete(results, context.temp_allocator)
+
+	for i in 0 ..< groups {
+		results[i] = conv2d_single(
+			input_chunks[i],
+			kernel_chunks[i],
+			stride,
+			dilation,
+			padding,
+			context.temp_allocator,
+		)
+	}
+
+	// Concatenate results along output channel dimension (dim=1)
+	final_result := cat(results, 1, allocator, loc)
+
+	// Clean up intermediate results
+	for result in results {
+		free_tensor(result, context.temp_allocator)
+	}
+
+	return final_result
+}
+
 conv2d :: proc {
 	conv2d_single,
+	conv2d_grouped,
 }
 
 conv2d_single :: proc(

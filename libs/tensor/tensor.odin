@@ -569,3 +569,102 @@ matrix_transpose :: proc(
 
 	return transpose(tensor, second_last, last, allocator, loc)
 }
+
+// Split tensor into chunks along specified dimension
+chunk :: proc(
+	tensor: ^Tensor($T),
+	groups: uint,
+	dim: uint,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> []^Tensor(T) {
+	if dim >= uint(len(tensor.shape)) {
+		panic("Dimension index out of range")
+	}
+
+	dim_size := tensor.shape[dim]
+	if dim_size % groups != 0 {
+		panic("Dimension size must be divisible by number of groups")
+	}
+
+	chunk_size := dim_size / groups
+	chunks := make([]^Tensor(T), groups, allocator)
+
+	for i in 0 ..< groups {
+		// Create view tensor for this chunk
+		chunk_tensor := new(Tensor(T), allocator)
+		chunk_tensor.data = tensor.data // Share the data
+		chunk_tensor.shape = make([]uint, len(tensor.shape), allocator)
+		chunk_tensor.strides = make([]uint, len(tensor.strides), allocator)
+		chunk_tensor.contiguous = false // Views are typically not contiguous
+		chunk_tensor.owns_data = false // This is a view of the original tensor
+
+		// Copy shape and strides, but modify the chunked dimension
+		copy(chunk_tensor.shape, tensor.shape)
+		copy(chunk_tensor.strides, tensor.strides)
+		chunk_tensor.shape[dim] = chunk_size
+
+		// Calculate offset for this chunk
+		offset := i * chunk_size * tensor.strides[dim]
+		chunk_tensor.data = tensor.data[offset:]
+
+		chunks[i] = chunk_tensor
+	}
+
+	return chunks
+}
+
+// Concatenate tensors along specified dimension
+cat :: proc(
+	tensors: []^Tensor($T),
+	dim: uint,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	if len(tensors) == 0 {
+		panic("Cannot concatenate empty tensor list")
+	}
+
+	first := tensors[0]
+	if dim >= uint(len(first.shape)) {
+		panic("Dimension index out of range")
+	}
+
+	// Verify all tensors have compatible shapes
+	for tensor in tensors[1:] {
+		if len(tensor.shape) != len(first.shape) {
+			panic("All tensors must have same number of dimensions")
+		}
+		for i in 0 ..< len(first.shape) {
+			if i != int(dim) && tensor.shape[i] != first.shape[i] {
+				panic("All tensors must have same size in non-concatenated dimensions")
+			}
+		}
+	}
+
+	// Calculate output shape
+	output_shape := make([]uint, len(first.shape), allocator)
+	copy(output_shape, first.shape)
+
+	total_dim_size: uint = 0
+	for tensor in tensors {
+		total_dim_size += tensor.shape[dim]
+	}
+	output_shape[dim] = total_dim_size
+
+	// Create output tensor
+	result := tensor_alloc(T, output_shape, true, allocator, loc)
+
+	// Copy data from each tensor
+	offset: uint = 0
+	for tensor in tensors {
+		tensor_data, allocated := get_strided_data(tensor, allocator = context.temp_allocator)
+		defer if allocated do delete(tensor_data, context.temp_allocator)
+
+		tensor_size := shape_to_size(tensor.shape)
+		copy(result.data[offset:offset + tensor_size], tensor_data)
+		offset += tensor_size
+	}
+
+	return result
+}
