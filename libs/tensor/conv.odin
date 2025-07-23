@@ -16,8 +16,15 @@ im2col :: proc(
 	h_out, w_out := get_hw(h, w, h_k, w_k, stride, dilation, padding)
 	src_s0, src_s1, src_s2, src_s3 := t.strides[0], t.strides[1], t.strides[2], t.strides[3]
 
-	src, src_allocated := get_strided_data(t)
-	dst := make([]T, b * h_out * w_out * c * h_k * w_k, allocator, loc)
+	// Use original tensor data directly if contiguous
+	src := t.data
+	src_allocated := false
+	if !t.contiguous {
+		src, src_allocated = get_strided_data(t, allocator = context.temp_allocator)
+	}
+	
+	dst_size := b * h_out * w_out * c * h_k * w_k
+	dst := make([]T, dst_size, allocator, loc)
 
 	for b_idx in 0 ..< b {
 		for h_idx in 0 ..< h_out {
@@ -25,21 +32,11 @@ im2col :: proc(
 				for c_idx in 0 ..< c {
 					for h_k_idx in 0 ..< h_k {
 						src_h := h_idx * stride + h_k_idx * dilation
-						if padding != 0 && (src_h < padding || src_h >= h + padding) {
-							continue
-						}
-						src_h = src_h - padding
-
+						
 						for w_k_idx in 0 ..< w_k {
 							src_w := w_idx * stride + w_k_idx * dilation
-							if padding != 0 && (src_w < padding || src_w >= w + padding) {
-								continue
-							}
-							src_w = src_w - padding
-
-							// Calculate indices fresh each time
-							src_idx :=
-								b_idx * src_s0 + c_idx * src_s1 + src_h * src_s2 + src_w * src_s3
+							
+							// Calculate dst_idx first
 							dst_idx :=
 								b_idx * h_out * w_out * c * h_k * w_k +
 								h_idx * w_out * c * h_k * w_k +
@@ -47,6 +44,36 @@ im2col :: proc(
 								c_idx * h_k * w_k +
 								h_k_idx * w_k +
 								w_k_idx
+							
+							// Bounds check dst_idx
+							if dst_idx >= dst_size {
+								panic("dst_idx out of bounds in im2col")
+							}
+							
+							// Handle padding cases - set to zero instead of skipping
+							if padding != 0 && (src_h < padding || src_h >= h + padding ||
+							                   src_w < padding || src_w >= w + padding) {
+								dst[dst_idx] = T(0) // Zero padding
+								continue
+							}
+							
+							// Adjust for padding
+							adj_src_h := src_h - padding
+							adj_src_w := src_w - padding
+							
+							// Bounds check adjusted coordinates
+							if adj_src_h >= h || adj_src_w >= w {
+								dst[dst_idx] = T(0) // Zero padding
+								continue
+							}
+
+							// Calculate source index
+							src_idx := b_idx * src_s0 + c_idx * src_s1 + adj_src_h * src_s2 + adj_src_w * src_s3
+							
+							// Bounds check src_idx
+							if src_idx >= len(src) {
+								panic("src_idx out of bounds in im2col")
+							}
 
 							dst[dst_idx] = src[src_idx]
 						}
