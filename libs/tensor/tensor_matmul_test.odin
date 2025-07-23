@@ -256,6 +256,118 @@ test_tensor_matmul_higher_rank_first :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_tensor_matmul_rank4_rank3 :: proc(t: ^testing.T) {
+	// Test rank-4 @ rank-3: [2, 2, 3, 2] @ [2, 2, 4] -> [2, 2, 3, 4]
+	// First tensor has batch dims [2, 2], second has batch dims [2]
+	// Broadcasting: [2, 2] vs [2] -> [2, 2]
+	
+	a_data := []f32 {
+		// Batch [0,0]: [[1,2], [3,4], [5,6]]
+		1, 2,
+		3, 4,
+		5, 6,
+		// Batch [0,1]: [[7,8], [9,10], [11,12]]
+		7, 8,
+		9, 10,
+		11, 12,
+		// Batch [1,0]: [[13,14], [15,16], [17,18]]
+		13, 14,
+		15, 16,
+		17, 18,
+		// Batch [1,1]: [[19,20], [21,22], [23,24]]
+		19, 20,
+		21, 22,
+		23, 24,
+	}
+	
+	b_data := []f32 {
+		// Batch [0]: [[1,2,3,4], [5,6,7,8]]
+		1, 2, 3, 4,
+		5, 6, 7, 8,
+		// Batch [1]: [[9,10,11,12], [13,14,15,16]]
+		9, 10, 11, 12,
+		13, 14, 15, 16,
+	}
+	
+	a := new_with_init(a_data, []uint{2, 2, 3, 2}, context.temp_allocator)
+	b := new_with_init(b_data, []uint{2, 2, 4}, context.temp_allocator)
+	defer free_tensor(a, context.temp_allocator)
+	defer free_tensor(b, context.temp_allocator)
+	
+	result := matmul(a, b, context.temp_allocator)
+	defer free_tensor(result, context.temp_allocator)
+	
+	// Expected shape: [2, 2, 3, 4]
+	expected_shape := []uint{2, 2, 3, 4}
+	testing.expect(t, slice.equal(result.shape, expected_shape), "Rank-4 @ rank-3 shape incorrect")
+	
+	// Check batch [0,0]: [[1,2], [3,4], [5,6]] @ [[1,2,3,4], [5,6,7,8]]
+	// Row 0: [1,2] @ [[1,2,3,4], [5,6,7,8]] = [1*1+2*5, 1*2+2*6, 1*3+2*7, 1*4+2*8] = [11, 14, 17, 20]
+	testing.expect(t, result.data[0] == 11, "Rank-4@rank-3 batch [0,0] row 0 col 0 incorrect")
+	testing.expect(t, result.data[1] == 14, "Rank-4@rank-3 batch [0,0] row 0 col 1 incorrect")
+	testing.expect(t, result.data[2] == 17, "Rank-4@rank-3 batch [0,0] row 0 col 2 incorrect")
+	testing.expect(t, result.data[3] == 20, "Rank-4@rank-3 batch [0,0] row 0 col 3 incorrect")
+	
+	// Check batch [1,1]: [[19,20], [21,22], [23,24]] @ [[9,10,11,12], [13,14,15,16]]
+	// This should be at offset: 1*2*3*4 + 1*3*4 = 24 + 12 = 36
+	// Row 0: [19,20] @ [[9,10,11,12], [13,14,15,16]] = [19*9+20*13, 19*10+20*14, 19*11+20*15, 19*12+20*16]
+	// = [171+260, 190+280, 209+300, 228+320] = [431, 470, 509, 548]
+	testing.expect(t, result.data[36] == 431, "Rank-4@rank-3 batch [1,1] row 0 col 0 incorrect")
+}
+
+@(test)
+test_tensor_matmul_rank3_rank2 :: proc(t: ^testing.T) {
+	// Test rank-3 @ rank-2: [3, 2, 3] @ [3, 2] -> [3, 2, 2]
+	// First tensor has batch dims [3], second has no batch dims []
+	// Broadcasting: [3] vs [] -> [3]
+	
+	a_data := []f32 {
+		// Batch [0]: [[1,2,3], [4,5,6]]
+		1, 2, 3,
+		4, 5, 6,
+		// Batch [1]: [[7,8,9], [10,11,12]]
+		7, 8, 9,
+		10, 11, 12,
+		// Batch [2]: [[13,14,15], [16,17,18]]
+		13, 14, 15,
+		16, 17, 18,
+	}
+	
+	b_data := []f32 {
+		1, 2,  // [[1,2],
+		3, 4,  //  [3,4],
+		5, 6,  //  [5,6]]
+	}
+	
+	a := new_with_init(a_data, []uint{3, 2, 3}, context.temp_allocator)
+	b := new_with_init(b_data, []uint{3, 2}, context.temp_allocator)
+	defer free_tensor(a, context.temp_allocator)
+	defer free_tensor(b, context.temp_allocator)
+	
+	result := matmul(a, b, context.temp_allocator)
+	defer free_tensor(result, context.temp_allocator)
+	
+	// Expected shape: [3, 2, 2]
+	expected_shape := []uint{3, 2, 2}
+	testing.expect(t, slice.equal(result.shape, expected_shape), "Rank-3 @ rank-2 shape incorrect")
+	
+	// Check batch [0]: [[1,2,3], [4,5,6]] @ [[1,2], [3,4], [5,6]]
+	// Row 0: [1,2,3] @ [[1,2], [3,4], [5,6]] = [1*1+2*3+3*5, 1*2+2*4+3*6] = [22, 28]
+	// Row 1: [4,5,6] @ [[1,2], [3,4], [5,6]] = [4*1+5*3+6*5, 4*2+5*4+6*6] = [49, 64]
+	testing.expect(t, result.data[0] == 22, "Rank-3@rank-2 batch [0] row 0 col 0 incorrect")
+	testing.expect(t, result.data[1] == 28, "Rank-3@rank-2 batch [0] row 0 col 1 incorrect")
+	testing.expect(t, result.data[2] == 49, "Rank-3@rank-2 batch [0] row 1 col 0 incorrect")
+	testing.expect(t, result.data[3] == 64, "Rank-3@rank-2 batch [0] row 1 col 1 incorrect")
+	
+	// Check batch [2]: [[13,14,15], [16,17,18]] @ [[1,2], [3,4], [5,6]]
+	// This should be at offset: 2*2*2 = 8
+	// Row 0: [13,14,15] @ [[1,2], [3,4], [5,6]] = [13*1+14*3+15*5, 13*2+14*4+15*6]
+	// = [13+42+75, 26+56+90] = [130, 172] (not 146!)
+	testing.expect(t, result.data[8] == 130, "Rank-3@rank-2 batch [2] row 0 col 0 incorrect")
+	testing.expect(t, result.data[9] == 172, "Rank-3@rank-2 batch [2] row 0 col 1 incorrect")
+}
+
+@(test)
 test_tensor_matmul_noncontiguous :: proc(t: ^testing.T) {
 	a := new_with_init([]f32{1, 2, 3, 4}, []uint{2, 2}, context.temp_allocator)
 	b := new_with_init([]f32{1, 1, 2, 2}, []uint{2, 2}, context.temp_allocator)
