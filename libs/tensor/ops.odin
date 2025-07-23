@@ -585,6 +585,7 @@ UnaryOp :: enum {
 	NEG, // Negation: -x
 	RELU, // ReLU: max(x, 0)
 	GELU, // GELU activation function
+	SQRT, // Square root: sqrt(x)
 }
 
 // Individual operation implementations - forced inline for zero overhead
@@ -603,6 +604,11 @@ unary_gelu :: #force_inline proc($T: typeid, x: T) -> T where T == f32 || T == f
 	sqrt_2_over_pi := math.sqrt(T(2.0) / math.PI)
 	inner := sqrt_2_over_pi * (x + T(0.044715) * x * x * x)
 	return T(0.5) * x * (T(1.0) + math.tanh(inner))
+}
+
+@(private)
+unary_sqrt :: #force_inline proc($T: typeid, x: T) -> T where T == f32 || T == f64 || T == f16 {
+	return math.sqrt(x)
 }
 
 // Generic elementwise unary operation with compile-time specialization
@@ -625,6 +631,12 @@ elementwise_unary_op :: proc(
 				result.data[i] = unary_gelu(T, tensor.data[i])
 			} else {
 				panic("GELU only supports f16, f32, f64")
+			}
+		case .SQRT:
+			when T == f32 || T == f64 || T == f16 {
+				result.data[i] = unary_sqrt(T, tensor.data[i])
+			} else {
+				panic("SQRT only supports f16, f32, f64")
 			}
 		}
 	}
@@ -661,4 +673,14 @@ gelu :: proc(
 	T == f64 ||
 	T == f16 {
 	return elementwise_unary_op(tensor, .GELU, allocator, loc)
+}
+
+sqrt :: proc(
+	tensor: ^Tensor($T),
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) where T == f32 ||
+	T == f64 ||
+	T == f16 {
+	return elementwise_unary_op(tensor, .SQRT, allocator, loc)
 }

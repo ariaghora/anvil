@@ -44,7 +44,7 @@ Tiny_ViT_5m :: struct($T: typeid) {
 	layer0:                 ^Conv_Layer,
 	layers:                 []^Basic_Layer,
 	neck_conv1, neck_conv2: ^nn.Conv_2d(T),
-	neck_ln1, neck_ln2:     ^nn.Layer_Norm_2d,
+	neck_ln1, neck_ln2:     ^nn.Layer_Norm(T),
 }
 
 new_vit_5m :: proc($T: typeid, allocator := context.allocator) -> ^Tiny_ViT_5m(T) {
