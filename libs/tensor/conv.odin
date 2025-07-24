@@ -8,6 +8,14 @@ get_hw :: proc(h_im, w_im, h_k, w_k, stride, dilation, padding: uint) -> (uint, 
 	return h_out, w_out
 }
 
+// NOTE(Aria): tuned for M1 chips. Basically this depends on cache size
+// TILE_H :: 64
+// TILE_W :: 64
+// TILE_C :: 16
+TILE_H :: 16
+TILE_W :: 16
+TILE_C :: 8
+
 im2col :: proc(
 	t: ^Tensor($T),
 	h_k, w_k, stride, dilation, padding: uint,
@@ -34,65 +42,88 @@ im2col :: proc(
 		src_idx_b := b_idx * src_s0
 		dst_idx_b := b_idx * h_out * w_out * c * h_k * w_k
 
-		for c_idx in 0 ..< c {
-			src_idx_c := src_idx_b + c_idx * src_s1
+		// Tile over channels
+		for c_tile_start := uint(0); c_tile_start < c; c_tile_start += TILE_C {
+			c_tile_end := min(c_tile_start + TILE_C, c)
 
-			for h_k_idx in 0 ..< h_k {
-				// Pre-calculate valid h_idx range for this kernel position
-				h_k_offset := h_k_idx * dilation
-				h_idx_start := uint(0)
-				h_idx_end := h_out
+			// Tile over output height
+			for h_tile_start := uint(0); h_tile_start < h_out; h_tile_start += TILE_H {
+				h_tile_end := min(h_tile_start + TILE_H, h_out)
 
-				if padding != 0 {
-					// Find first valid h_idx
-					if h_k_offset < padding {
-						h_idx_start = (padding - h_k_offset + stride - 1) / stride
-					}
-					// Find last valid h_idx
-					max_src_h := h + padding - 1
-					if h_k_offset > max_src_h {
-						h_idx_end = 0 // No valid indices
-					} else {
-						h_idx_end = min(h_out, (max_src_h - h_k_offset) / stride + 1)
-					}
-				}
+				// Tile over output width
+				for w_tile_start := uint(0); w_tile_start < w_out; w_tile_start += TILE_W {
+					w_tile_end := min(w_tile_start + TILE_W, w_out)
 
-				for w_k_idx in 0 ..< w_k {
-					// Pre-calculate valid w_idx range for this kernel position
-					w_k_offset := w_k_idx * dilation
-					w_idx_start := uint(0)
-					w_idx_end := w_out
+					// Now process this tile completely
+					for c_idx in c_tile_start ..< c_tile_end {
+						src_idx_c := src_idx_b + c_idx * src_s1
 
-					if padding != 0 {
-						// Find first valid w_idx
-						if w_k_offset < padding {
-							w_idx_start = (padding - w_k_offset + stride - 1) / stride
-						}
-						// Find last valid w_idx
-						max_src_w := w + padding - 1
-						if w_k_offset > max_src_w {
-							w_idx_end = 0 // No valid indices
-						} else {
-							w_idx_end = min(w_out, (max_src_w - w_k_offset) / stride + 1)
-						}
-					}
+						for h_k_idx in 0 ..< h_k {
+							// Pre-calculate valid h range for this tile
+							h_k_offset := h_k_idx * dilation
+							h_idx_start := h_tile_start
+							h_idx_end := h_tile_end
 
-					for h_idx in h_idx_start ..< h_idx_end {
-						src_h := h_idx * stride + h_k_offset - padding
-						src_idx_h := src_idx_c + src_h * src_s2
+							if padding != 0 {
+								if h_k_offset < padding {
+									h_idx_start = max(
+										h_tile_start,
+										(padding - h_k_offset + stride - 1) / stride,
+									)
+								}
+								max_src_h := h + padding - 1
+								if h_k_offset > max_src_h {
+									continue // Skip this kernel position entirely
+								}
+								h_idx_end = min(h_idx_end, (max_src_h - h_k_offset) / stride + 1)
+							}
 
-						for w_idx in w_idx_start ..< w_idx_end {
-							src_w := w_idx * stride + w_k_offset - padding
-							src_idx := src_idx_h + src_w * src_s3
+							for w_k_idx in 0 ..< w_k {
+								// Pre-calculate valid w range for this tile
+								w_k_offset := w_k_idx * dilation
+								w_idx_start := w_tile_start
+								w_idx_end := w_tile_end
 
-							dst_idx :=
-								dst_idx_b +
-								(h_idx * w_out + w_idx) * (c * h_k * w_k) +
-								c_idx * h_k * w_k +
-								h_k_idx * w_k +
-								w_k_idx
+								if padding != 0 {
+									if w_k_offset < padding {
+										w_idx_start = max(
+											w_tile_start,
+											(padding - w_k_offset + stride - 1) / stride,
+										)
+									}
+									max_src_w := w + padding - 1
+									if w_k_offset > max_src_w {
+										continue // Skip this kernel position entirely
+									}
+									w_idx_end = min(
+										w_idx_end,
+										(max_src_w - w_k_offset) / stride + 1,
+									)
+								}
 
-							dst[dst_idx] = src[src_idx]
+								// Inner loops process only the tile
+								for h_idx in h_idx_start ..< h_idx_end {
+									src_h := h_idx * stride + h_k_offset - padding
+									src_idx_h := src_idx_c + src_h * src_s2
+
+									// Pre-calculate some destination indices
+									dst_idx_h_base :=
+										dst_idx_b +
+										h_idx * w_out * (c * h_k * w_k) +
+										c_idx * h_k * w_k +
+										h_k_idx * w_k +
+										w_k_idx
+
+									for w_idx in w_idx_start ..< w_idx_end {
+										src_w := w_idx * stride + w_k_offset - padding
+										src_idx := src_idx_h + src_w * src_s3
+
+										dst_idx := dst_idx_h_base + w_idx * (c * h_k * w_k)
+
+										dst[dst_idx] = src[src_idx]
+									}
+								}
+							}
 						}
 					}
 				}
@@ -101,10 +132,8 @@ im2col :: proc(
 	}
 	trace.end_scoped_trace(im2col_building)
 
-	im2col_output_alloc_trace := trace.TRACE_SECTION("im2col_output_alloc")
 	t_out := tensor_alloc(T, []uint{b, h_out * w_out, c * h_k * w_k}, false, allocator, loc)
 	t_out.data = dst
-	trace.end_scoped_trace(im2col_output_alloc_trace)
 
 	return t_out
 }

@@ -1,8 +1,10 @@
 package nn
 
 import "../tensor"
+import "../trace"
 import "core:math"
 
+UNROLL_FACTOR :: 8
 
 // BatchNorm2d - 2D Batch Normalization for convolutional layers
 // Input shape: (N, C, H, W) - normalizes over (N, H, W) dimensions per channel
@@ -47,44 +49,59 @@ free_batch_norm_2d :: proc(bn: ^Batch_Norm_2d($T), allocator := context.allocato
 	free(bn, allocator)
 }
 
+
+// NOTE(Aria): This is optimized implementation, so we don't use tensor abstraction and broadcasting
+// too much. Not a clean code. Deal with it.
 forward_batch_norm_2d :: proc(
 	bn: ^Batch_Norm_2d($T),
-	x: ^tensor.Tensor(T), // Input: (N, C, H, W)
+	x: ^tensor.Tensor(T),
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
-	// Validate input shape
-	if len(x.shape) != 4 {
-		panic("BatchNorm2d input must be 4D tensor (N, C, H, W)")
-	}
-
-	if x.shape[1] != bn.num_features {
-		panic("Input channels mismatch with num_features")
-	}
-
 	n, c, h, w := x.shape[0], x.shape[1], x.shape[2], x.shape[3]
+	spatial_size := h * w
 
-	// Reshape tensors for broadcasting: (C,) -> (1, C, 1, 1)
-	mean_reshaped := tensor.reshape(bn.running_mean, []uint{1, c, 1, 1}, context.temp_allocator)
-	var_reshaped := tensor.reshape(bn.running_var, []uint{1, c, 1, 1}, context.temp_allocator)
-	weight_reshaped := tensor.reshape(bn.weight, []uint{1, c, 1, 1}, context.temp_allocator)
-	bias_reshaped := tensor.reshape(bn.bias, []uint{1, c, 1, 1}, context.temp_allocator)
+	result := tensor.zeros(T, x.shape, allocator)
 
-	// Compute: (x - mean) / sqrt(var + eps) * weight + bias
-	// Step 1: x - mean
-	x_centered := tensor.sub(x, mean_reshaped, context.temp_allocator)
+	// Precompute ALL scales and shifts at once
+	scales := make([]T, c, context.temp_allocator)
+	shifts := make([]T, c, context.temp_allocator)
 
-	// Step 2: sqrt(var + eps)
-	eps_tensor := tensor.new_with_init([]T{bn.eps}, []uint{1, 1, 1, 1}, context.temp_allocator)
-	var_eps := tensor.add(var_reshaped, eps_tensor, context.temp_allocator)
-	std := tensor.sqrt(var_eps, context.temp_allocator)
+	#no_bounds_check for ch in 0 ..< c {
+		mean := bn.running_mean.data[ch]
+		var := bn.running_var.data[ch]
+		weight := bn.weight.data[ch]
+		bias := bn.bias.data[ch]
 
-	// Step 3: (x - mean) / sqrt(var + eps)
-	x_normalized := tensor.div(x_centered, std, context.temp_allocator)
+		scale := weight / math.sqrt(var + bn.eps)
+		scales[ch] = scale
+		shifts[ch] = bias - mean * scale
+	}
 
-	// Step 4: * weight + bias
-	x_scaled := tensor.mul(x_normalized, weight_reshaped, context.temp_allocator)
-	result := tensor.add(x_scaled, bias_reshaped, allocator, loc)
+	// Process in batch-first order for better cache locality
+	#no_bounds_check for batch in 0 ..< n {
+		batch_offset := batch * c * spatial_size
+		for ch in 0 ..< c {
+			scale := scales[ch]
+			shift := shifts[ch]
+
+			base_idx := batch_offset + ch * spatial_size
+
+			i := uint(0)
+			for ; i + UNROLL_FACTOR <= spatial_size; i += UNROLL_FACTOR {
+				#unroll for j in 0 ..< UNROLL_FACTOR {
+					idx := base_idx + i + uint(j)
+					result.data[idx] = x.data[idx] * scale + shift
+				}
+			}
+
+			// Handle remainder
+			for ; i < spatial_size; i += 1 {
+				idx := base_idx + i
+				result.data[idx] = x.data[idx] * scale + shift
+			}
+		}
+	}
 
 	return result
 }
@@ -226,6 +243,9 @@ forward_layer_norm :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
+	forward_layer_norm_trace := trace.TRACE_FUNCTION("forward_layer_norm")
+	defer trace.end_scoped_trace(forward_layer_norm_trace)
+
 	// Validate that the last dimensions match normalized_shape
 	input_rank := len(x.shape)
 	norm_rank := len(ln.normalized_shape)

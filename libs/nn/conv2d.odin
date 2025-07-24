@@ -119,18 +119,34 @@ forward_conv2d :: proc(
 	// Add bias if present
 	if bias, has_bias := conv.b.?; has_bias {
 		conv_add_bias := trace.TRACE_SECTION("conv_add_bias")
-		// Bias shape: (out_channels,)
-		// Output shape: (batch_size, out_channels, height, width)
-		// Need to reshape bias to (1, out_channels, 1, 1) for broadcasting
-		bias_reshaped := tensor.reshape(
-			bias,
-			[]uint{1, conv.out_channels, 1, 1},
-			context.temp_allocator,
-		)
-		biased_out := tensor.add(out, bias_reshaped, allocator, loc)
-		tensor.free_tensor(out, allocator)
+
+		batch_size := out.shape[0]
+		out_channels := out.shape[1]
+		spatial_size := out.shape[2] * out.shape[3]
+
+		// Just add the damn bias directly
+		#no_bounds_check for b in 0 ..< batch_size {
+			for c in 0 ..< out_channels {
+				bias_val := bias.data[c]
+				base_idx := (b * out_channels + c) * spatial_size
+
+				// Unroll for vectorization
+				i := uint(0)
+				for ; i + UNROLL_FACTOR <= spatial_size; i += UNROLL_FACTOR {
+					#unroll for j in 0 ..< UNROLL_FACTOR {
+						out.data[base_idx + i + uint(j)] += bias_val
+					}
+				}
+
+				// Handle remainder
+				for ; i < spatial_size; i += 1 {
+					out.data[base_idx + i] += bias_val
+				}
+			}
+		}
+
 		trace.end_scoped_trace(conv_add_bias)
-		return biased_out
+		return out
 	}
 
 	return out

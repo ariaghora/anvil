@@ -395,97 +395,127 @@ forward_attention :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
-	start_time := time.now()
+	forward_attention_trace := trace.TRACE_FUNCTION("forward_attention")
+	defer trace.end_scoped_trace(forward_attention_trace)
+
 	b, n := x.shape[0], x.shape[1]
+	h := attn.num_heads
+	d_k := attn.key_dim
+	d_v := attn.d
 
 	// Layer norm
 	xs := nn.forward_layer_norm(attn.norm, x, context.temp_allocator)
 
 	// QKV projection
 	qkv := nn.forward_linear(attn.qkv, xs, context.temp_allocator)
-	qkv_reshaped := tensor.reshape(
-		qkv,
-		[]uint{b, n, attn.num_heads, attn.key_dim * 2 + attn.d},
-		context.temp_allocator,
-	)
 
-	// Extract Q, K, V from the reshaped QKV tensor
-	q := tensor.zeros(T, []uint{b, n, attn.num_heads, attn.key_dim}, context.temp_allocator)
-	k := tensor.zeros(T, []uint{b, n, attn.num_heads, attn.key_dim}, context.temp_allocator)
-	v := tensor.zeros(T, []uint{b, n, attn.num_heads, attn.d}, context.temp_allocator)
+	// Reshape QKV for easier slicing
+	qkv_reshaped := tensor.reshape(qkv, []uint{b, n, h, 2 * d_k + d_v}, context.temp_allocator)
 
-	// Copy data from QKV tensor to Q, K, V tensors
-	qkv_stride := attn.key_dim * 2 + attn.d
-	total_ops := b * n * attn.num_heads
-	completed_ops := 0
+	// Create views for Q, K, V without copying data
+	// This is the key optimization - use tensor slicing/views instead of copying
+	q_shape := []uint{b, n, h, d_k}
+	k_shape := []uint{b, n, h, d_k}
+	v_shape := []uint{b, n, h, d_v}
 
-	for batch in 0 ..< b {
-		for pos in 0 ..< n {
-			for head in 0 ..< attn.num_heads {
-				completed_ops += 1
-				base_idx := ((batch * n + pos) * attn.num_heads + head) * qkv_stride
+	// Create Q, K, V as views into the QKV tensor (if your tensor library supports it)
+	// Otherwise, we need to copy but can do it more efficiently
+	q := tensor.zeros(T, q_shape, context.temp_allocator)
+	k := tensor.zeros(T, k_shape, context.temp_allocator)
+	v := tensor.zeros(T, v_shape, context.temp_allocator)
 
-				// Copy Q
-				for i in 0 ..< attn.key_dim {
-					q_idx := ((batch * n + pos) * attn.num_heads + head) * attn.key_dim + i
-					q.data[q_idx] = qkv_reshaped.data[base_idx + i]
-				}
+	// Optimized copy - do it in one pass with better memory access
+	qkv_copy_trace := trace.TRACE_FUNCTION("qkv_copy_matmul")
+	total_elements := b * n * h
+	#no_bounds_check for i in 0 ..< total_elements {
+		batch_idx := i / (n * h)
+		remainder := i % (n * h)
+		pos_idx := remainder / h
+		head_idx := remainder % h
 
-				// Copy K
-				for i in 0 ..< attn.key_dim {
-					k_idx := ((batch * n + pos) * attn.num_heads + head) * attn.key_dim + i
-					k.data[k_idx] = qkv_reshaped.data[base_idx + attn.key_dim + i]
-				}
+		base_src := i * (2 * d_k + d_v)
+		base_q := i * d_k
+		base_k := i * d_k
+		base_v := i * d_v
 
-				// Copy V
-				for i in 0 ..< attn.d {
-					v_idx := ((batch * n + pos) * attn.num_heads + head) * attn.d + i
-					v.data[v_idx] = qkv_reshaped.data[base_idx + attn.key_dim * 2 + i]
-				}
-			}
-		}
+		// Copy Q
+		copy(q.data[base_q:base_q + d_k], qkv_reshaped.data[base_src:base_src + d_k])
+
+		// Copy K
+		copy(k.data[base_k:base_k + d_k], qkv_reshaped.data[base_src + d_k:base_src + 2 * d_k])
+
+		// Copy V
+		copy(
+			v.data[base_v:base_v + d_v],
+			qkv_reshaped.data[base_src + 2 * d_k:base_src + 2 * d_k + d_v],
+		)
 	}
+	trace.end_scoped_trace(qkv_copy_trace)
 
+	qkv_permute_transpose_matmul_trace := trace.TRACE_FUNCTION("qkv_permute_transpose_matmul")
 	// Reshape for attention: (B, N, H, D) -> (B, H, N, D)
 	q_transposed := tensor.permute(q, []uint{0, 2, 1, 3}, context.temp_allocator)
 	k_transposed := tensor.permute(k, []uint{0, 2, 1, 3}, context.temp_allocator)
 	v_transposed := tensor.permute(v, []uint{0, 2, 1, 3}, context.temp_allocator)
 
-	// Attention computation: Q @ K^T
+	// Attention computation: Q @ K^T - USE BLAS!
 	k_t := tensor.matrix_transpose(k_transposed, context.temp_allocator)
 	attn_scores := tensor.matmul(q_transposed, k_t, context.temp_allocator)
+	trace.end_scoped_trace(qkv_permute_transpose_matmul_trace)
 
-	// Scale
-	scale_tensor := tensor.new_with_init([]T{attn.scale}, []uint{1}, context.temp_allocator)
-	scaled_scores := tensor.mul(attn_scores, scale_tensor, context.temp_allocator)
+	// Scale scores in-place
+	scale := attn.scale
+	#no_bounds_check for i in 0 ..< b * h * n * n {
+		attn_scores.data[i] *= scale
+	}
 
-	// Add attention bias - slice to match actual sequence length
+	// NOTE(Claude): Skip the bias tensor allocation
+	// NOTE(Aria): Fuck it, implement after this
 
-	// Create appropriately sized bias tensor for current sequence length
-	current_bias := tensor.zeros(T, []uint{attn.num_heads, n, n}, context.temp_allocator)
-	// Copy relevant portion of the pre-allocated bias (for now just use zeros)
-	// In a full implementation, this would copy learned relative position biases
+	// Softmax - do it in-place to avoid allocation
+	// Process each (batch, head) separately
+	#no_bounds_check for bh in 0 ..< b * h {
+		for row in 0 ..< n {
+			row_offset := bh * n * n + row * n
 
-	biased_scores := tensor.add(scaled_scores, current_bias, context.temp_allocator)
+			// Find max
+			max_val := attn_scores.data[row_offset]
+			for col in 1 ..< n {
+				if attn_scores.data[row_offset + col] > max_val {
+					max_val = attn_scores.data[row_offset + col]
+				}
+			}
 
-	// Apply softmax to get attention weights
-	attn_weights := tensor.gelu(biased_scores, context.temp_allocator)
+			// Exp and sum
+			sum := T(0)
+			for col in 0 ..< n {
+				val := math.exp(attn_scores.data[row_offset + col] - max_val)
+				attn_scores.data[row_offset + col] = val
+				sum += val
+			}
 
-	// Apply attention to values
-	attn_output := tensor.matmul(attn_weights, v_transposed, context.temp_allocator)
+			// Normalize
+			inv_sum := T(1) / sum
+			for col in 0 ..< n {
+				attn_scores.data[row_offset + col] *= inv_sum
+			}
+		}
+	}
+
+	// Apply attention to values - USE BLAS!
+	attn_output := tensor.matmul(attn_scores, v_transposed, context.temp_allocator)
 
 	// Reshape back: (B, H, N, D) -> (B, N, H*D)
 	output_transposed := tensor.permute(attn_output, []uint{0, 2, 1, 3}, context.temp_allocator)
 	output_reshaped := tensor.reshape(
 		output_transposed,
-		[]uint{b, n, attn.dh},
+		[]uint{b, n, h * d_v},
 		context.temp_allocator,
 	)
 
 	// Final projection
 	result := nn.forward_linear(attn.proj, output_reshaped, allocator, loc)
 
-	duration := time.since(start_time)
 	return result
 }
 
@@ -598,163 +628,171 @@ forward_tiny_vit_block :: proc(
 
 	h, w := block.input_resolution[0], block.input_resolution[1]
 	b, l, c := x.shape[0], x.shape[1], x.shape[2]
-
 	window_size := block.window_size
-	attn_out: ^tensor.Tensor(T)
 
 	// Skip windowing if input matches window size
 	if h == window_size && w == window_size {
 		global_attention_trace := trace.TRACE_SECTION("global_attention")
-		attn_out = forward_attention(block.attn, x, context.temp_allocator)
+		attn_out := forward_attention(block.attn, x, context.temp_allocator)
 		trace.end_scoped_trace(global_attention_trace)
-	} else {
-		win_attention_trace := trace.TRACE_SECTION("windowed_attention")
 
-		// Calculate padded dimensions
-		pad_h := (window_size - (h % window_size)) % window_size
-		pad_w := (window_size - (w % window_size)) % window_size
-		padded_h := h + pad_h
-		padded_w := w + pad_w
-		n_h := padded_h / window_size
-		n_w := padded_w / window_size
+		// Add residual
+		xs := tensor.add(attn_out, x, context.temp_allocator)
 
-		// Reshape to 4D
-		xs := tensor.reshape(x, []uint{b, h, w, c}, context.temp_allocator)
+		// Local conv
+		actual_l := xs.shape[1]
+		actual_spatial_dim := uint(math.sqrt_f64(f64(actual_l)))
+		actual_h, actual_w := actual_spatial_dim, actual_spatial_dim
 
-		// Create padded tensor if needed
-		if pad_h > 0 || pad_w > 0 {
-			padded := tensor.zeros(T, []uint{b, padded_h, padded_w, c}, context.temp_allocator)
+		xs_4d := tensor.reshape(xs, []uint{b, actual_h, actual_w, c}, context.temp_allocator)
+		xs_conv := tensor.permute(xs_4d, []uint{0, 3, 1, 2}, context.temp_allocator)
+		conv_out := forward_conv_2d_bn(block.local_conv, xs_conv, context.temp_allocator)
+		conv_flat := tensor.reshape(conv_out, []uint{b, c, actual_l}, context.temp_allocator)
+		conv_final := tensor.transpose(conv_flat, 1, 2, context.temp_allocator)
 
-			// Copy data with batched memcpy
-			for batch in 0 ..< b {
-				for row in 0 ..< h {
-					src_offset := (batch * h * w + row * w) * c
-					dst_offset := (batch * padded_h * padded_w + row * padded_w) * c
-					copy(
-						padded.data[dst_offset:dst_offset + w * c],
-						xs.data[src_offset:src_offset + w * c],
-					)
-				}
-			}
-			xs = padded
-		}
+		// MLP with residual
+		mlp_out := forward_mlp(block.mlp, conv_final, context.temp_allocator)
+		result := tensor.add(conv_final, mlp_out, allocator, loc)
 
-		// Window partitioning with single allocation
-		windows := tensor.zeros(
-			T,
-			[]uint{b * n_h * n_w, window_size * window_size, c},
-			context.temp_allocator,
-		)
-
-		// Efficient windowing with better memory access pattern
-		#no_bounds_check {
-			window_idx: uint = 0
-			for batch in 0 ..< b {
-				for h_idx in 0 ..< n_h {
-					for w_idx in 0 ..< n_w {
-						// Copy each window
-						for wh in 0 ..< window_size {
-							for ww in 0 ..< window_size {
-								src_h := h_idx * window_size + wh
-								src_w := w_idx * window_size + ww
-								src_idx := ((batch * padded_h + src_h) * padded_w + src_w) * c
-								dst_idx :=
-									(window_idx * window_size * window_size +
-										wh * window_size +
-										ww) *
-									c
-
-								// Copy all channels at once
-								copy(
-									windows.data[dst_idx:dst_idx + c],
-									xs.data[src_idx:src_idx + c],
-								)
-							}
-						}
-						window_idx += 1
-					}
-				}
-			}
-		}
-
-		// Apply attention to all windows at once
-		attn_windows := forward_attention(block.attn, windows, context.temp_allocator)
-
-		// Merge windows back
-		merged := tensor.zeros(T, []uint{b, padded_h, padded_w, c}, context.temp_allocator)
-
-		#no_bounds_check {
-			window_idx: uint = 0
-			for batch in 0 ..< b {
-				for h_idx in 0 ..< n_h {
-					for w_idx in 0 ..< n_w {
-						// Copy each window back
-						for wh in 0 ..< window_size {
-							for ww in 0 ..< window_size {
-								dst_h := h_idx * window_size + wh
-								dst_w := w_idx * window_size + ww
-								src_idx :=
-									(window_idx * window_size * window_size +
-										wh * window_size +
-										ww) *
-									c
-								dst_idx := ((batch * padded_h + dst_h) * padded_w + dst_w) * c
-
-								copy(
-									merged.data[dst_idx:dst_idx + c],
-									attn_windows.data[src_idx:src_idx + c],
-								)
-							}
-						}
-						window_idx += 1
-					}
-				}
-			}
-		}
-
-		// Remove padding if needed
-		if pad_h > 0 || pad_w > 0 {
-			unpadded := tensor.zeros(T, []uint{b, h, w, c}, context.temp_allocator)
-
-			for batch in 0 ..< b {
-				for row in 0 ..< h {
-					src_offset := (batch * padded_h * padded_w + row * padded_w) * c
-					dst_offset := (batch * h * w + row * w) * c
-					copy(
-						unpadded.data[dst_offset:dst_offset + w * c],
-						merged.data[src_offset:src_offset + w * c],
-					)
-				}
-			}
-			merged = unpadded
-		}
-
-		// Final reshape
-		attn_out = tensor.reshape(merged, []uint{b, l, c}, context.temp_allocator)
-
-		trace.end_scoped_trace(win_attention_trace)
+		return result
 	}
 
-	// Rest remains the same
-	xs := tensor.add(attn_out, x, context.temp_allocator)
+	win_attention_trace := trace.TRACE_SECTION("windowed_attention")
+
+	// Calculate padding
+	pad_h := (window_size - (h % window_size)) % window_size
+	pad_w := (window_size - (w % window_size)) % window_size
+	padded_h := h + pad_h
+	padded_w := w + pad_w
+	n_h := padded_h / window_size
+	n_w := padded_w / window_size
+	n_windows := b * n_h * n_w
+
+	// Single allocation for windowed data
+	windows := tensor.zeros(
+		T,
+		[]uint{n_windows, window_size * window_size, c},
+		context.temp_allocator,
+	)
+
+	// Extract windows with inline padding (no intermediate tensor)
+	#no_bounds_check {
+		window_idx := uint(0)
+		for batch in 0 ..< b {
+			batch_offset := batch * h * w * c
+			for h_win in 0 ..< n_h {
+				for w_win in 0 ..< n_w {
+					win_h_start := h_win * window_size
+					win_w_start := w_win * window_size
+
+					// Extract window
+					for local_h in 0 ..< window_size {
+						src_h := win_h_start + local_h
+						if src_h >= h {continue} 	// Padding region
+
+						for local_w in 0 ..< window_size {
+							src_w := win_w_start + local_w
+							if src_w >= w {continue} 	// Padding region
+
+							src_idx := batch_offset + (src_h * w + src_w) * c
+							dst_idx :=
+								(window_idx * window_size * window_size +
+									local_h * window_size +
+									local_w) *
+								c
+
+							// Copy channels - unroll for better performance
+							i := uint(0)
+							for ; i + 8 <= c; i += 8 {
+								#unroll for j in 0 ..< 8 {
+									windows.data[dst_idx + i + uint(j)] =
+										x.data[src_idx + i + uint(j)]
+								}
+							}
+							for ; i < c; i += 1 {
+								windows.data[dst_idx + i] = x.data[src_idx + i]
+							}
+						}
+					}
+					window_idx += 1
+				}
+			}
+		}
+	}
+
+	// Apply attention
+	attn_windows := forward_attention(block.attn, windows, context.temp_allocator)
+
+	// Merge windows back AND add residual in one pass
+	result_3d := tensor.zeros(T, []uint{b, l, c}, context.temp_allocator)
+
+	#no_bounds_check {
+		window_idx := uint(0)
+		for batch in 0 ..< b {
+			batch_offset := batch * h * w * c
+			for h_win in 0 ..< n_h {
+				for w_win in 0 ..< n_w {
+					win_h_start := h_win * window_size
+					win_w_start := w_win * window_size
+
+					// Merge window back
+					for local_h in 0 ..< window_size {
+						src_h := win_h_start + local_h
+						if src_h >= h {continue} 	// Skip padding
+
+						for local_w in 0 ..< window_size {
+							src_w := win_w_start + local_w
+							if src_w >= w {continue} 	// Skip padding
+
+							src_idx :=
+								(window_idx * window_size * window_size +
+									local_h * window_size +
+									local_w) *
+								c
+							dst_idx := batch_offset + (src_h * w + src_w) * c
+
+							// Merge + residual in one pass
+							i := uint(0)
+							for ; i + 8 <= c; i += 8 {
+								#unroll for j in 0 ..< 8 {
+									idx := dst_idx + i + uint(j)
+									result_3d.data[idx] =
+										attn_windows.data[src_idx + i + uint(j)] + x.data[idx]
+								}
+							}
+							for ; i < c; i += 1 {
+								idx := dst_idx + i
+								result_3d.data[idx] = attn_windows.data[src_idx + i] + x.data[idx]
+							}
+						}
+					}
+					window_idx += 1
+				}
+			}
+		}
+	}
+
+	trace.end_scoped_trace(win_attention_trace)
 
 	// Local conv
-	actual_l := xs.shape[1]
-	actual_spatial_dim := uint(math.sqrt_f64(f64(actual_l)))
-	actual_h, actual_w := actual_spatial_dim, actual_spatial_dim
-
-	xs_4d := tensor.reshape(xs, []uint{b, actual_h, actual_w, c}, context.temp_allocator)
+	xs_4d := tensor.reshape(result_3d, []uint{b, h, w, c}, context.temp_allocator)
 	xs_conv := tensor.permute(xs_4d, []uint{0, 3, 1, 2}, context.temp_allocator)
 	conv_out := forward_conv_2d_bn(block.local_conv, xs_conv, context.temp_allocator)
-	conv_flat := tensor.reshape(conv_out, []uint{b, c, actual_l}, context.temp_allocator)
+	conv_flat := tensor.reshape(conv_out, []uint{b, c, l}, context.temp_allocator)
 	conv_final := tensor.transpose(conv_flat, 1, 2, context.temp_allocator)
 
 	// MLP with residual
 	mlp_out := forward_mlp(block.mlp, conv_final, context.temp_allocator)
-	result := tensor.add(conv_final, mlp_out, allocator, loc)
 
-	return result
+	// Final output - allocate and compute in one pass
+	final_result := tensor.zeros(T, []uint{b, l, c}, allocator, loc)
+	#no_bounds_check for i in 0 ..< b * l * c {
+		final_result.data[i] = conv_final.data[i] + mlp_out.data[i]
+	}
+
+	return final_result
 }
+
 free_tiny_vit_block :: proc(block: ^Tiny_ViT_Block($T), allocator := context.allocator) {
 	free_attention(block.attn, allocator)
 	free_conv_2d_bn(block.local_conv, allocator)

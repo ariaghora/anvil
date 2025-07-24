@@ -26,22 +26,47 @@ free_linear :: proc(l: ^Linear($T), allocator := context.allocator) {
 	free(l, allocator)
 }
 
+import "../trace"
+
 forward_linear :: proc(
 	l: ^Linear($T),
 	x: ^tensor.Tensor(T),
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
+	forward_linear_trace := trace.TRACE_FUNCTION("forward_linear")
+	defer trace.end_scoped_trace(forward_linear_trace)
+
 	out := tensor.matmul(x, l.w, allocator, loc)
-	
+
 	// Add bias if present
 	if bias, has_bias := l.b.?; has_bias {
-		// Broadcast bias addition: (batch_size, out_feat) + (out_feat,) -> (batch_size, out_feat)
-		biased_out := tensor.add(out, bias, allocator, loc)
-		tensor.free_tensor(out, allocator)
-		return biased_out
+		// Get dimensions
+		out_features := out.shape[len(out.shape) - 1]
+		total_elements := tensor.shape_to_size(out.shape)
+		batch_elements := total_elements / out_features
+
+		// Add bias in-place
+		for i in 0 ..< batch_elements {
+			base_idx := i * out_features
+
+			// Vectorized bias addition
+			j := uint(0)
+			for ; j + 8 <= out_features; j += 8 {
+				#unroll for k in 0 ..< 8 {
+					out.data[base_idx + j + uint(k)] += bias.data[j + uint(k)]
+				}
+			}
+
+			// Handle remainder
+			for ; j < out_features; j += 1 {
+				out.data[base_idx + j] += bias.data[j]
+			}
+		}
+
+		return out
 	}
-	
+
 	return out
 }
 
