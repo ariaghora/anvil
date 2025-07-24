@@ -77,30 +77,120 @@ get_strided_data :: proc(
 	res: []T,
 	allocated: bool,
 ) {
-	target_strides := strides
-	target_shape := shape
-	if (strides == nil) {
-		target_strides = arr.strides
-	}
-	if (shape == nil) {
-		target_shape = arr.shape
-	}
+	target_strides := strides if strides != nil else arr.strides
+	target_shape := shape if shape != nil else arr.shape
 
+	// Fast path - already contiguous
 	if arr.contiguous &&
 	   (slice.equal(arr.shape, target_shape) || shape == nil) &&
 	   (slice.equal(arr.strides, target_strides) || strides == nil) {
 		return arr.data, false
 	}
 
-	// return strided
 	size := shape_to_size(target_shape)
 	data := make([]T, size, allocator)
-	i: uint
-	for i in 0 ..< size {
-		i_strided := compute_strided_index(target_shape, target_strides, i)
-		data[i] = arr.data[i_strided]
+
+	// Specialized copy loops based on dimensionality
+	switch len(target_shape) {
+	case 1:
+		copy_strided_1d(data, arr.data, target_shape, target_strides)
+	case 2:
+		copy_strided_2d(data, arr.data, target_shape, target_strides)
+	case 3:
+		copy_strided_3d(data, arr.data, target_shape, target_strides)
+	case 4:
+		copy_strided_4d(data, arr.data, target_shape, target_strides)
+	case:
+		copy_strided_nd(data, arr.data, target_shape, target_strides)
 	}
+
 	return data, true
+}
+
+@(private = "file")
+copy_strided_1d :: proc(dst, src: []$T, shape, strides: []uint) {
+	s0 := strides[0]
+	for i in 0 ..< shape[0] {
+		dst[i] = src[i * s0]
+	}
+}
+
+@(private = "file")
+copy_strided_2d :: proc(dst, src: []$T, shape, strides: []uint) {
+	s0, s1 := strides[0], strides[1]
+	d0, d1 := shape[0], shape[1]
+	dst_idx := 0
+
+	for i in 0 ..< d0 {
+		src_row := i * s0
+		for j in 0 ..< d1 {
+			dst[dst_idx] = src[src_row + j * s1]
+			dst_idx += 1
+		}
+	}
+}
+
+@(private = "file")
+copy_strided_3d :: proc(dst, src: []$T, shape, strides: []uint) {
+	s0, s1, s2 := strides[0], strides[1], strides[2]
+	d0, d1, d2 := shape[0], shape[1], shape[2]
+	dst_idx := 0
+
+	for i in 0 ..< d0 {
+		src_plane := i * s0
+		for j in 0 ..< d1 {
+			src_row := src_plane + j * s1
+			for k in 0 ..< d2 {
+				dst[dst_idx] = src[src_row + k * s2]
+				dst_idx += 1
+			}
+		}
+	}
+}
+
+@(private = "file")
+copy_strided_4d :: proc(dst, src: []$T, shape, strides: []uint) {
+	s0, s1, s2, s3 := strides[0], strides[1], strides[2], strides[3]
+	d0, d1, d2, d3 := shape[0], shape[1], shape[2], shape[3]
+	dst_idx := 0
+
+	for i in 0 ..< d0 {
+		src_batch := i * s0
+		for j in 0 ..< d1 {
+			src_plane := src_batch + j * s1
+			for k in 0 ..< d2 {
+				src_row := src_plane + k * s2
+				for l in 0 ..< d3 {
+					dst[dst_idx] = src[src_row + l * s3]
+					dst_idx += 1
+				}
+			}
+		}
+	}
+}
+
+@(private = "file")
+copy_strided_nd :: proc(dst, src: []$T, shape, strides: []uint) {
+	// For higher dimensions, use your existing approach but optimize
+	// by pre-computing as much as possible
+	indices := make([]uint, len(shape), context.temp_allocator)
+
+	for dst_idx in 0 ..< len(dst) {
+		// Update indices
+		carry := dst_idx
+		for dim := len(shape) - 1; dim >= 0; dim -= 1 {
+			indices[dim] = uint(carry % int(shape[dim]))
+			carry /= int(shape[dim])
+		}
+
+		// Compute source index
+		src_idx: uint = 0
+		for dim in 0 ..< len(shape) {
+			src_idx += indices[dim] * strides[dim]
+		}
+
+		dst[dst_idx] = src[src_idx]
+	}
 }
 
 // Deep copy of tensor data. The copy will be an exact replica of the original
@@ -488,35 +578,24 @@ permute :: proc(
 		panic("Number of dims must equal tensor dimensions")
 	}
 
-	// Check that dims contains each dimension exactly once
-	used := make([]bool, len(tensor.shape), context.temp_allocator)
-	defer delete(used, context.temp_allocator)
+	// Create new shape and strides
+	new_shape := make([]uint, len(tensor.shape), context.temp_allocator)
+	new_strides := make([]uint, len(tensor.strides), context.temp_allocator)
 
-	for dim in dims {
-		if dim < 0 || dim >= len(tensor.shape) {
-			panic("Dimension index out of range")
-		}
-		if used[dim] {
-			panic("Dimension specified multiple times")
-		}
-		used[dim] = true
-	}
-
-	// Create view tensor
-	result := new(Tensor(T), allocator)
-	result.data = tensor.data // Share the data
-	result.shape = make([]uint, len(tensor.shape), allocator)
-	result.strides = make([]uint, len(tensor.strides), allocator)
-	result.contiguous = false // Views are typically not contiguous
-	result.owns_data = false // This is a view of the original tensor
-
-	// Reorder shape and strides according to dims
 	for result_dim in 0 ..< len(dims) {
 		source_dim := dims[result_dim]
-		result.shape[result_dim] = tensor.shape[source_dim]
-		result.strides[result_dim] = tensor.strides[source_dim]
+		new_shape[result_dim] = tensor.shape[source_dim]
+		new_strides[result_dim] = tensor.strides[source_dim]
 	}
 
+	// Create contiguous result tensor
+	result := tensor_alloc(T, new_shape, true, allocator, loc)
+
+	// Get strided data with the permuted layout
+	data, allocated := get_strided_data(tensor, new_shape, new_strides, context.temp_allocator)
+	defer if allocated do delete(data, context.temp_allocator)
+
+	copy(result.data, data)
 	return result
 }
 
@@ -533,24 +612,25 @@ transpose :: proc(
 		panic("Dimension indices out of range")
 	}
 
-	// Create view tensor
-	result := new(Tensor(T), allocator)
-	result.data = tensor.data // Share the data
-	result.shape = make([]uint, len(tensor.shape), allocator)
-	result.strides = make([]uint, len(tensor.strides), allocator)
-	result.owns_data = false // This is a view of the original tensor
+	// Create new shape and strides
+	new_shape := make([]uint, len(tensor.shape), context.temp_allocator)
+	new_strides := make([]uint, len(tensor.strides), context.temp_allocator)
 
-	// Copy original shape and strides
-	copy(result.shape, tensor.shape)
-	copy(result.strides, tensor.strides)
+	copy(new_shape, tensor.shape)
+	copy(new_strides, tensor.strides)
 
-	// Swap the specified dimensions
-	result.shape[dim0], result.shape[dim1] = result.shape[dim1], result.shape[dim0]
-	result.strides[dim0], result.strides[dim1] = result.strides[dim1], result.strides[dim0]
+	// Swap dimensions
+	new_shape[dim0], new_shape[dim1] = new_shape[dim1], new_shape[dim0]
+	new_strides[dim0], new_strides[dim1] = new_strides[dim1], new_strides[dim0]
 
-	// Check if result is contiguous (only true if no actual swap or specific cases)
-	result.contiguous = (dim0 == dim1) && tensor.contiguous
+	// Create contiguous result tensor
+	result := tensor_alloc(T, new_shape, true, allocator, loc)
 
+	// Get strided data with the transposed layout
+	data, allocated := get_strided_data(tensor, new_shape, new_strides, context.temp_allocator)
+	defer if allocated do delete(data, context.temp_allocator)
+
+	copy(result.data, data)
 	return result
 }
 
@@ -603,7 +683,7 @@ chunk :: proc(
 		// Copy shape and modify the chunked dimension
 		copy(chunk_tensor.shape, tensor.shape)
 		chunk_tensor.shape[dim] = chunk_size
-		
+
 		// Recalculate strides for the new shape
 		stride: uint = 1
 		for i := len(chunk_tensor.shape) - 1; i >= 0; i -= 1 {

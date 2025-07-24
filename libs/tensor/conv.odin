@@ -2,19 +2,17 @@ package tensor
 
 import "../trace"
 
+// NOTE(Aria): tuned for M1 chips. Basically this depends on cache size
+TILE_H :: 64
+TILE_W :: 64
+TILE_C :: 16
+TILE_SIZE :: 8
+
 get_hw :: proc(h_im, w_im, h_k, w_k, stride, dilation, padding: uint) -> (uint, uint) {
 	h_out := (h_im + 2 * padding - dilation * (h_k - 1) - 1) / stride + 1
 	w_out := (w_im + 2 * padding - dilation * (w_k - 1) - 1) / stride + 1
 	return h_out, w_out
 }
-
-// NOTE(Aria): tuned for M1 chips. Basically this depends on cache size
-TILE_H :: 64
-TILE_W :: 64
-TILE_C :: 16
-// TILE_H :: 16
-// TILE_W :: 16
-// TILE_C :: 8
 
 im2col :: proc(
 	t: ^Tensor($T),
@@ -24,11 +22,10 @@ im2col :: proc(
 ) -> ^Tensor(T) {
 	conv_bn_trace := trace.TRACE_FUNCTION("im2col")
 	defer trace.end_scoped_trace(conv_bn_trace)
+
 	b, c, h, w := t.shape[0], t.shape[1], t.shape[2], t.shape[3]
 	h_out, w_out := get_hw(h, w, h_k, w_k, stride, dilation, padding)
-	src_s0, src_s1, src_s2, src_s3 := t.strides[0], t.strides[1], t.strides[2], t.strides[3]
 
-	// Use original tensor data directly if contiguous
 	src := t.data
 	if !t.contiguous {
 		src, _ = get_strided_data(t, allocator = context.temp_allocator)
@@ -38,6 +35,148 @@ im2col :: proc(
 	dst := make([]T, dst_size, allocator, loc)
 
 	im2col_building := trace.TRACE_SECTION("im2col_building")
+
+	if stride == 1 && dilation == 1 && padding == 0 && t.contiguous {
+		if h_k == 1 && w_k == 1 {
+			im2col_fast_1x1(src, dst, b, c, h, w, h_out, w_out)
+		} else if h_k == 3 && w_k == 3 {
+			im2col_fast_3x3(src, dst, b, c, h, w, h_out, w_out)
+		} else {
+			im2col_general(
+				src,
+				dst,
+				b,
+				c,
+				h,
+				w,
+				h_k,
+				w_k,
+				h_out,
+				w_out,
+				stride,
+				dilation,
+				padding,
+				t.strides,
+			)
+		}
+	} else {
+		im2col_general(
+			src,
+			dst,
+			b,
+			c,
+			h,
+			w,
+			h_k,
+			w_k,
+			h_out,
+			w_out,
+			stride,
+			dilation,
+			padding,
+			t.strides,
+		)
+	}
+
+	trace.end_scoped_trace(im2col_building)
+
+	t_out := tensor_alloc(T, []uint{b, h_out * w_out, c * h_k * w_k}, false, allocator, loc)
+	t_out.data = dst
+	return t_out
+}
+
+im2col_fast_1x1 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
+	im2col_trace := trace.TRACE_FUNCTION("im2col_1x1")
+	defer trace.end_scoped_trace(im2col_trace)
+
+	hw := h * w
+	chw := c * hw
+
+	#no_bounds_check {
+		for b_idx in 0 ..< b {
+			src_b := src[b_idx * chw:]
+			dst_b := dst[b_idx * hw * c:]
+
+			// Tile over spatial positions
+			for hw_tile := uint(0); hw_tile < hw; hw_tile += TILE_SIZE * TILE_SIZE {
+				hw_tile_end := min(hw_tile + TILE_SIZE * TILE_SIZE, hw)
+
+				// Tile over channels
+				for c_tile := uint(0); c_tile < c; c_tile += TILE_C {
+					c_tile_end := min(c_tile + TILE_C, c)
+
+					// Process this tile - now we're accessing contiguous chunks
+					for hw_idx := hw_tile; hw_idx < hw_tile_end; hw_idx += 1 {
+						dst_offset := hw_idx * c + c_tile
+
+						// Unroll for channels in this tile
+						c_idx := c_tile
+						for ; c_idx + TILE_SIZE - 1 < c_tile_end; c_idx += TILE_SIZE {
+							#unroll for i in 0 ..< TILE_SIZE {
+								dst_b[dst_offset + uint(i)] =
+									src_b[(c_idx + uint(i)) * hw + hw_idx]
+							}
+							dst_offset += TILE_SIZE
+						}
+
+						// Handle remainder
+						for ; c_idx < c_tile_end; c_idx += 1 {
+							dst_b[dst_offset] = src_b[c_idx * hw + hw_idx]
+							dst_offset += 1
+						}
+					}
+				}
+			}
+		}
+	}
+}
+im2col_fast_3x3 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
+	im2col_trace := trace.TRACE_FUNCTION("im2col_3x3")
+	defer trace.end_scoped_trace(im2col_trace)
+	dst_idx := 0
+	hw := h * w
+	chw := c * hw
+
+	#no_bounds_check {
+		for b_idx in 0 ..< b {
+			src_b := src[b_idx * chw:]
+
+			for h_idx in 0 ..< h_out {
+				for w_idx in 0 ..< w_out {
+					#unroll for h_k_idx in 0 ..< 3 {
+						#unroll for w_k_idx in 0 ..< 3 {
+							src_offset := (h_idx + uint(h_k_idx)) * w + w_idx + uint(w_k_idx)
+
+							c_idx := uint(0)
+							for ; c_idx + 7 < c; c_idx += 8 {
+								#unroll for i in 0 ..< 8 {
+									dst[dst_idx] = src_b[(c_idx + uint(i)) * hw + src_offset]
+									dst_idx += 1
+								}
+							}
+
+							for ; c_idx < c; c_idx += 1 {
+								dst[dst_idx] = src_b[c_idx * hw + src_offset]
+								dst_idx += 1
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+im2col_general :: proc(
+	src, dst: []$T,
+	b, c, h, w, h_k, w_k, h_out, w_out: uint,
+	stride, dilation, padding: uint,
+	strides: []uint,
+) {
+	im2col_trace := trace.TRACE_FUNCTION("im2col_general")
+	defer trace.end_scoped_trace(im2col_trace)
+	src_s0, src_s1, src_s2, src_s3 := strides[0], strides[1], strides[2], strides[3]
+
 	for b_idx in 0 ..< b {
 		src_idx_b := b_idx * src_s0
 		dst_idx_b := b_idx * h_out * w_out * c * h_k * w_k
@@ -130,12 +269,6 @@ im2col :: proc(
 			}
 		}
 	}
-	trace.end_scoped_trace(im2col_building)
-
-	t_out := tensor_alloc(T, []uint{b, h_out * w_out, c * h_k * w_k}, false, allocator, loc)
-	t_out.data = dst
-
-	return t_out
 }
 
 conv2d_grouped :: proc(
@@ -202,6 +335,46 @@ conv2d :: proc {
 	conv2d_grouped,
 }
 
+// Specialized for conv2d: (B*H*W, C) -> (B, C, H, W)
+reshape_bhwc_to_bchw :: proc(
+	tensor: ^Tensor($T),
+	batch, height, width, channels: uint,
+	allocator := context.allocator,
+) -> ^Tensor(T) {
+	result := tensor_alloc(T, []uint{batch, channels, height, width}, true, allocator)
+
+	src := tensor.data
+	dst := result.data
+
+	for b in 0 ..< batch {
+		for c_tile := uint(0); c_tile < channels; c_tile += TILE_SIZE {
+			c_end := min(c_tile + TILE_SIZE, channels)
+
+			for h in 0 ..< height {
+				for w in 0 ..< width {
+					src_base := b * height * width * channels + h * width * channels + w * channels
+					dst_base := b * channels * height * width + h * width + w
+
+					// Unroll by 8 when we have full tile
+					if c_end - c_tile == TILE_SIZE {
+						#unroll for i in 0 ..< TILE_SIZE {
+							dst[dst_base + (c_tile + uint(i)) * height * width] =
+								src[src_base + c_tile + uint(i)]
+						}
+					} else {
+						// Handle remainder
+						for c := c_tile; c < c_end; c += 1 {
+							dst[dst_base + c * height * width] = src[src_base + c]
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return result
+}
+
 conv2d_single :: proc(
 	input: ^Tensor($T), // (B, C_in, H, W)
 	kernel: ^Tensor(T), // (C_out, C_in, K_h, K_w)
@@ -232,8 +405,9 @@ conv2d_single :: proc(
 	trace.end_scoped_trace(im2col_matmul_trace)
 
 	// Step 4: Reshape back to (B, C_out, H_out, W_out)
-	output := reshape(result, []uint{b, h_out, w_out, c_out}, allocator)
-	final := permute(output, []uint{0, 3, 1, 2}, allocator, loc) // BHWC -> BCHW
+	reshape_back_get_strided_data_trace := trace.TRACE_SECTION("reshape_back_get_strided_data")
+	final := reshape_bhwc_to_bchw(result, b, h_out, w_out, c_out, allocator)
+	trace.end_scoped_trace(reshape_back_get_strided_data_trace)
 
 	return final
 }

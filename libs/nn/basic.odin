@@ -28,6 +28,7 @@ free_linear :: proc(l: ^Linear($T), allocator := context.allocator) {
 
 import "../trace"
 
+
 forward_linear :: proc(
 	l: ^Linear($T),
 	x: ^tensor.Tensor(T),
@@ -52,8 +53,8 @@ forward_linear :: proc(
 
 			// Vectorized bias addition
 			j := uint(0)
-			for ; j + 8 <= out_features; j += 8 {
-				#unroll for k in 0 ..< 8 {
+			for ; j + UNROLL_FACTOR <= out_features; j += UNROLL_FACTOR {
+				#unroll for k in 0 ..< UNROLL_FACTOR {
 					out.data[base_idx + j + uint(k)] += bias.data[j + uint(k)]
 				}
 			}

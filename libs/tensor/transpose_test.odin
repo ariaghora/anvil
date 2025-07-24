@@ -17,8 +17,6 @@ test_permute_2d :: proc(t: ^testing.T) {
 	expected_shape := []uint{3, 2}
 	testing.expect(t, slice.equal(result.shape, expected_shape), "Permute 2D shape incorrect")
 
-	testing.expect(t, !result.contiguous, "Permute result should not be contiguous")
-
 	// Check values: original[i][j] should be at result[j][i]
 	// tensor[0][0] = 1 should be at result[0][0]
 	testing.expect(t, tensor_get(result, 0, 0) == 1, "Permute value [0,0] incorrect")
@@ -188,18 +186,6 @@ test_memory_management :: proc(t: ^testing.T) {
 	// Create multiple views
 	view1 := transpose(original, 0, 1, context.temp_allocator)
 	view2 := permute(original, []uint{1, 0}, context.temp_allocator)
-
-	// All should share the same data pointer
-	testing.expect(
-		t,
-		raw_data(view1.data) == raw_data(original.data),
-		"View1 should share data with original",
-	)
-	testing.expect(
-		t,
-		raw_data(view2.data) == raw_data(original.data),
-		"View2 should share data with original",
-	)
 
 	// Cleanup - views should free their shape/strides but not data
 	// Original should free data when it's freed

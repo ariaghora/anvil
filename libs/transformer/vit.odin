@@ -52,8 +52,6 @@ gelu_fast :: proc(
 		for ; i + 8 <= n; i += 8 {
 			#unroll for j in 0 ..< 8 {
 				val := x.data[i + uint(j)]
-				// Fast sigmoid: 1 / (1 + exp(-x))
-				// Even faster approximation: 0.5 + 0.5 * tanh(0.5 * x)
 				sigmoid_input := scale * val
 				sigmoid := T(0.5) * (T(1.0) + tanh_fast(sigmoid_input * T(0.5)))
 				result.data[i + uint(j)] = val * sigmoid
@@ -525,6 +523,7 @@ forward_attention :: proc(
 
 	// Softmax - do it in-place to avoid allocation
 	// Process each (batch, head) separately
+	attention_softmax_trace := trace.TRACE_FUNCTION("attention_softmax")
 	#no_bounds_check for bh in 0 ..< b * h {
 		for row in 0 ..< n {
 			row_offset := bh * n * n + row * n
@@ -552,6 +551,7 @@ forward_attention :: proc(
 			}
 		}
 	}
+	trace.end_scoped_trace(attention_softmax_trace)
 
 	// Apply attention to values - USE BLAS!
 	attn_output := tensor.matmul(attn_scores, v_transposed, context.temp_allocator)

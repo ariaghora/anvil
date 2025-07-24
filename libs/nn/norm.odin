@@ -4,7 +4,7 @@ import "../tensor"
 import "../trace"
 import "core:math"
 
-UNROLL_FACTOR :: 8
+UNROLL_FACTOR :: 16
 
 // BatchNorm2d - 2D Batch Normalization for convolutional layers
 // Input shape: (N, C, H, W) - normalizes over (N, H, W) dimensions per channel
@@ -278,29 +278,55 @@ forward_layer_norm_1d :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
-	// For input shape (..., normalized_shape[0])
-	// Compute mean and variance over the last dimension
-	last_dim := len(x.shape) - 1
+	forward_layer_norm_trace := trace.TRACE_FUNCTION("forward_layer_norm_1d")
+	defer trace.end_scoped_trace(forward_layer_norm_trace)
 
-	// Compute mean: sum over last dimension and divide by size
-	mean := tensor.tensor_mean(x, last_dim, true, context.temp_allocator)
+	// Get dimensions
+	normalized_dim := ln.normalized_shape[0]
+	total_elements := tensor.shape_to_size(x.shape)
+	num_groups := total_elements / normalized_dim
 
-	// Compute variance: E[(x - mean)^2]
-	x_centered := tensor.sub(x, mean, context.temp_allocator)
-	x_squared := tensor.mul(x_centered, x_centered, context.temp_allocator)
-	variance := tensor.tensor_mean(x_squared, last_dim, true, context.temp_allocator)
+	result := tensor.zeros(T, x.shape, allocator, loc)
 
-	// Add eps and take sqrt
-	eps_tensor := tensor.new_with_init([]T{ln.eps}, []uint{1}, context.temp_allocator)
-	var_eps := tensor.add(variance, eps_tensor, context.temp_allocator)
-	std := tensor.sqrt(var_eps, context.temp_allocator)
+	#no_bounds_check for group in 0 ..< num_groups {
+		base_idx := group * normalized_dim
 
-	// Normalize: (x - mean) / std
-	x_norm := tensor.div(x_centered, std, context.temp_allocator)
+		// Compute mean
+		mean := T(0)
+		for i in 0 ..< normalized_dim {
+			mean += x.data[base_idx + i]
+		}
+		mean /= T(normalized_dim)
 
-	// Scale and shift: x_norm * weight + bias
-	x_scaled := tensor.mul(x_norm, ln.weight, context.temp_allocator)
-	result := tensor.add(x_scaled, ln.bias, allocator, loc)
+		// Compute variance
+		variance := T(0)
+		for i in 0 ..< normalized_dim {
+			diff := x.data[base_idx + i] - mean
+			variance += diff * diff
+		}
+		variance /= T(normalized_dim)
+
+		// Compute scale factor: 1 / sqrt(variance + eps)
+		inv_std := T(1) / math.sqrt(variance + ln.eps)
+
+		// Apply normalization, scale and bias in one pass
+		i := uint(0)
+		for ; i + 8 <= normalized_dim; i += 8 {
+			#unroll for j in 0 ..< 8 {
+				idx := base_idx + i + uint(j)
+				normalized := (x.data[idx] - mean) * inv_std
+				result.data[idx] =
+					normalized * ln.weight.data[i + uint(j)] + ln.bias.data[i + uint(j)]
+			}
+		}
+
+		// Handle remainder
+		for ; i < normalized_dim; i += 1 {
+			idx := base_idx + i
+			normalized := (x.data[idx] - mean) * inv_std
+			result.data[idx] = normalized * ln.weight.data[i] + ln.bias.data[i]
+		}
+	}
 
 	return result
 }
@@ -313,6 +339,8 @@ forward_layer_norm_nd :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
+	forward_layer_norm_trace := trace.TRACE_FUNCTION("forward_layer_norm_nd")
+	defer trace.end_scoped_trace(forward_layer_norm_trace)
 	input_rank := len(x.shape)
 	norm_rank := len(ln.normalized_shape)
 

@@ -20,7 +20,7 @@ main :: proc() {
 	main_trace := trace.TRACE_FUNCTION("main")
 	defer trace.end_scoped_trace(main_trace)
 
-	imgsz := uint(256)
+	imgsz := uint(1024)
 
 	model_init_trace := trace.TRACE_SECTION("model_initialization")
 	model := tf.new_tiny_vit_5m(f32, imgsz, arena_alloc)
@@ -41,7 +41,5 @@ main :: proc() {
 	output := tf.forward_tiny_vit_5m(model, input, arena_alloc)
 	trace.end_scoped_trace(forward_trace)
 	trace.trace_instant("forward_pass_completed")
-
-	tensor.print(output)
 
 }
