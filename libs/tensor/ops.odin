@@ -1,5 +1,6 @@
 package tensor
 
+import "../trace"
 import "core:log"
 import "core:math"
 import "core:mem"
@@ -664,6 +665,7 @@ relu :: proc(
 	return elementwise_unary_op(tensor, .RELU, allocator, loc)
 }
 
+
 // GELU activation function - only supports floating point types
 gelu :: proc(
 	tensor: ^Tensor($T),
@@ -672,6 +674,9 @@ gelu :: proc(
 ) -> ^Tensor(T) where T == f32 ||
 	T == f64 ||
 	T == f16 {
+	gelu_trace := trace.TRACE_FUNCTION("gelu")
+	defer trace.end_scoped_trace(gelu_trace)
+
 	return elementwise_unary_op(tensor, .GELU, allocator, loc)
 }
 

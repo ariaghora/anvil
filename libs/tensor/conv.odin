@@ -9,12 +9,12 @@ get_hw :: proc(h_im, w_im, h_k, w_k, stride, dilation, padding: uint) -> (uint, 
 }
 
 // NOTE(Aria): tuned for M1 chips. Basically this depends on cache size
-// TILE_H :: 64
-// TILE_W :: 64
-// TILE_C :: 16
-TILE_H :: 16
-TILE_W :: 16
-TILE_C :: 8
+TILE_H :: 64
+TILE_W :: 64
+TILE_C :: 16
+// TILE_H :: 16
+// TILE_W :: 16
+// TILE_C :: 8
 
 im2col :: proc(
 	t: ^Tensor($T),
@@ -190,7 +190,9 @@ conv2d_grouped :: proc(
 	trace.end_scoped_trace(grouped_conv_trace)
 
 	// Concatenate results along output channel dimension (dim=1)
+	grouped_conv_cat_trace := trace.TRACE_SECTION("grouped_conv_cat")
 	final_result := cat(results, 1, allocator, loc)
+	trace.end_scoped_trace(grouped_conv_cat_trace)
 
 	return final_result
 }

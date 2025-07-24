@@ -21,6 +21,57 @@ Conv_2d_BN :: struct($T: typeid) {
 	bn:   ^nn.Batch_Norm_2d(T),
 }
 
+tanh_fast :: proc(x: $T) -> T where T == f32 || T == f64 {
+	// Pade approximation of tanh
+	x2 := x * x
+	a := x * (T(135135) + x2 * (T(17325) + x2 * (T(378) + x2)))
+	b := T(135135) + x2 * (T(62370) + x2 * (T(3150) + x2 * T(28)))
+	return a / b
+}
+
+// GELU approximation, inspired from from BERT
+gelu_fast :: proc(
+	x: ^tensor.Tensor($T),
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^tensor.Tensor(T) where T == f32 ||
+	T == f64 {
+	gelu_fast_trace := trace.TRACE_FUNCTION("gelu_fast")
+	defer trace.end_scoped_trace(gelu_fast_trace)
+
+	result := tensor.tensor_alloc(T, x.shape, true, allocator, loc)
+
+	// Constants for sigmoid approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+	// Can be approximated as: x * sigmoid(1.702 * x)
+	scale := T(1.702)
+
+	#no_bounds_check {
+		i := uint(0)
+		n := uint(len(x.data))
+
+		for ; i + 8 <= n; i += 8 {
+			#unroll for j in 0 ..< 8 {
+				val := x.data[i + uint(j)]
+				// Fast sigmoid: 1 / (1 + exp(-x))
+				// Even faster approximation: 0.5 + 0.5 * tanh(0.5 * x)
+				sigmoid_input := scale * val
+				sigmoid := T(0.5) * (T(1.0) + tanh_fast(sigmoid_input * T(0.5)))
+				result.data[i + uint(j)] = val * sigmoid
+			}
+		}
+
+		// Handle remainder
+		for ; i < n; i += 1 {
+			val := x.data[i]
+			sigmoid_input := scale * val
+			sigmoid := T(0.5) * (T(1.0) + math.tanh(sigmoid_input * T(0.5)))
+			result.data[i] = val * sigmoid
+		}
+	}
+
+	return result
+}
+
 new_conv_2d_bn :: proc(
 	$T: typeid,
 	in_channels, out_channels: uint,
@@ -102,7 +153,7 @@ forward_patch_embed :: proc(
 	conv1_out := forward_conv_2d_bn(pe.conv1, x, context.temp_allocator)
 
 	gelu_trace := trace.TRACE_SECTION("gelu_activation")
-	gelu_out := tensor.gelu(conv1_out, context.temp_allocator)
+	gelu_out := gelu_fast(conv1_out, context.temp_allocator)
 	trace.end_scoped_trace(gelu_trace)
 
 	conv2_out := forward_conv_2d_bn(pe.conv2, gelu_out, allocator, loc)
@@ -152,13 +203,13 @@ forward_mb_conv :: proc(
 	// Expansion
 	expansion_trace := trace.TRACE_SECTION("expansion")
 	conv1_out := forward_conv_2d_bn(mb.conv1, x, context.temp_allocator)
-	gelu1_out := tensor.gelu(conv1_out, context.temp_allocator)
+	gelu1_out := gelu_fast(conv1_out, context.temp_allocator)
 	trace.end_scoped_trace(expansion_trace)
 
 	// Depthwise
 	depthwise_trace := trace.TRACE_SECTION("depthwise")
 	conv2_out := forward_conv_2d_bn(mb.conv2, gelu1_out, context.temp_allocator)
-	gelu2_out := tensor.gelu(conv2_out, context.temp_allocator)
+	gelu2_out := gelu_fast(conv2_out, context.temp_allocator)
 	trace.end_scoped_trace(depthwise_trace)
 
 	// Projection
@@ -174,7 +225,7 @@ forward_mb_conv :: proc(
 	// Residual connection + final activation
 	residual_trace := trace.TRACE_SECTION("residual_connection")
 	residual := tensor.add(conv3_out, shortcut, context.temp_allocator)
-	result := tensor.gelu(residual, allocator, loc)
+	result := gelu_fast(residual, allocator, loc)
 	trace.end_scoped_trace(residual_trace)
 
 	return result
@@ -242,10 +293,10 @@ forward_patch_merging :: proc(
 
 	// Apply convolutions
 	conv1_out := forward_conv_2d_bn(pm.conv1, xs, context.temp_allocator)
-	gelu1_out := tensor.gelu(conv1_out, context.temp_allocator)
+	gelu1_out := gelu_fast(conv1_out, context.temp_allocator)
 
 	conv2_out := forward_conv_2d_bn(pm.conv2, gelu1_out, context.temp_allocator)
-	gelu2_out := tensor.gelu(conv2_out, context.temp_allocator)
+	gelu2_out := gelu_fast(conv2_out, context.temp_allocator)
 
 	conv3_out := forward_conv_2d_bn(pm.conv3, gelu2_out, context.temp_allocator)
 
@@ -554,7 +605,7 @@ forward_mlp :: proc(
 	start_time := time.now()
 	norm_out := nn.forward_layer_norm(mlp.norm, x, context.temp_allocator)
 	fc1_out := nn.forward_linear(mlp.fc1, norm_out, context.temp_allocator)
-	gelu_out := tensor.gelu(fc1_out, context.temp_allocator)
+	gelu_out := gelu_fast(fc1_out, context.temp_allocator)
 	fc2_out := nn.forward_linear(mlp.fc2, gelu_out, allocator, loc)
 	duration := time.since(start_time)
 	return fc2_out
