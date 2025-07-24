@@ -2,6 +2,7 @@ package transformer
 
 import "../nn"
 import "../tensor"
+import "../trace"
 import "core:fmt"
 import "core:math"
 import "core:slice"
@@ -52,21 +53,17 @@ forward_conv_2d_bn :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
-	start_time := time.now()
-	fmt.printf(
-		"        Starting conv2d (input: [%d,%d,%d,%d], groups=%d)...\n",
-		x.shape[0],
-		x.shape[1],
-		x.shape[2],
-		x.shape[3],
-		layer.conv.groups,
-	)
+	conv_bn_trace := trace.TRACE_FUNCTION("conv2d_bn")
+	defer trace.end_scoped_trace(conv_bn_trace)
+
+	conv_trace := trace.TRACE_SECTION("conv2d")
 	conv_out := nn.forward_conv2d(layer.conv, x, context.temp_allocator)
-	fmt.printf("        Conv2d completed, starting BatchNorm...\n")
+	trace.end_scoped_trace(conv_trace)
+
+	bn_trace := trace.TRACE_SECTION("batch_norm")
 	bn_out := nn.forward_batch_norm_2d(layer.bn, conv_out, allocator, loc)
-	fmt.printf("        BatchNorm completed\n")
-	duration := time.since(start_time)
-	fmt.printf("[TIMING] Conv2d+BN: %v\n", duration)
+	trace.end_scoped_trace(bn_trace)
+
 	return bn_out
 }
 
@@ -99,12 +96,16 @@ forward_patch_embed :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
-	start_time := time.now()
+	patch_embed_trace := trace.TRACE_FUNCTION("patch_embed")
+	defer trace.end_scoped_trace(patch_embed_trace)
+
 	conv1_out := forward_conv_2d_bn(pe.conv1, x, context.temp_allocator)
+
+	gelu_trace := trace.TRACE_SECTION("gelu_activation")
 	gelu_out := tensor.gelu(conv1_out, context.temp_allocator)
+	trace.end_scoped_trace(gelu_trace)
+
 	conv2_out := forward_conv_2d_bn(pe.conv2, gelu_out, allocator, loc)
-	duration := time.since(start_time)
-	fmt.printf("[TIMING] PatchEmbed: %v\n", duration)
 	return conv2_out
 }
 
@@ -143,19 +144,27 @@ forward_mb_conv :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
-	start_time := time.now()
+	mbconv_trace := trace.TRACE_FUNCTION("mb_conv")
+	defer trace.end_scoped_trace(mbconv_trace)
+
 	shortcut := x
 
 	// Expansion
+	expansion_trace := trace.TRACE_SECTION("expansion")
 	conv1_out := forward_conv_2d_bn(mb.conv1, x, context.temp_allocator)
 	gelu1_out := tensor.gelu(conv1_out, context.temp_allocator)
+	trace.end_scoped_trace(expansion_trace)
 
 	// Depthwise
+	depthwise_trace := trace.TRACE_SECTION("depthwise")
 	conv2_out := forward_conv_2d_bn(mb.conv2, gelu1_out, context.temp_allocator)
 	gelu2_out := tensor.gelu(conv2_out, context.temp_allocator)
+	trace.end_scoped_trace(depthwise_trace)
 
 	// Projection
+	projection_trace := trace.TRACE_SECTION("projection")
 	conv3_out := forward_conv_2d_bn(mb.conv3, gelu2_out, context.temp_allocator)
+	trace.end_scoped_trace(projection_trace)
 
 	// Check shapes before residual connection
 	if !slice.equal(conv3_out.shape, shortcut.shape) {
@@ -163,11 +172,11 @@ forward_mb_conv :: proc(
 	}
 
 	// Residual connection + final activation
+	residual_trace := trace.TRACE_SECTION("residual_connection")
 	residual := tensor.add(conv3_out, shortcut, context.temp_allocator)
 	result := tensor.gelu(residual, allocator, loc)
+	trace.end_scoped_trace(residual_trace)
 
-	duration := time.since(start_time)
-	fmt.printf("[TIMING] MBConv: %v\n", duration)
 	return result
 }
 
@@ -310,21 +319,11 @@ forward_conv_layer :: proc(
 	if downsample, has_downsample := layer.downsample.?; has_downsample {
 		result := forward_patch_merging(downsample, xs, allocator, loc)
 		duration := time.since(start_time)
-		fmt.printf(
-			"[TIMING] ConvLayer (with %d blocks + downsample): %v\n",
-			len(layer.blocks),
-			duration,
-		)
 		return result
 	} else {
 		// Clone the final result to the target allocator
 		result := tensor.clone(xs, allocator)
 		duration := time.since(start_time)
-		fmt.printf(
-			"[TIMING] ConvLayer (with %d blocks, no downsample): %v\n",
-			len(layer.blocks),
-			duration,
-		)
 		return result
 	}
 }
@@ -403,24 +402,19 @@ forward_attention :: proc(
 	xs := nn.forward_layer_norm(attn.norm, x, context.temp_allocator)
 
 	// QKV projection
-	fmt.printf("      QKV projection...\n")
 	qkv := nn.forward_linear(attn.qkv, xs, context.temp_allocator)
 	qkv_reshaped := tensor.reshape(
 		qkv,
 		[]uint{b, n, attn.num_heads, attn.key_dim * 2 + attn.d},
 		context.temp_allocator,
 	)
-	fmt.printf("      QKV projection completed\n")
 
 	// Extract Q, K, V from the reshaped QKV tensor
-	fmt.printf("      Creating Q, K, V tensors...\n")
 	q := tensor.zeros(T, []uint{b, n, attn.num_heads, attn.key_dim}, context.temp_allocator)
 	k := tensor.zeros(T, []uint{b, n, attn.num_heads, attn.key_dim}, context.temp_allocator)
 	v := tensor.zeros(T, []uint{b, n, attn.num_heads, attn.d}, context.temp_allocator)
-	fmt.printf("      Q, K, V tensors created\n")
 
 	// Copy data from QKV tensor to Q, K, V tensors
-	fmt.printf("      Starting QKV data copying (b=%d, n=%d, heads=%d)...\n", b, n, attn.num_heads)
 	qkv_stride := attn.key_dim * 2 + attn.d
 	total_ops := b * n * attn.num_heads
 	completed_ops := 0
@@ -429,14 +423,6 @@ forward_attention :: proc(
 		for pos in 0 ..< n {
 			for head in 0 ..< attn.num_heads {
 				completed_ops += 1
-				if completed_ops % 1000 == 0 {
-					fmt.printf(
-						"        Completed %d/%d QKV copy operations...\n",
-						completed_ops,
-						total_ops,
-					)
-				}
-
 				base_idx := ((batch * n + pos) * attn.num_heads + head) * qkv_stride
 
 				// Copy Q
@@ -459,42 +445,21 @@ forward_attention :: proc(
 			}
 		}
 	}
-	fmt.printf("      QKV data copying completed (%d operations)\n", total_ops)
 
 	// Reshape for attention: (B, N, H, D) -> (B, H, N, D)
-	fmt.printf("      Reshaping Q, K, V tensors...\n")
 	q_transposed := tensor.permute(q, []uint{0, 2, 1, 3}, context.temp_allocator)
 	k_transposed := tensor.permute(k, []uint{0, 2, 1, 3}, context.temp_allocator)
 	v_transposed := tensor.permute(v, []uint{0, 2, 1, 3}, context.temp_allocator)
-	fmt.printf("      Q, K, V reshape completed\n")
 
 	// Attention computation: Q @ K^T
-	fmt.printf("      Computing attention scores (Q @ K^T)...\n")
 	k_t := tensor.matrix_transpose(k_transposed, context.temp_allocator)
-	fmt.printf("      K transpose completed, starting matmul...\n")
 	attn_scores := tensor.matmul(q_transposed, k_t, context.temp_allocator)
-	fmt.printf(
-		"      Attention scores computed (shape: [%d, %d, %d, %d])\n",
-		attn_scores.shape[0],
-		attn_scores.shape[1],
-		attn_scores.shape[2],
-		attn_scores.shape[3],
-	)
 
 	// Scale
-	fmt.printf("      Scaling attention scores...\n")
 	scale_tensor := tensor.new_with_init([]T{attn.scale}, []uint{1}, context.temp_allocator)
 	scaled_scores := tensor.mul(attn_scores, scale_tensor, context.temp_allocator)
-	fmt.printf("      Scaling completed\n")
 
 	// Add attention bias - slice to match actual sequence length
-	fmt.printf(
-		"      Adding attention bias (slicing %dx%d to %dx%d)...\n",
-		attn.ab.shape[1],
-		attn.ab.shape[2],
-		n,
-		n,
-	)
 
 	// Create appropriately sized bias tensor for current sequence length
 	current_bias := tensor.zeros(T, []uint{attn.num_heads, n, n}, context.temp_allocator)
@@ -502,17 +467,12 @@ forward_attention :: proc(
 	// In a full implementation, this would copy learned relative position biases
 
 	biased_scores := tensor.add(scaled_scores, current_bias, context.temp_allocator)
-	fmt.printf("      Bias addition completed\n")
 
 	// Apply softmax to get attention weights
-	fmt.printf("      Applying activation (gelu placeholder for softmax)...\n")
 	attn_weights := tensor.gelu(biased_scores, context.temp_allocator)
-	fmt.printf("      Activation completed\n")
 
 	// Apply attention to values
-	fmt.printf("      Computing attention output (attn_weights @ V)...\n")
 	attn_output := tensor.matmul(attn_weights, v_transposed, context.temp_allocator)
-	fmt.printf("      Attention output computed\n")
 
 	// Reshape back: (B, H, N, D) -> (B, N, H*D)
 	output_transposed := tensor.permute(attn_output, []uint{0, 2, 1, 3}, context.temp_allocator)
@@ -526,7 +486,6 @@ forward_attention :: proc(
 	result := nn.forward_linear(attn.proj, output_reshaped, allocator, loc)
 
 	duration := time.since(start_time)
-	fmt.printf("[TIMING] Attention: %v\n", duration)
 	return result
 }
 
@@ -568,7 +527,6 @@ forward_mlp :: proc(
 	gelu_out := tensor.gelu(fc1_out, context.temp_allocator)
 	fc2_out := nn.forward_linear(mlp.fc2, gelu_out, allocator, loc)
 	duration := time.since(start_time)
-	fmt.printf("[TIMING] MLP: %v\n", duration)
 	return fc2_out
 }
 
@@ -635,188 +593,168 @@ forward_tiny_vit_block :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
-	start_time := time.now()
+	tiny_vit_block_trace := trace.TRACE_FUNCTION("tiny_vit_block")
+	defer trace.end_scoped_trace(tiny_vit_block_trace)
+
 	h, w := block.input_resolution[0], block.input_resolution[1]
 	b, l, c := x.shape[0], x.shape[1], x.shape[2]
 
-	res_x := x
-
 	window_size := block.window_size
-	use_window := !(h == window_size && w == window_size)
-
 	attn_out: ^tensor.Tensor(T)
 
-	if !use_window {
-		// Global attention (no windowing)
-		fmt.printf("    Using global attention (no windowing)...\n")
+	// Skip windowing if input matches window size
+	if h == window_size && w == window_size {
+		global_attention_trace := trace.TRACE_SECTION("global_attention")
 		attn_out = forward_attention(block.attn, x, context.temp_allocator)
+		trace.end_scoped_trace(global_attention_trace)
 	} else {
-		fmt.printf("    Using windowed attention...\n")
-		// Reshape to (B, H, W, C)
-		xs := tensor.reshape(x, []uint{b, h, w, c}, context.temp_allocator)
+		win_attention_trace := trace.TRACE_SECTION("windowed_attention")
 
-		// Calculate padding needed
+		// Calculate padded dimensions
 		pad_h := (window_size - (h % window_size)) % window_size
 		pad_w := (window_size - (w % window_size)) % window_size
 		padded_h := h + pad_h
 		padded_w := w + pad_w
-
-		// Pad height (dim=1) and width (dim=2) with zeros if needed
-		if pad_h > 0 || pad_w > 0 {
-			// Pad by creating a new tensor and copying data
-			padded_xs := tensor.zeros(T, []uint{b, padded_h, padded_w, c}, context.temp_allocator)
-			for batch in 0 ..< b {
-				for i in 0 ..< h {
-					for j in 0 ..< w {
-						for ch in 0 ..< c {
-							padded_xs.data[
-								batch * padded_h * padded_w * c +
-								i * padded_w * c +
-								j * c +
-								ch
-							] = xs.data[
-								batch * h * w * c +
-								i * w * c +
-								j * c +
-								ch
-							]
-						}
-					}
-				}
-			}
-			xs = padded_xs
-		}
-
 		n_h := padded_h / window_size
 		n_w := padded_w / window_size
 
-		// Reshape to windows: (B, n_h, window_size, n_w, window_size, C)
-		xs = tensor.reshape(xs, []uint{b, n_h, window_size, n_w, window_size, c}, context.temp_allocator)
-		// Transpose to (B, n_h, n_w, window_size, window_size, C)
-		xs = tensor.permute(xs, []uint{0, 1, 3, 2, 4, 5}, context.temp_allocator)
-		// Merge windows: (B * n_h * n_w, window_size * window_size, C)
-		xs = tensor.reshape(xs, []uint{b * n_h * n_w, window_size * window_size, c}, context.temp_allocator)
+		// Reshape to 4D
+		xs := tensor.reshape(x, []uint{b, h, w, c}, context.temp_allocator)
 
-		// Apply attention per window
-		attn_windows := forward_attention(block.attn, xs, context.temp_allocator)
-
-		// Restore windows: (B, n_h, n_w, window_size, window_size, C)
-		attn_windows = tensor.reshape(attn_windows, []uint{b, n_h, n_w, window_size, window_size, c}, context.temp_allocator)
-		// Transpose back: (B, n_h, window_size, n_w, window_size, C)
-		attn_windows = tensor.permute(attn_windows, []uint{0, 1, 3, 2, 4, 5}, context.temp_allocator)
-		// Merge spatial: (B, padded_h, padded_w, C)
-		attn_windows = tensor.reshape(attn_windows, []uint{b, padded_h, padded_w, c}, context.temp_allocator)
-
-		// Remove padding if needed
+		// Create padded tensor if needed
 		if pad_h > 0 || pad_w > 0 {
-			// Slice to original h, w
-			attn_no_pad := tensor.zeros(T, []uint{b, h, w, c}, context.temp_allocator)
+			padded := tensor.zeros(T, []uint{b, padded_h, padded_w, c}, context.temp_allocator)
+
+			// Copy data with batched memcpy
 			for batch in 0 ..< b {
-				for i in 0 ..< h {
-					for j in 0 ..< w {
-						for ch in 0 ..< c {
-							attn_no_pad.data[
-								batch * h * w * c +
-								i * w * c +
-								j * c +
-								ch
-							] = attn_windows.data[
-								batch * padded_h * padded_w * c +
-								i * padded_w * c +
-								j * c +
-								ch
-							]
+				for row in 0 ..< h {
+					src_offset := (batch * h * w + row * w) * c
+					dst_offset := (batch * padded_h * padded_w + row * padded_w) * c
+					copy(
+						padded.data[dst_offset:dst_offset + w * c],
+						xs.data[src_offset:src_offset + w * c],
+					)
+				}
+			}
+			xs = padded
+		}
+
+		// Window partitioning with single allocation
+		windows := tensor.zeros(
+			T,
+			[]uint{b * n_h * n_w, window_size * window_size, c},
+			context.temp_allocator,
+		)
+
+		// Efficient windowing with better memory access pattern
+		#no_bounds_check {
+			window_idx: uint = 0
+			for batch in 0 ..< b {
+				for h_idx in 0 ..< n_h {
+					for w_idx in 0 ..< n_w {
+						// Copy each window
+						for wh in 0 ..< window_size {
+							for ww in 0 ..< window_size {
+								src_h := h_idx * window_size + wh
+								src_w := w_idx * window_size + ww
+								src_idx := ((batch * padded_h + src_h) * padded_w + src_w) * c
+								dst_idx :=
+									(window_idx * window_size * window_size +
+										wh * window_size +
+										ww) *
+									c
+
+								// Copy all channels at once
+								copy(
+									windows.data[dst_idx:dst_idx + c],
+									xs.data[src_idx:src_idx + c],
+								)
+							}
 						}
+						window_idx += 1
 					}
 				}
 			}
-			attn_windows = attn_no_pad
 		}
 
-		// Reshape back to (B, L, C)
-		attn_out = tensor.reshape(attn_windows, []uint{b, l, c}, context.temp_allocator)
+		// Apply attention to all windows at once
+		attn_windows := forward_attention(block.attn, windows, context.temp_allocator)
+
+		// Merge windows back
+		merged := tensor.zeros(T, []uint{b, padded_h, padded_w, c}, context.temp_allocator)
+
+		#no_bounds_check {
+			window_idx: uint = 0
+			for batch in 0 ..< b {
+				for h_idx in 0 ..< n_h {
+					for w_idx in 0 ..< n_w {
+						// Copy each window back
+						for wh in 0 ..< window_size {
+							for ww in 0 ..< window_size {
+								dst_h := h_idx * window_size + wh
+								dst_w := w_idx * window_size + ww
+								src_idx :=
+									(window_idx * window_size * window_size +
+										wh * window_size +
+										ww) *
+									c
+								dst_idx := ((batch * padded_h + dst_h) * padded_w + dst_w) * c
+
+								copy(
+									merged.data[dst_idx:dst_idx + c],
+									attn_windows.data[src_idx:src_idx + c],
+								)
+							}
+						}
+						window_idx += 1
+					}
+				}
+			}
+		}
+
+		// Remove padding if needed
+		if pad_h > 0 || pad_w > 0 {
+			unpadded := tensor.zeros(T, []uint{b, h, w, c}, context.temp_allocator)
+
+			for batch in 0 ..< b {
+				for row in 0 ..< h {
+					src_offset := (batch * padded_h * padded_w + row * padded_w) * c
+					dst_offset := (batch * h * w + row * w) * c
+					copy(
+						unpadded.data[dst_offset:dst_offset + w * c],
+						merged.data[src_offset:src_offset + w * c],
+					)
+				}
+			}
+			merged = unpadded
+		}
+
+		// Final reshape
+		attn_out = tensor.reshape(merged, []uint{b, l, c}, context.temp_allocator)
+
+		trace.end_scoped_trace(win_attention_trace)
 	}
 
-	fmt.printf("    Attention completed\n")
+	// Rest remains the same
+	xs := tensor.add(attn_out, x, context.temp_allocator)
 
-	// Residual connection
-	fmt.printf("    Adding residual connection...\n")
-	xs := tensor.add(attn_out, res_x, context.temp_allocator)
-	fmt.printf("    Residual connection completed\n")
-
-	// Reshape for local conv: (B, L, C) -> (B, C, H, W)
-	fmt.printf("    Reshaping for local conv...\n")
-
-	// Calculate actual spatial dimensions from sequence length
+	// Local conv
 	actual_l := xs.shape[1]
-	actual_spatial_dim := uint(math.sqrt(f64(actual_l)))
-
-	fmt.printf("      Input shape: [%d, %d, %d]\n", xs.shape[0], xs.shape[1], xs.shape[2])
-	fmt.printf("      Block expects resolution: [%d, %d]\n", h, w)
-	fmt.printf("      Actual sequence length: %d, spatial dim: %d\n", actual_l, actual_spatial_dim)
-
-	// Use actual dimensions instead of block's expected dimensions
+	actual_spatial_dim := uint(math.sqrt_f64(f64(actual_l)))
 	actual_h, actual_w := actual_spatial_dim, actual_spatial_dim
 
-	fmt.printf("      Using actual dimensions: [%d, %d, %d, %d]\n", b, actual_h, actual_w, c)
-	fmt.printf("      Starting reshape to 4D...\n")
 	xs_4d := tensor.reshape(xs, []uint{b, actual_h, actual_w, c}, context.temp_allocator)
-	fmt.printf(
-		"      4D reshape completed, shape: [%d, %d, %d, %d]\n",
-		xs_4d.shape[0],
-		xs_4d.shape[1],
-		xs_4d.shape[2],
-		xs_4d.shape[3],
-	)
-
-	fmt.printf("      Starting permute (BHWC -> BCHW)...\n")
 	xs_conv := tensor.permute(xs_4d, []uint{0, 3, 1, 2}, context.temp_allocator)
-	fmt.printf(
-		"      Permute completed, final shape: [%d, %d, %d, %d]\n",
-		xs_conv.shape[0],
-		xs_conv.shape[1],
-		xs_conv.shape[2],
-		xs_conv.shape[3],
-	)
-	fmt.printf("    Reshape completed\n")
-
-	// Apply local convolution
-	fmt.printf("    Starting local convolution...\n")
-	fmt.printf(
-		"      Conv input shape: [%d, %d, %d, %d]\n",
-		xs_conv.shape[0],
-		xs_conv.shape[1],
-		xs_conv.shape[2],
-		xs_conv.shape[3],
-	)
-	fmt.printf(
-		"      Conv params: in_ch=%d, out_ch=%d, kernel=%d, groups=%d\n",
-		block.local_conv.conv.in_channels,
-		block.local_conv.conv.out_channels,
-		block.local_conv.conv.kernel_size[0],
-		block.local_conv.conv.groups,
-	)
 	conv_out := forward_conv_2d_bn(block.local_conv, xs_conv, context.temp_allocator)
-	fmt.printf("    Local convolution completed\n")
-
-	// Reshape back: (B, C, H, W) -> (B, L, C)
-	fmt.printf("    Reshaping back from conv...\n")
 	conv_flat := tensor.reshape(conv_out, []uint{b, c, actual_l}, context.temp_allocator)
 	conv_final := tensor.transpose(conv_flat, 1, 2, context.temp_allocator)
-	fmt.printf("    Reshape back completed\n")
 
-	// Apply MLP with residual
-	fmt.printf("    Starting MLP...\n")
+	// MLP with residual
 	mlp_out := forward_mlp(block.mlp, conv_final, context.temp_allocator)
-	fmt.printf("    MLP completed, adding final residual...\n")
 	result := tensor.add(conv_final, mlp_out, allocator, loc)
-	fmt.printf("    Final residual completed\n")
 
-	duration := time.since(start_time)
-	fmt.printf("[TIMING] TinyViT Block: %v\n", duration)
 	return result
 }
-
 free_tiny_vit_block :: proc(block: ^Tiny_ViT_Block($T), allocator := context.allocator) {
 	free_attention(block.attn, allocator)
 	free_conv_2d_bn(block.local_conv, allocator)
@@ -865,31 +803,19 @@ forward_basic_layer :: proc(
 	// Apply all blocks
 	for i in 0 ..< len(layer.blocks) {
 		block := layer.blocks[i]
-		fmt.printf("  Starting TinyViT block %d/%d...\n", i + 1, len(layer.blocks))
 		new_xs := forward_tiny_vit_block(block, xs, context.temp_allocator)
 		xs = new_xs
-		fmt.printf("  Completed TinyViT block %d/%d\n", i + 1, len(layer.blocks))
 	}
 
 	// Apply downsampling if present
 	if downsample, has_downsample := layer.downsample.?; has_downsample {
 		result := forward_patch_merging(downsample, xs, allocator, loc)
 		duration := time.since(start_time)
-		fmt.printf(
-			"[] BasicLayer (with %d blocks + downsample): %v\n",
-			len(layer.blocks),
-			duration,
-		)
 		return result
 	} else {
 		// Clone the final result to the target allocator
 		result := tensor.clone(xs, allocator)
 		duration := time.since(start_time)
-		fmt.printf(
-			"[TIMING] BasicLayer (with %d blocks, no downsample): %v\n",
-			len(layer.blocks),
-			duration,
-		)
 		return result
 	}
 }
@@ -1016,33 +942,31 @@ forward_tiny_vit_5m :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
-	start_time := time.now()
+	tiny_vit_trace := trace.TRACE_FUNCTION("tiny_vit_5m_forward")
+	defer trace.end_scoped_trace(tiny_vit_trace)
 
 	// Patch embedding
-	patch_start := time.now()
 	xs := forward_patch_embed(model.patch_embed, x, context.temp_allocator)
-	fmt.printf("[TIMING] Total PatchEmbed stage: %v\n", time.since(patch_start))
 
 	// Layer 0
-	layer0_start := time.now()
+	layer0_trace := trace.TRACE_SECTION("layer0_conv")
 	xs = forward_conv_layer(model.layer0, xs, context.temp_allocator)
-	fmt.printf("[TIMING] Total Layer0 stage: %v\n", time.since(layer0_start))
+	trace.end_scoped_trace(layer0_trace)
 
 	// Remaining layers
 	for i in 0 ..< len(model.layers) {
 		layer := model.layers[i]
-		fmt.printf("Starting Layer%d (BasicLayer)...\n", i + 1)
-		layer_start := time.now()
+		layer_name := fmt.aprintf("layer_%d_basic", i + 1, allocator = context.allocator)
+
+		layer_trace := trace.TRACE_SECTION(layer_name)
 		xs = forward_basic_layer(layer, xs, context.temp_allocator)
-		fmt.printf("[TIMING] Total Layer%d stage: %v\n", i + 1, time.since(layer_start))
+		trace.end_scoped_trace(layer_trace)
 	}
 
 	// Neck: reshape to 4D and apply convolutions
-	neck_start := time.now()
+	neck_trace := trace.TRACE_SECTION("neck_processing")
 	b := xs.shape[0]
 	c := xs.shape[2]
-
-	fmt.printf("Neck input shape: [%d, %d, %d]\n", xs.shape[0], xs.shape[1], xs.shape[2])
 
 	// Calculate correct spatial dimensions based on actual sequence length
 	// For 1024x1024 input: sequence_length = 4096 (64x64)
@@ -1052,25 +976,13 @@ forward_tiny_vit_5m :: proc(
 	xs_4d := tensor.reshape(xs, []uint{b, spatial_dim, spatial_dim, c}, context.temp_allocator)
 	xs_conv := tensor.permute(xs_4d, []uint{0, 3, 1, 2}, context.temp_allocator)
 
-	fmt.printf(
-		"Neck after reshape/permute: [%d, %d, %d, %d]\n",
-		xs_conv.shape[0],
-		xs_conv.shape[1],
-		xs_conv.shape[2],
-		xs_conv.shape[3],
-	)
-
 	// Apply neck convolutions with layer norms
 	conv1_out := nn.forward_conv2d(model.neck_conv1, xs_conv, context.temp_allocator)
 	ln1_out := nn.forward_layer_norm(model.neck_ln1, conv1_out, context.temp_allocator)
 
 	conv2_out := nn.forward_conv2d(model.neck_conv2, ln1_out, context.temp_allocator)
 	result := nn.forward_layer_norm(model.neck_ln2, conv2_out, allocator, loc)
-	fmt.printf("[TIMING] Total Neck stage: %v\n", time.since(neck_start))
-
-	total_duration := time.since(start_time)
-	fmt.printf("[TIMING] TOTAL TinyViT-5M Forward Pass: %v\n", total_duration)
-	fmt.printf("=== End Forward Pass ===\n")
+	trace.end_scoped_trace(neck_trace)
 
 	return result
 }

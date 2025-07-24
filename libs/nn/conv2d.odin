@@ -1,6 +1,7 @@
 package nn
 
 import "../tensor"
+import "../trace"
 
 Conv_2d :: struct($T: typeid) {
 	w:            ^tensor.Tensor(T), // (out_channels, in_channels, kernel_h, kernel_w)
@@ -117,6 +118,7 @@ forward_conv2d :: proc(
 
 	// Add bias if present
 	if bias, has_bias := conv.b.?; has_bias {
+		conv_add_bias := trace.TRACE_SECTION("conv_add_bias")
 		// Bias shape: (out_channels,)
 		// Output shape: (batch_size, out_channels, height, width)
 		// Need to reshape bias to (1, out_channels, 1, 1) for broadcasting
@@ -127,6 +129,7 @@ forward_conv2d :: proc(
 		)
 		biased_out := tensor.add(out, bias_reshaped, allocator, loc)
 		tensor.free_tensor(out, allocator)
+		trace.end_scoped_trace(conv_add_bias)
 		return biased_out
 	}
 
