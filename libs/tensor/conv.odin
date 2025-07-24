@@ -38,28 +38,53 @@ im2col :: proc(
 			src_idx_c := src_idx_b + c_idx * src_s1
 
 			for h_k_idx in 0 ..< h_k {
+				// Pre-calculate valid h_idx range for this kernel position
+				h_k_offset := h_k_idx * dilation
+				h_idx_start := uint(0)
+				h_idx_end := h_out
+
+				if padding != 0 {
+					// Find first valid h_idx
+					if h_k_offset < padding {
+						h_idx_start = (padding - h_k_offset + stride - 1) / stride
+					}
+					// Find last valid h_idx
+					max_src_h := h + padding - 1
+					if h_k_offset > max_src_h {
+						h_idx_end = 0 // No valid indices
+					} else {
+						h_idx_end = min(h_out, (max_src_h - h_k_offset) / stride + 1)
+					}
+				}
+
 				for w_k_idx in 0 ..< w_k {
-					// Now we process all output positions that use this specific kernel position
-					for h_idx in 0 ..< h_out {
-						src_h_raw := h_idx * stride + h_k_idx * dilation
-						if padding != 0 && (src_h_raw < padding || src_h_raw >= h + padding) {
-							continue
+					// Pre-calculate valid w_idx range for this kernel position
+					w_k_offset := w_k_idx * dilation
+					w_idx_start := uint(0)
+					w_idx_end := w_out
+
+					if padding != 0 {
+						// Find first valid w_idx
+						if w_k_offset < padding {
+							w_idx_start = (padding - w_k_offset + stride - 1) / stride
 						}
-						src_h := src_h_raw - padding
+						// Find last valid w_idx
+						max_src_w := w + padding - 1
+						if w_k_offset > max_src_w {
+							w_idx_end = 0 // No valid indices
+						} else {
+							w_idx_end = min(w_out, (max_src_w - w_k_offset) / stride + 1)
+						}
+					}
 
-						for w_idx in 0 ..< w_out {
-							src_w_raw := w_idx * stride + w_k_idx * dilation
-							if padding != 0 && (src_w_raw < padding || src_w_raw >= w + padding) {
-								continue
-							}
-							src_w := src_w_raw - padding
+					for h_idx in h_idx_start ..< h_idx_end {
+						src_h := h_idx * stride + h_k_offset - padding
+						src_idx_h := src_idx_c + src_h * src_s2
 
-							// Read once from source
-							src_idx := src_idx_c + src_h * src_s2 + src_w * src_s3
+						for w_idx in w_idx_start ..< w_idx_end {
+							src_w := w_idx * stride + w_k_offset - padding
+							src_idx := src_idx_h + src_w * src_s3
 
-							// Calculate destination index
-							// dst layout: [b, h_out*w_out, c*h_k*w_k]
-							// We need to place this at position [b_idx, h_idx*w_out + w_idx, c_idx*h_k*w_k + h_k_idx*w_k + w_k_idx]
 							dst_idx :=
 								dst_idx_b +
 								(h_idx * w_out + w_idx) * (c * h_k * w_k) +
@@ -76,8 +101,10 @@ im2col :: proc(
 	}
 	trace.end_scoped_trace(im2col_building)
 
+	im2col_output_alloc_trace := trace.TRACE_SECTION("im2col_output_alloc")
 	t_out := tensor_alloc(T, []uint{b, h_out * w_out, c * h_k * w_k}, false, allocator, loc)
 	t_out.data = dst
+	trace.end_scoped_trace(im2col_output_alloc_trace)
 
 	return t_out
 }
