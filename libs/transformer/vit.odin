@@ -5,6 +5,7 @@ import "../tensor"
 import "../trace"
 import "core:fmt"
 import "core:math"
+import "core:simd"
 import "core:slice"
 import "core:time"
 
@@ -14,6 +15,7 @@ MLP_RATIO :: 4
 LOCAL_CONV_SIZE :: 3
 IMG_SIZE :: 1024
 IN_CHANNELS :: 3
+GELU_UNFOLD_FACTOR :: 8
 
 // Conv2dBN - Convolution followed by BatchNorm
 Conv_2d_BN :: struct($T: typeid) {
@@ -30,7 +32,7 @@ tanh_fast :: proc(x: $T) -> T where T == f32 || T == f64 {
 }
 
 // GELU approximation, inspired from from BERT
-gelu_fast :: proc(
+gelu_fast_no_simd :: proc(
 	x: ^tensor.Tensor($T),
 	allocator := context.allocator,
 	loc := #caller_location,
@@ -49,8 +51,8 @@ gelu_fast :: proc(
 		i := uint(0)
 		n := uint(len(x.data))
 
-		for ; i + 8 <= n; i += 8 {
-			#unroll for j in 0 ..< 8 {
+		for ; i + GELU_UNFOLD_FACTOR <= n; i += GELU_UNFOLD_FACTOR {
+			#unroll for j in 0 ..< GELU_UNFOLD_FACTOR {
 				val := x.data[i + uint(j)]
 				sigmoid_input := scale * val
 				sigmoid := T(0.5) * (T(1.0) + tanh_fast(sigmoid_input * T(0.5)))
@@ -62,12 +64,115 @@ gelu_fast :: proc(
 		for ; i < n; i += 1 {
 			val := x.data[i]
 			sigmoid_input := scale * val
-			sigmoid := T(0.5) * (T(1.0) + math.tanh(sigmoid_input * T(0.5)))
+			sigmoid := T(0.5) * (T(1.0) + tanh_fast(sigmoid_input * T(0.5)))
 			result.data[i] = val * sigmoid
 		}
 	}
 
 	return result
+}
+
+gelu_fast :: proc(
+	x: ^tensor.Tensor($T),
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^tensor.Tensor(T) where T == f32 ||
+	T == f64 {
+	gelu_fast_trace := trace.TRACE_FUNCTION("gelu_fast")
+	defer trace.end_scoped_trace(gelu_fast_trace)
+
+	result := tensor.tensor_alloc(T, x.shape, true, allocator, loc)
+
+	#no_bounds_check {
+		i := uint(0)
+		n := uint(len(x.data))
+
+		when T == f32 {
+			scale_vec := #simd[4]f32{1.702, 1.702, 1.702, 1.702}
+			half_vec := #simd[4]f32{0.5, 0.5, 0.5, 0.5}
+			one_vec := #simd[4]f32{1.0, 1.0, 1.0, 1.0}
+
+			for ; i + 4 <= n; i += 4 {
+				vals := (^#simd[4]f32)(&x.data[i])^
+				sigmoid_inputs := simd.mul(vals, scale_vec)
+				tanh_vals := tanh_fast_simd_4xf32(simd.mul(sigmoid_inputs, half_vec))
+				sigmoids := simd.mul(half_vec, simd.add(one_vec, tanh_vals))
+				results := simd.mul(vals, sigmoids)
+				(^#simd[4]f32)(&result.data[i])^ = results
+			}
+		} else when T == f64 {
+			scale_vec := #simd[2]f64{1.702, 1.702}
+			half_vec := #simd[2]f64{0.5, 0.5}
+			one_vec := #simd[2]f64{1.0, 1.0}
+
+			for ; i + 2 <= n; i += 2 {
+				vals := (^#simd[2]f64)(&x.data[i])^
+				sigmoid_inputs := simd.mul(vals, scale_vec)
+				tanh_vals := tanh_fast_simd_2xf64(simd.mul(sigmoid_inputs, half_vec))
+				sigmoids := simd.mul(half_vec, simd.add(one_vec, tanh_vals))
+				results := simd.mul(vals, sigmoids)
+				(^#simd[2]f64)(&result.data[i])^ = results
+			}
+		} else {
+      		#panic("fast gelu is not available for other than f32 and f64")
+		}
+
+		// Handle remainder
+		for ; i < n; i += 1 {
+			val := x.data[i]
+			sigmoid_input := T(1.702) * val
+			sigmoid := T(0.5) * (T(1.0) + tanh_fast(sigmoid_input * T(0.5)))
+			result.data[i] = val * sigmoid
+		}
+	}
+
+	return result
+}
+
+// SIMD version of tanh_fast for 4xf32
+tanh_fast_simd_4xf32 :: proc(x: #simd[4]f32) -> #simd[4]f32 {
+	x2 := simd.mul(x, x)
+
+	c135135 := #simd[4]f32{135135, 135135, 135135, 135135}
+	c17325 := #simd[4]f32{17325, 17325, 17325, 17325}
+	c378 := #simd[4]f32{378, 378, 378, 378}
+	c62370 := #simd[4]f32{62370, 62370, 62370, 62370}
+	c3150 := #simd[4]f32{3150, 3150, 3150, 3150}
+	c28 := #simd[4]f32{28, 28, 28, 28}
+
+	a := simd.mul(
+		x,
+		simd.add(c135135, simd.mul(x2, simd.add(c17325, simd.mul(x2, simd.add(c378, x2))))),
+	)
+	b := simd.add(
+		c135135,
+		simd.mul(x2, simd.add(c62370, simd.mul(x2, simd.add(c3150, simd.mul(x2, c28))))),
+	)
+
+	return simd.div(a, b)
+}
+
+// SIMD version of tanh_fast for 2xf64
+tanh_fast_simd_2xf64 :: proc(x: #simd[2]f64) -> #simd[2]f64 {
+	x2 := simd.mul(x, x)
+
+	c135135 := #simd[2]f64{135135, 135135}
+	c17325 := #simd[2]f64{17325, 17325}
+	c378 := #simd[2]f64{378, 378}
+	c62370 := #simd[2]f64{62370, 62370}
+	c3150 := #simd[2]f64{3150, 3150}
+	c28 := #simd[2]f64{28, 28}
+
+	a := simd.mul(
+		x,
+		simd.add(c135135, simd.mul(x2, simd.add(c17325, simd.mul(x2, simd.add(c378, x2))))),
+	)
+	b := simd.add(
+		c135135,
+		simd.mul(x2, simd.add(c62370, simd.mul(x2, simd.add(c3150, simd.mul(x2, c28))))),
+	)
+
+	return simd.div(a, b)
 }
 
 new_conv_2d_bn :: proc(
