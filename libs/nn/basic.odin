@@ -11,9 +11,16 @@ new_linear :: proc(
 	$T: typeid,
 	in_feat, out_feat: uint,
 	use_bias := true,
+	init := true,
 	allocator := context.allocator,
+	loc := #caller_location,
 ) -> ^Linear(T) {
-	w := tensor.randn(T, []uint{in_feat, out_feat}, T(0), T(1), allocator)
+	w: ^tensor.Tensor(T)
+	if init {
+		w = tensor.randn(T, {in_feat, out_feat}, T(0), T(1), allocator, loc)
+	} else {
+		w = tensor.tensor_alloc(T, {in_feat, out_feat}, true, allocator, loc)
+	}
 	b: Maybe(^tensor.Tensor(T)) = nil
 	if use_bias do b = tensor.zeros(T, []uint{out_feat}, allocator)
 	return new_clone(Linear(T){w = w, b = b}, allocator)

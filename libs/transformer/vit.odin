@@ -77,6 +77,7 @@ new_conv_2d_bn :: proc(
 	stride: uint = 1,
 	padding: uint = 0,
 	groups: uint = 1,
+	init := true,
 	allocator := context.allocator,
 ) -> ^Conv_2d_BN(T) {
 	conv := nn.new_conv2d(
@@ -89,7 +90,8 @@ new_conv_2d_bn :: proc(
 		1,
 		groups,
 		true,
-		allocator,
+		init = init,
+		allocator = allocator,
 	)
 	bn := nn.new_batch_norm_2d(T, out_channels, allocator)
 
@@ -130,11 +132,12 @@ Patch_Embed :: struct($T: typeid) {
 new_patch_embed :: proc(
 	$T: typeid,
 	in_channels, embed_dim: uint,
+	init := true,
 	allocator := context.allocator,
 ) -> ^Patch_Embed(T) {
 	// stride=2, padding=1, kernel_size=3
-	conv1 := new_conv_2d_bn(T, in_channels, embed_dim / 2, 3, 2, 1, 1, allocator)
-	conv2 := new_conv_2d_bn(T, embed_dim / 2, embed_dim, 3, 2, 1, 1, allocator)
+	conv1 := new_conv_2d_bn(T, in_channels, embed_dim / 2, 3, 2, 1, 1, init, allocator)
+	conv2 := new_conv_2d_bn(T, embed_dim / 2, embed_dim, 3, 2, 1, 1, init, allocator)
 
 	return new_clone(Patch_Embed(T){conv1 = conv1, conv2 = conv2}, allocator)
 }
@@ -173,16 +176,17 @@ new_mb_conv :: proc(
 	$T: typeid,
 	in_channels, out_channels: uint,
 	expand_ratio: uint,
+	init := true,
 	allocator := context.allocator,
 ) -> ^MB_Conv(T) {
 	hidden := in_channels * expand_ratio
 
 	// Pointwise expansion
-	conv1 := new_conv_2d_bn(T, in_channels, hidden, 1, 1, 0, 1, allocator)
+	conv1 := new_conv_2d_bn(T, in_channels, hidden, 1, 1, 0, 1, init, allocator)
 	// Depthwise convolution with groups=hidden
-	conv2 := new_conv_2d_bn(T, hidden, hidden, 3, 1, 1, hidden, allocator)
+	conv2 := new_conv_2d_bn(T, hidden, hidden, 3, 1, 1, hidden, init, allocator)
 	// Pointwise projection
-	conv3 := new_conv_2d_bn(T, hidden, out_channels, 1, 1, 0, 1, allocator)
+	conv3 := new_conv_2d_bn(T, hidden, out_channels, 1, 1, 0, 1, init, allocator)
 
 	return new_clone(MB_Conv(T){conv1 = conv1, conv2 = conv2, conv3 = conv3}, allocator)
 }
@@ -246,6 +250,7 @@ new_patch_merging :: proc(
 	$T: typeid,
 	input_resolution: [2]uint,
 	dim, out: uint,
+	init := true,
 	allocator := context.allocator,
 ) -> ^Patch_Merging(T) {
 	// Determine stride based on output channels (matching Rust logic)
@@ -254,9 +259,9 @@ new_patch_merging :: proc(
 		stride = 1
 	}
 
-	conv1 := new_conv_2d_bn(T, dim, out, 1, 1, 0, 1, allocator)
-	conv2 := new_conv_2d_bn(T, out, out, 3, stride, 1, out, allocator) // groups=out (depthwise)
-	conv3 := new_conv_2d_bn(T, out, out, 1, 1, 0, 1, allocator)
+	conv1 := new_conv_2d_bn(T, dim, out, 1, 1, 0, 1, init, allocator)
+	conv2 := new_conv_2d_bn(T, out, out, 3, stride, 1, out, init, allocator) // groups=out (depthwise)
+	conv3 := new_conv_2d_bn(T, out, out, 1, 1, 0, 1, init, allocator)
 
 	return new_clone(
 		Patch_Merging(T) {
@@ -329,18 +334,19 @@ new_conv_layer :: proc(
 	depth: uint,
 	downsample: bool,
 	conv_expand_ratio: uint,
+	init := true,
 	allocator := context.allocator,
 ) -> ^Conv_Layer(T) {
 	// Create blocks
 	blocks := make([]^MB_Conv(T), depth, allocator)
 	for i in 0 ..< depth {
-		blocks[i] = new_mb_conv(T, dim, dim, conv_expand_ratio, allocator)
+		blocks[i] = new_mb_conv(T, dim, dim, conv_expand_ratio, init, allocator)
 	}
 
 	// Create downsample if needed
 	downsample_layer: Maybe(^Patch_Merging(T)) = nil
 	if downsample {
-		downsample_layer = new_patch_merging(T, input_resolution, dim, out, allocator)
+		downsample_layer = new_patch_merging(T, input_resolution, dim, out, init, allocator)
 	}
 
 	return new_clone(Conv_Layer(T){blocks = blocks, downsample = downsample_layer}, allocator)
@@ -404,6 +410,7 @@ new_attention :: proc(
 	$T: typeid,
 	dim, key_dim, num_heads, attn_ratio: uint,
 	resolution: [2]uint,
+	init := true,
 	allocator := context.allocator,
 ) -> ^Attention(T) {
 	d := attn_ratio * key_dim
@@ -412,8 +419,8 @@ new_attention :: proc(
 	h := dh + nh_kd * 2 // query + key + value
 
 	norm := nn.new_layer_norm_1d(T, dim, allocator)
-	qkv := nn.new_linear(T, dim, h, true, allocator)
-	proj := nn.new_linear(T, dh, dim, true, allocator)
+	qkv := nn.new_linear(T, dim, h, true, init, allocator)
+	proj := nn.new_linear(T, dh, dim, true, init, allocator)
 
 	// Create attention biases - will be resized based on actual sequence length during forward pass
 	// For now, create a reasonable default size that can be resized
@@ -587,11 +594,12 @@ Mlp :: struct($T: typeid) {
 new_mlp :: proc(
 	$T: typeid,
 	in_features, hidden_features: uint,
+	init := true,
 	allocator := context.allocator,
 ) -> ^Mlp(T) {
 	norm := nn.new_layer_norm_1d(T, in_features, allocator)
-	fc1 := nn.new_linear(T, in_features, hidden_features, true, allocator)
-	fc2 := nn.new_linear(T, hidden_features, in_features, true, allocator)
+	fc1 := nn.new_linear(T, in_features, hidden_features, true, init, allocator)
+	fc2 := nn.new_linear(T, hidden_features, in_features, true, init, allocator)
 
 	return new_clone(Mlp(T){norm = norm, fc1 = fc1, fc2 = fc2}, allocator)
 }
@@ -632,6 +640,7 @@ new_tiny_vit_block :: proc(
 	dim: uint,
 	input_resolution: [2]uint,
 	num_heads, window_size: uint,
+	init := true,
 	allocator := context.allocator,
 ) -> ^Tiny_ViT_Block(T) {
 	head_dim := dim / num_heads
@@ -642,9 +651,10 @@ new_tiny_vit_block :: proc(
 		num_heads,
 		1,
 		[2]uint{window_size, window_size},
+		init,
 		allocator,
 	)
-	mlp := new_mlp(T, dim, dim * MLP_RATIO, allocator)
+	mlp := new_mlp(T, dim, dim * MLP_RATIO, init, allocator)
 	local_conv := new_conv_2d_bn(
 		T,
 		dim,
@@ -653,6 +663,7 @@ new_tiny_vit_block :: proc(
 		1,
 		LOCAL_CONV_SIZE / 2,
 		dim,
+		init,
 		allocator,
 	)
 
@@ -863,18 +874,27 @@ new_basic_layer :: proc(
 	input_resolution: [2]uint,
 	depth, num_heads, window_size: uint,
 	downsample: bool,
+	init := true,
 	allocator := context.allocator,
 ) -> ^Basic_Layer(T) {
 	// Create blocks
 	blocks := make([]^Tiny_ViT_Block(T), depth, allocator)
 	for i in 0 ..< depth {
-		blocks[i] = new_tiny_vit_block(T, dim, input_resolution, num_heads, window_size, allocator)
+		blocks[i] = new_tiny_vit_block(
+			T,
+			dim,
+			input_resolution,
+			num_heads,
+			window_size,
+			init,
+			allocator,
+		)
 	}
 
 	// Create downsample if needed
 	downsample_layer: Maybe(^Patch_Merging(T)) = nil
 	if downsample {
-		downsample_layer = new_patch_merging(T, input_resolution, dim, out, allocator)
+		downsample_layer = new_patch_merging(T, input_resolution, dim, out, init, allocator)
 	}
 
 	return new_clone(Basic_Layer(T){blocks = blocks, downsample = downsample_layer}, allocator)
@@ -933,6 +953,7 @@ Tiny_ViT_5m :: struct($T: typeid) {
 new_tiny_vit_5m :: proc(
 	$T: typeid,
 	input_size: uint = IMG_SIZE,
+	init := true,
 	allocator := context.allocator,
 ) -> ^Tiny_ViT_5m(T) {
 	embed_dims := []uint{64, 128, 160, 320}
@@ -940,7 +961,7 @@ new_tiny_vit_5m :: proc(
 	num_heads := []uint{2, 4, 5, 10}
 	window_sizes := []uint{7, 7, 14, 7}
 
-	patch_embed := new_patch_embed(T, IN_CHANNELS, embed_dims[0], allocator)
+	patch_embed := new_patch_embed(T, IN_CHANNELS, embed_dims[0], init, allocator)
 	patches_resolution := uint(input_size / 4) // After patch embedding
 
 	// Layer 0 (ConvLayer) - downsamples 256->128
@@ -952,6 +973,7 @@ new_tiny_vit_5m :: proc(
 		depths[0],
 		true, // downsample
 		MBCONV_EXPAND_RATIO,
+		init,
 		allocator,
 	)
 
@@ -973,6 +995,7 @@ new_tiny_vit_5m :: proc(
 			num_heads[i_layer],
 			window_sizes[i_layer],
 			i_layer < num_layers - 1, // downsample
+			init,
 			allocator,
 		)
 		layers[i_layer - 1] = layer
@@ -991,6 +1014,7 @@ new_tiny_vit_5m :: proc(
 		dilation = 1,
 		groups = 1,
 		use_bias = false,
+		init = init,
 		allocator = allocator,
 	)
 	// LayerNorm2d expects spatial dimensions based on final output
@@ -1007,6 +1031,7 @@ new_tiny_vit_5m :: proc(
 		1,
 		1,
 		false,
+		init,
 		allocator,
 	)
 	neck_ln2 := nn.new_layer_norm_2d(T, []uint{final_spatial_dim, final_spatial_dim}, allocator)

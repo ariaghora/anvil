@@ -23,7 +23,7 @@ main :: proc() {
 	imgsz := uint(1024)
 
 	model_init_trace := trace.TRACE_SECTION("model_initialization")
-	model := tf.new_tiny_vit_5m(f32, imgsz, arena_alloc)
+	model := tf.new_tiny_vit_5m(f32, imgsz, false, arena_alloc)
 	trace.end_scoped_trace(model_init_trace)
 
 	input_prep_trace := trace.TRACE_SECTION("input_preparation")

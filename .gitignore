@@ -6,3 +6,6 @@ CLAUDE.md
 models/mobile_sam-tiny-vitt.safetensors
 trace.json
 odin-simd
+
+*.tensor
+tensorgen/safetensors
