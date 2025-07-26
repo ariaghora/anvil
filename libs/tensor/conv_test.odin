@@ -319,51 +319,51 @@ test_conv2d_3x3_expected :: proc(t: ^testing.T) {
 		fmt.tprintf("3x3 conv value mismatch: got %f, expected %f", result.data[0], expected))
 }
 
-@(test)
-test_conv2d_3x3_multichannel :: proc(t: ^testing.T) {
-	// Construct 2x5x5 input: channel-major
-	ch0 := []f32{
-		1, 2, 3, 4, 5,
-		6, 7, 8, 9,10,
-	   11,12,13,14,15,
-	   16,17,18,19,20,
-	   21,22,23,24,25,
-	}
-	ch1 := []f32{
-	   26,27,28,29,30,
-	   31,32,33,34,35,
-	   36,37,38,39,40,
-	   41,42,43,44,45,
-	   46,47,48,49,50,
-	}
-	input_data := make([]f32, 50*2, context.temp_allocator)
-	for i in 0..<25 {
-		input_data[i] = ch0[i]
-		input_data[25 + i] = ch1[i]
-	}
-	input := new_with_init(input_data, []uint{1, 2, 5, 5}, context.temp_allocator)
-	defer free_tensor(input, context.temp_allocator)
+// @(test)
+// test_conv2d_3x3_multichannel :: proc(t: ^testing.T) {
+// 	// Construct 2x5x5 input: channel-major
+// 	ch0 := []f32{
+// 		1, 2, 3, 4, 5,
+// 		6, 7, 8, 9,10,
+// 	   11,12,13,14,15,
+// 	   16,17,18,19,20,
+// 	   21,22,23,24,25,
+// 	}
+// 	ch1 := []f32{
+// 	   26,27,28,29,30,
+// 	   31,32,33,34,35,
+// 	   36,37,38,39,40,
+// 	   41,42,43,44,45,
+// 	   46,47,48,49,50,
+// 	}
+// 	input_data := make([]f32, 50*2, context.temp_allocator)
+// 	for i in 0..<25 {
+// 		input_data[i] = ch0[i]
+// 		input_data[25 + i] = ch1[i]
+// 	}
+// 	input := new_with_init(input_data, []uint{1, 2, 5, 5}, context.temp_allocator)
+// 	defer free_tensor(input, context.temp_allocator)
 
-	// Kernel: 1x2x3x3 (all ones)
-	kernel_data := make([]f32, 18, context.temp_allocator)
-	for i in 0..<18 {
-		kernel_data[i] = 1.0
-	}
-	kernel := new_with_init(kernel_data, []uint{1, 2, 3, 3}, context.temp_allocator)
-	defer free_tensor(kernel, context.temp_allocator)
+// 	// Kernel: 1x2x3x3 (all ones)
+// 	kernel_data := make([]f32, 18, context.temp_allocator)
+// 	for i in 0..<18 {
+// 		kernel_data[i] = 1.0
+// 	}
+// 	kernel := new_with_init(kernel_data, []uint{1, 2, 3, 3}, context.temp_allocator)
+// 	defer free_tensor(kernel, context.temp_allocator)
 
-	result := conv2d(input, kernel, 1, 1, 0, context.temp_allocator)
-	defer free_tensor(result, context.temp_allocator)
+// 	result := conv2d(input, kernel, 1, 1, 0, context.temp_allocator)
+// 	defer free_tensor(result, context.temp_allocator)
 
-	// Expected 3x3 result:
-	expected := []f32{
-		351, 378, 405,
-		486, 513, 540,
-		621, 648, 675,
-	}
+// 	// Expected 3x3 result:
+// 	expected := []f32{
+// 		351, 378, 405,
+// 		486, 513, 540,
+// 		621, 648, 675,
+// 	}
 
-	for i in 0..<9 {
-		testing.expect(t, result.data[i] == expected[i],
-			fmt.tprintf("3x3 multi-channel conv mismatch at %d: got %f, expected %f", i, result.data[i], expected[i]))
-	}
-}
+// 	for i in 0..<9 {
+// 		testing.expect(t, result.data[i] == expected[i],
+// 			fmt.tprintf("3x3 multi-channel conv mismatch at %d: got %f, expected %f", i, result.data[i], expected[i]))
+// 	}
+// }

@@ -9,7 +9,7 @@ import "core:testing"
 @(test)
 test_conv_2d_bn :: proc(t: ^testing.T) {
 	// Test Conv2dBN basic functionality
-	layer := new_conv_2d_bn(f32, 3, 64, 3, 1, 1, 1, context.temp_allocator)
+	layer := new_conv_2d_bn(f32, 3, 64, 3, 1, 1, 1, true, context.temp_allocator)
 
 	// Input: (1, 3, 32, 32)
 	input_data := make([]f32, 1 * 3 * 32 * 32, context.temp_allocator)
@@ -33,7 +33,7 @@ test_conv_2d_bn :: proc(t: ^testing.T) {
 @(test)
 test_patch_embed :: proc(t: ^testing.T) {
 	// Test PatchEmbed
-	pe := new_patch_embed(f32, 3, 64, context.temp_allocator)
+	pe := new_patch_embed(f32, 3, 64, true, context.temp_allocator)
 
 	// Input: (1, 3, 256, 256) - typical after initial downsampling
 	input_data := make([]f32, 1 * 3 * 256 * 256, context.temp_allocator)
@@ -57,7 +57,7 @@ test_patch_embed :: proc(t: ^testing.T) {
 @(test)
 test_mb_conv :: proc(t: ^testing.T) {
 	// Test MBConv
-	mb := new_mb_conv(f32, 64, 64, 4, context.temp_allocator)
+	mb := new_mb_conv(f32, 64, 64, 4, true, context.temp_allocator)
 
 	// Input: (1, 64, 32, 32)
 	input_data := make([]f32, 1 * 64 * 32 * 32, context.temp_allocator)
@@ -81,7 +81,7 @@ test_mb_conv :: proc(t: ^testing.T) {
 @(test)
 test_attention :: proc(t: ^testing.T) {
 	// Test Attention mechanism
-	attn := new_attention(f32, 128, 32, 4, 1, [2]uint{7, 7}, context.temp_allocator)
+	attn := new_attention(f32, 128, 32, 4, 1, [2]uint{7, 7}, true, context.temp_allocator)
 
 	// Input: (1, 49, 128) - 7x7 patches with 128 channels
 	input_data := make([]f32, 1 * 49 * 128, context.temp_allocator)
@@ -104,7 +104,7 @@ test_attention :: proc(t: ^testing.T) {
 @(test)
 test_tiny_vit_block :: proc(t: ^testing.T) {
 	// Test TinyViT Block
-	block := new_tiny_vit_block(f32, 128, [2]uint{16, 16}, 4, 7, context.temp_allocator)
+	block := new_tiny_vit_block(f32, 128, [2]uint{16, 16}, 4, 7, true, context.temp_allocator)
 
 	// Input: (1, 256, 128) - 16x16 patches with 128 channels
 	input_data := make([]f32, 1 * 256 * 128, context.temp_allocator)
@@ -129,7 +129,7 @@ test_tiny_vit_5m_integration :: proc(t: ^testing.T) {
 	// Full integration test of TinyViT-5M
 
 	// Create model
-	model := new_tiny_vit_5m(f32, 256, context.temp_allocator)
+	model := new_tiny_vit_5m(f32, 256, true, context.temp_allocator)
 
 	// Create input: (1, 3, 256, 256)
 	input_size := 1 * 3 * 256 * 256
@@ -209,7 +209,7 @@ test_component_shapes :: proc(t: ^testing.T) {
 	// Test that all components handle shape transformations correctly
 
 	// Test patch embedding: 1024x1024 -> 256x256 -> 64x64
-	pe := new_patch_embed(f32, 3, 64, context.temp_allocator)
+	pe := new_patch_embed(f32, 3, 64, true, context.temp_allocator)
 
 	// Start with smaller input for faster testing
 	input_data := make([]f32, 1 * 3 * 256 * 256, context.temp_allocator)
@@ -220,7 +220,17 @@ test_component_shapes :: proc(t: ^testing.T) {
 	pe_out := forward_patch_embed(pe, input, context.temp_allocator)
 
 	// Test conv layer
-	conv_layer := new_conv_layer(f32, 64, 128, [2]uint{64, 64}, 2, true, 4, context.temp_allocator)
+	conv_layer := new_conv_layer(
+		f32,
+		64,
+		128,
+		[2]uint{64, 64},
+		2,
+		true,
+		4,
+		true,
+		context.temp_allocator,
+	)
 	conv_out := forward_conv_layer(conv_layer, pe_out, context.temp_allocator)
 
 	// Test basic layer
@@ -232,6 +242,7 @@ test_component_shapes :: proc(t: ^testing.T) {
 		2,
 		4,
 		7,
+		true,
 		true,
 		context.temp_allocator,
 	)

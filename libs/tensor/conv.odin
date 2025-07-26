@@ -1,6 +1,7 @@
 package tensor
 
 import "../trace"
+import "core:simd"
 
 // NOTE(Aria): tuned for M1 chips. Basically this depends on cache size
 TILE_H :: 64
@@ -97,32 +98,147 @@ im2col_fast_1x1 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
 			src_b := src[b_idx * chw:]
 			dst_b := dst[b_idx * hw * c:]
 
-			// Tile over spatial positions
-			for hw_tile := uint(0); hw_tile < hw; hw_tile += TILE_SIZE * TILE_SIZE {
-				hw_tile_end := min(hw_tile + TILE_SIZE * TILE_SIZE, hw)
+			when T == f32 {
+				// Process multiple spatial positions AND channels with SIMD
+				// This processes a 4x4 block: 4 spatial positions × 4 channels
+				hw_idx := uint(0)
 
-				// Tile over channels
-				for c_tile := uint(0); c_tile < c; c_tile += TILE_C {
-					c_tile_end := min(c_tile + TILE_C, c)
+				// Main loop: process 4 spatial positions at a time
+				for ; hw_idx + 4 <= hw; hw_idx += 4 {
+					dst_base := hw_idx * c
 
-					// Process this tile - now we're accessing contiguous chunks
-					for hw_idx := hw_tile; hw_idx < hw_tile_end; hw_idx += 1 {
-						dst_offset := hw_idx * c + c_tile
-
-						// Unroll for channels in this tile
-						c_idx := c_tile
-						for ; c_idx + TILE_SIZE - 1 < c_tile_end; c_idx += TILE_SIZE {
-							#unroll for i in 0 ..< TILE_SIZE {
-								dst_b[dst_offset + uint(i)] =
-									src_b[(c_idx + uint(i)) * hw + hw_idx]
-							}
-							dst_offset += TILE_SIZE
+					c_idx := uint(0)
+					// Process 4 channels at a time
+					for ; c_idx + 4 <= c; c_idx += 4 {
+						// Load 4x4 block: 4 spatial × 4 channels
+						row0 := #simd[4]f32 {
+							src_b[c_idx * hw + hw_idx],
+							src_b[(c_idx + 1) * hw + hw_idx],
+							src_b[(c_idx + 2) * hw + hw_idx],
+							src_b[(c_idx + 3) * hw + hw_idx],
+						}
+						row1 := #simd[4]f32 {
+							src_b[c_idx * hw + hw_idx + 1],
+							src_b[(c_idx + 1) * hw + hw_idx + 1],
+							src_b[(c_idx + 2) * hw + hw_idx + 1],
+							src_b[(c_idx + 3) * hw + hw_idx + 1],
+						}
+						row2 := #simd[4]f32 {
+							src_b[c_idx * hw + hw_idx + 2],
+							src_b[(c_idx + 1) * hw + hw_idx + 2],
+							src_b[(c_idx + 2) * hw + hw_idx + 2],
+							src_b[(c_idx + 3) * hw + hw_idx + 2],
+						}
+						row3 := #simd[4]f32 {
+							src_b[c_idx * hw + hw_idx + 3],
+							src_b[(c_idx + 1) * hw + hw_idx + 3],
+							src_b[(c_idx + 2) * hw + hw_idx + 3],
+							src_b[(c_idx + 3) * hw + hw_idx + 3],
 						}
 
-						// Handle remainder
-						for ; c_idx < c_tile_end; c_idx += 1 {
-							dst_b[dst_offset] = src_b[c_idx * hw + hw_idx]
-							dst_offset += 1
+						// Store 4 rows of 4 channels each
+						(^#simd[4]f32)(&dst_b[dst_base + c_idx])^ = row0
+						(^#simd[4]f32)(&dst_b[dst_base + c + c_idx])^ = row1
+						(^#simd[4]f32)(&dst_b[dst_base + 2 * c + c_idx])^ = row2
+						(^#simd[4]f32)(&dst_b[dst_base + 3 * c + c_idx])^ = row3
+					}
+
+					// Handle remainder channels for these 4 spatial positions
+					for ; c_idx < c; c_idx += 1 {
+						dst_b[dst_base + c_idx] = src_b[c_idx * hw + hw_idx]
+						dst_b[dst_base + c + c_idx] = src_b[c_idx * hw + hw_idx + 1]
+						dst_b[dst_base + 2 * c + c_idx] = src_b[c_idx * hw + hw_idx + 2]
+						dst_b[dst_base + 3 * c + c_idx] = src_b[c_idx * hw + hw_idx + 3]
+					}
+				}
+
+				// Handle remainder spatial positions
+				for ; hw_idx < hw; hw_idx += 1 {
+					dst_offset := hw_idx * c
+
+					c_idx := uint(0)
+					for ; c_idx + 4 <= c; c_idx += 4 {
+						vals := #simd[4]f32 {
+							src_b[c_idx * hw + hw_idx],
+							src_b[(c_idx + 1) * hw + hw_idx],
+							src_b[(c_idx + 2) * hw + hw_idx],
+							src_b[(c_idx + 3) * hw + hw_idx],
+						}
+						(^#simd[4]f32)(&dst_b[dst_offset + c_idx])^ = vals
+					}
+
+					for ; c_idx < c; c_idx += 1 {
+						dst_b[dst_offset + c_idx] = src_b[c_idx * hw + hw_idx]
+					}
+				}
+			} else when T == f64 {
+				// Process 2x2 blocks for f64
+				hw_idx := uint(0)
+
+				for ; hw_idx + 2 <= hw; hw_idx += 2 {
+					dst_base := hw_idx * c
+
+					c_idx := uint(0)
+					for ; c_idx + 2 <= c; c_idx += 2 {
+						row0 := #simd[2]f64 {
+							src_b[c_idx * hw + hw_idx],
+							src_b[(c_idx + 1) * hw + hw_idx],
+						}
+						row1 := #simd[2]f64 {
+							src_b[c_idx * hw + hw_idx + 1],
+							src_b[(c_idx + 1) * hw + hw_idx + 1],
+						}
+
+						(^#simd[2]f64)(&dst_b[dst_base + c_idx])^ = row0
+						(^#simd[2]f64)(&dst_b[dst_base + c + c_idx])^ = row1
+					}
+
+					for ; c_idx < c; c_idx += 1 {
+						dst_b[dst_base + c_idx] = src_b[c_idx * hw + hw_idx]
+						dst_b[dst_base + c + c_idx] = src_b[c_idx * hw + hw_idx + 1]
+					}
+				}
+
+				for ; hw_idx < hw; hw_idx += 1 {
+					dst_offset := hw_idx * c
+
+					c_idx := uint(0)
+					for ; c_idx + 2 <= c; c_idx += 2 {
+						vals := #simd[2]f64 {
+							src_b[c_idx * hw + hw_idx],
+							src_b[(c_idx + 1) * hw + hw_idx],
+						}
+						(^#simd[2]f64)(&dst_b[dst_offset + c_idx])^ = vals
+					}
+
+					for ; c_idx < c; c_idx += 1 {
+						dst_b[dst_offset + c_idx] = src_b[c_idx * hw + hw_idx]
+					}
+				}
+			} else {
+				// Original tiled implementation for other types
+				for hw_tile := uint(0); hw_tile < hw; hw_tile += TILE_SIZE * TILE_SIZE {
+					hw_tile_end := min(hw_tile + TILE_SIZE * TILE_SIZE, hw)
+
+					for c_tile := uint(0); c_tile < c; c_tile += TILE_C {
+						c_tile_end := min(c_tile + TILE_C, c)
+
+						for hw_idx := hw_tile; hw_idx < hw_tile_end; hw_idx += 1 {
+							dst_offset := hw_idx * c + c_tile
+
+							c_idx := c_tile
+							for ; c_idx + TILE_SIZE - 1 < c_tile_end; c_idx += TILE_SIZE {
+								#unroll for i in 0 ..< TILE_SIZE {
+									dst_b[dst_offset + uint(i)] =
+										src_b[(c_idx + uint(i)) * hw + hw_idx]
+								}
+								dst_offset += TILE_SIZE
+							}
+
+							for ; c_idx < c_tile_end; c_idx += 1 {
+								dst_b[dst_offset] = src_b[c_idx * hw + hw_idx]
+								dst_offset += 1
+							}
 						}
 					}
 				}
@@ -338,27 +454,181 @@ reshape_bhwc_to_bchw :: proc(
 
 	src := tensor.data
 	dst := result.data
+	hw := height * width
 
-	for b in 0 ..< batch {
-		for c_tile := uint(0); c_tile < channels; c_tile += TILE_SIZE {
-			c_end := min(c_tile + TILE_SIZE, channels)
+	#no_bounds_check {
+		when T == f32 {
+			for b in 0 ..< batch {
+				src_batch := src[b * hw * channels:]
+				dst_batch := dst[b * channels * hw:]
 
-			for h in 0 ..< height {
-				for w in 0 ..< width {
-					// THIS IS THE ONLY CHANGE - FIXED THE INDEXING
-					src_base := b * height * width * channels + (h * width + w) * channels
-					dst_base := b * channels * height * width + h * width + w
+				// Process 4 spatial positions at once
+				hw_idx := uint(0)
+				for ; hw_idx + 4 <= hw; hw_idx += 4 {
+					src_base := hw_idx * channels
 
-					// Your efficient unrolling stays exactly the same
-					if c_end - c_tile == TILE_SIZE {
-						#unroll for i in 0 ..< TILE_SIZE {
-							dst[dst_base + (c_tile + uint(i)) * height * width] =
-								src[src_base + c_tile + uint(i)]
+					// Process 4 channels at a time
+					c := uint(0)
+					for ; c + 4 <= channels; c += 4 {
+						// Load 4x4 block: 4 spatial × 4 channels
+						row0 := #simd[4]f32 {
+							src_batch[src_base + c],
+							src_batch[src_base + c + 1],
+							src_batch[src_base + c + 2],
+							src_batch[src_base + c + 3],
 						}
-					} else {
-						// Handle remainder
-						for c := c_tile; c < c_end; c += 1 {
-							dst[dst_base + c * height * width] = src[src_base + c]
+						row1 := #simd[4]f32 {
+							src_batch[src_base + channels + c],
+							src_batch[src_base + channels + c + 1],
+							src_batch[src_base + channels + c + 2],
+							src_batch[src_base + channels + c + 3],
+						}
+						row2 := #simd[4]f32 {
+							src_batch[src_base + 2 * channels + c],
+							src_batch[src_base + 2 * channels + c + 1],
+							src_batch[src_base + 2 * channels + c + 2],
+							src_batch[src_base + 2 * channels + c + 3],
+						}
+						row3 := #simd[4]f32 {
+							src_batch[src_base + 3 * channels + c],
+							src_batch[src_base + 3 * channels + c + 1],
+							src_batch[src_base + 3 * channels + c + 2],
+							src_batch[src_base + 3 * channels + c + 3],
+						}
+
+						// Transpose and store: each channel gets 4 spatial values
+						dst_c0 := #simd[4]f32 {
+							simd.extract(row0, 0),
+							simd.extract(row1, 0),
+							simd.extract(row2, 0),
+							simd.extract(row3, 0),
+						}
+						dst_c1 := #simd[4]f32 {
+							simd.extract(row0, 1),
+							simd.extract(row1, 1),
+							simd.extract(row2, 1),
+							simd.extract(row3, 1),
+						}
+						dst_c2 := #simd[4]f32 {
+							simd.extract(row0, 2),
+							simd.extract(row1, 2),
+							simd.extract(row2, 2),
+							simd.extract(row3, 2),
+						}
+						dst_c3 := #simd[4]f32 {
+							simd.extract(row0, 3),
+							simd.extract(row1, 3),
+							simd.extract(row2, 3),
+							simd.extract(row3, 3),
+						}
+
+						(^#simd[4]f32)(&dst_batch[c * hw + hw_idx])^ = dst_c0
+						(^#simd[4]f32)(&dst_batch[(c + 1) * hw + hw_idx])^ = dst_c1
+						(^#simd[4]f32)(&dst_batch[(c + 2) * hw + hw_idx])^ = dst_c2
+						(^#simd[4]f32)(&dst_batch[(c + 3) * hw + hw_idx])^ = dst_c3
+					}
+
+					// Handle remainder channels
+					for ; c < channels; c += 1 {
+						vals := #simd[4]f32 {
+							src_batch[src_base + c],
+							src_batch[src_base + channels + c],
+							src_batch[src_base + 2 * channels + c],
+							src_batch[src_base + 3 * channels + c],
+						}
+						(^#simd[4]f32)(&dst_batch[c * hw + hw_idx])^ = vals
+					}
+				}
+
+				// Handle remainder spatial positions
+				for ; hw_idx < hw; hw_idx += 1 {
+					src_offset := hw_idx * channels
+
+					c := uint(0)
+					for ; c + 4 <= channels; c += 4 {
+						vals := (^#simd[4]f32)(&src_batch[src_offset + c])^
+
+						dst_batch[c * hw + hw_idx] = simd.extract(vals, 0)
+						dst_batch[(c + 1) * hw + hw_idx] = simd.extract(vals, 1)
+						dst_batch[(c + 2) * hw + hw_idx] = simd.extract(vals, 2)
+						dst_batch[(c + 3) * hw + hw_idx] = simd.extract(vals, 3)
+					}
+
+					for ; c < channels; c += 1 {
+						dst_batch[c * hw + hw_idx] = src_batch[src_offset + c]
+					}
+				}
+			}
+		} else when T == f64 {
+			for b in 0 ..< batch {
+				src_batch := src[b * hw * channels:]
+				dst_batch := dst[b * channels * hw:]
+
+				hw_idx := uint(0)
+				for ; hw_idx + 2 <= hw; hw_idx += 2 {
+					src_base := hw_idx * channels
+
+					c := uint(0)
+					for ; c + 2 <= channels; c += 2 {
+						row0 := #simd[2]f64{src_batch[src_base + c], src_batch[src_base + c + 1]}
+						row1 := #simd[2]f64 {
+							src_batch[src_base + channels + c],
+							src_batch[src_base + channels + c + 1],
+						}
+
+						dst_c0 := #simd[2]f64{simd.extract(row0, 0), simd.extract(row1, 0)}
+						dst_c1 := #simd[2]f64{simd.extract(row0, 1), simd.extract(row1, 1)}
+
+						(^#simd[2]f64)(&dst_batch[c * hw + hw_idx])^ = dst_c0
+						(^#simd[2]f64)(&dst_batch[(c + 1) * hw + hw_idx])^ = dst_c1
+					}
+
+					for ; c < channels; c += 1 {
+						vals := #simd[2]f64 {
+							src_batch[src_base + c],
+							src_batch[src_base + channels + c],
+						}
+						(^#simd[2]f64)(&dst_batch[c * hw + hw_idx])^ = vals
+					}
+				}
+
+				for ; hw_idx < hw; hw_idx += 1 {
+					src_offset := hw_idx * channels
+
+					c := uint(0)
+					for ; c + 2 <= channels; c += 2 {
+						vals := (^#simd[2]f64)(&src_batch[src_offset + c])^
+
+						dst_batch[c * hw + hw_idx] = simd.extract(vals, 0)
+						dst_batch[(c + 1) * hw + hw_idx] = simd.extract(vals, 1)
+					}
+
+					for ; c < channels; c += 1 {
+						dst_batch[c * hw + hw_idx] = src_batch[src_offset + c]
+					}
+				}
+			}
+		} else {
+			// Original tiled code
+			for b in 0 ..< batch {
+				for c_tile := uint(0); c_tile < channels; c_tile += TILE_SIZE {
+					c_end := min(c_tile + TILE_SIZE, channels)
+
+					for h in 0 ..< height {
+						for w in 0 ..< width {
+							src_base := b * height * width * channels + (h * width + w) * channels
+							dst_base := b * channels * height * width + h * width + w
+
+							if c_end - c_tile == TILE_SIZE {
+								#unroll for i in 0 ..< TILE_SIZE {
+									dst[dst_base + (c_tile + uint(i)) * height * width] =
+										src[src_base + c_tile + uint(i)]
+								}
+							} else {
+								for c := c_tile; c < c_end; c += 1 {
+									dst[dst_base + c * height * width] = src[src_base + c]
+								}
+							}
 						}
 					}
 				}

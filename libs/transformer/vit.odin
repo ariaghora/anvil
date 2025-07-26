@@ -96,7 +96,7 @@ gelu_fast :: proc(
 				vals := (^#simd[4]f32)(&x.data[i])^
 				sigmoid_inputs := simd.mul(vals, scale_vec)
 				tanh_vals := tanh_fast_simd_4xf32(simd.mul(sigmoid_inputs, half_vec))
-				sigmoids := simd.mul(half_vec, simd.add(one_vec, tanh_vals))
+				sigmoids := simd.fma(half_vec, tanh_vals, half_vec)
 				results := simd.mul(vals, sigmoids)
 				(^#simd[4]f32)(&result.data[i])^ = results
 			}
@@ -109,12 +109,12 @@ gelu_fast :: proc(
 				vals := (^#simd[2]f64)(&x.data[i])^
 				sigmoid_inputs := simd.mul(vals, scale_vec)
 				tanh_vals := tanh_fast_simd_2xf64(simd.mul(sigmoid_inputs, half_vec))
-				sigmoids := simd.mul(half_vec, simd.add(one_vec, tanh_vals))
+				sigmoids := simd.fma(half_vec, tanh_vals, half_vec)
 				results := simd.mul(vals, sigmoids)
 				(^#simd[2]f64)(&result.data[i])^ = results
 			}
 		} else {
-      		#panic("fast gelu is not available for other than f32 and f64")
+			#panic("fast gelu is not available for other than f32 and f64")
 		}
 
 		// Handle remainder
@@ -140,14 +140,11 @@ tanh_fast_simd_4xf32 :: proc(x: #simd[4]f32) -> #simd[4]f32 {
 	c3150 := #simd[4]f32{3150, 3150, 3150, 3150}
 	c28 := #simd[4]f32{28, 28, 28, 28}
 
-	a := simd.mul(
-		x,
-		simd.add(c135135, simd.mul(x2, simd.add(c17325, simd.mul(x2, simd.add(c378, x2))))),
-	)
-	b := simd.add(
-		c135135,
-		simd.mul(x2, simd.add(c62370, simd.mul(x2, simd.add(c3150, simd.mul(x2, c28))))),
-	)
+	a_inner := simd.fma(x2, simd.fma(x2, x2, c378), c17325)
+	a := simd.mul(x, simd.fma(x2, a_inner, c135135))
+
+	b_inner := simd.fma(x2, simd.fma(x2, c28, c3150), c62370)
+	b := simd.fma(x2, b_inner, c135135)
 
 	return simd.div(a, b)
 }
@@ -163,14 +160,11 @@ tanh_fast_simd_2xf64 :: proc(x: #simd[2]f64) -> #simd[2]f64 {
 	c3150 := #simd[2]f64{3150, 3150}
 	c28 := #simd[2]f64{28, 28}
 
-	a := simd.mul(
-		x,
-		simd.add(c135135, simd.mul(x2, simd.add(c17325, simd.mul(x2, simd.add(c378, x2))))),
-	)
-	b := simd.add(
-		c135135,
-		simd.mul(x2, simd.add(c62370, simd.mul(x2, simd.add(c3150, simd.mul(x2, c28))))),
-	)
+	a_inner := simd.fma(x2, simd.fma(x2, x2, c378), c17325)
+	a := simd.mul(x, simd.fma(x2, a_inner, c135135))
+
+	b_inner := simd.fma(x2, simd.fma(x2, c28, c3150), c62370)
+	b := simd.fma(x2, b_inner, c135135)
 
 	return simd.div(a, b)
 }
