@@ -652,6 +652,7 @@ matrix_transpose :: proc(
 }
 
 // Split tensor into chunks along specified dimension
+// Split tensor into chunks along specified dimension
 chunk :: proc(
 	tensor: ^Tensor($T),
 	groups: uint,
@@ -672,29 +673,30 @@ chunk :: proc(
 	chunks := make([]^Tensor(T), groups, allocator)
 
 	for i in 0 ..< groups {
-		// Create view tensor for this chunk
-		chunk_tensor := new(Tensor(T), allocator)
-		chunk_tensor.data = tensor.data // Share the data
-		chunk_tensor.shape = make([]uint, len(tensor.shape), allocator)
-		chunk_tensor.strides = make([]uint, len(tensor.strides), allocator)
-		chunk_tensor.contiguous = false // Views are typically not contiguous
-		chunk_tensor.owns_data = false // This is a view of the original tensor
+		// Create shape and strides for this chunk
+		chunk_shape := make([]uint, len(tensor.shape), context.temp_allocator)
+		chunk_strides := make([]uint, len(tensor.strides), context.temp_allocator)
 
-		// Copy shape and modify the chunked dimension
-		copy(chunk_tensor.shape, tensor.shape)
-		chunk_tensor.shape[dim] = chunk_size
+		copy(chunk_shape, tensor.shape)
+		copy(chunk_strides, tensor.strides)
+		chunk_shape[dim] = chunk_size
 
-		// Recalculate strides for the new shape
-		stride: uint = 1
-		for i := len(chunk_tensor.shape) - 1; i >= 0; i -= 1 {
-			chunk_tensor.strides[i] = stride
-			stride *= chunk_tensor.shape[i]
-		}
+		// Create contiguous result tensor
+		chunk_tensor := tensor_alloc(T, chunk_shape, true, allocator, loc)
 
 		// Calculate offset for this chunk
 		offset := i * chunk_size * tensor.strides[dim]
-		chunk_tensor.data = tensor.data[offset:]
 
+		// Get strided data for this chunk
+		data, allocated := get_strided_data(
+			&Tensor(T){data = tensor.data[offset:], shape = chunk_shape, strides = chunk_strides},
+			chunk_shape,
+			chunk_strides,
+			context.temp_allocator,
+		)
+		defer if allocated do delete(data, context.temp_allocator)
+
+		copy(chunk_tensor.data, data)
 		chunks[i] = chunk_tensor
 	}
 

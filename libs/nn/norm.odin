@@ -3,6 +3,7 @@ package nn
 import "../tensor"
 import "../trace"
 import "core:math"
+import "core:simd"
 
 UNROLL_FACTOR :: 16
 
@@ -50,8 +51,6 @@ free_batch_norm_2d :: proc(bn: ^Batch_Norm_2d($T), allocator := context.allocato
 }
 
 
-// NOTE(Aria): This is optimized implementation, so we don't use tensor abstraction and broadcasting
-// too much. Not a clean code. Deal with it.
 forward_batch_norm_2d :: proc(
 	bn: ^Batch_Norm_2d($T),
 	x: ^tensor.Tensor(T),
@@ -79,26 +78,105 @@ forward_batch_norm_2d :: proc(
 	}
 
 	// Process in batch-first order for better cache locality
-	#no_bounds_check for batch in 0 ..< n {
-		batch_offset := batch * c * spatial_size
-		for ch in 0 ..< c {
-			scale := scales[ch]
-			shift := shifts[ch]
+	#no_bounds_check {
+		when T == f32 {
+			for batch in 0 ..< n {
+				batch_offset := batch * c * spatial_size
+				for ch in 0 ..< c {
+					scale_vec := #simd[4]f32{scales[ch], scales[ch], scales[ch], scales[ch]}
+					shift_vec := #simd[4]f32{shifts[ch], shifts[ch], shifts[ch], shifts[ch]}
 
-			base_idx := batch_offset + ch * spatial_size
+					base_idx := batch_offset + ch * spatial_size
 
-			i := uint(0)
-			for ; i + UNROLL_FACTOR <= spatial_size; i += UNROLL_FACTOR {
-				#unroll for j in 0 ..< UNROLL_FACTOR {
-					idx := base_idx + i + uint(j)
-					result.data[idx] = x.data[idx] * scale + shift
+					i := uint(0)
+					// Process 8 elements at a time using two SIMD registers
+					for ; i + 8 <= spatial_size; i += 8 {
+						// Load 8 values
+						vals1 := (^#simd[4]f32)(&x.data[base_idx + i])^
+						vals2 := (^#simd[4]f32)(&x.data[base_idx + i + 4])^
+
+						// Apply batch norm: result = x * scale + shift
+						results1 := simd.fma(vals1, scale_vec, shift_vec)
+						results2 := simd.fma(vals2, scale_vec, shift_vec)
+
+						// Store results
+						(^#simd[4]f32)(&result.data[base_idx + i])^ = results1
+						(^#simd[4]f32)(&result.data[base_idx + i + 4])^ = results2
+					}
+
+					// Process 4 elements at a time
+					for ; i + 4 <= spatial_size; i += 4 {
+						vals := (^#simd[4]f32)(&x.data[base_idx + i])^
+						results := simd.fma(vals, scale_vec, shift_vec)
+						(^#simd[4]f32)(&result.data[base_idx + i])^ = results
+					}
+
+					// Handle remainder
+					for ; i < spatial_size; i += 1 {
+						idx := base_idx + i
+						result.data[idx] = x.data[idx] * scales[ch] + shifts[ch]
+					}
 				}
 			}
+		} else when T == f64 {
+			for batch in 0 ..< n {
+				batch_offset := batch * c * spatial_size
+				for ch in 0 ..< c {
+					scale_vec := #simd[2]f64{scales[ch], scales[ch]}
+					shift_vec := #simd[2]f64{shifts[ch], shifts[ch]}
 
-			// Handle remainder
-			for ; i < spatial_size; i += 1 {
-				idx := base_idx + i
-				result.data[idx] = x.data[idx] * scale + shift
+					base_idx := batch_offset + ch * spatial_size
+
+					i := uint(0)
+					// Process 4 elements at a time using two SIMD registers
+					for ; i + 4 <= spatial_size; i += 4 {
+						vals1 := (^#simd[2]f64)(&x.data[base_idx + i])^
+						vals2 := (^#simd[2]f64)(&x.data[base_idx + i + 2])^
+
+						results1 := simd.fma(vals1, scale_vec, shift_vec)
+						results2 := simd.fma(vals2, scale_vec, shift_vec)
+
+						(^#simd[2]f64)(&result.data[base_idx + i])^ = results1
+						(^#simd[2]f64)(&result.data[base_idx + i + 2])^ = results2
+					}
+
+					// Process 2 elements at a time
+					for ; i + 2 <= spatial_size; i += 2 {
+						vals := (^#simd[2]f64)(&x.data[base_idx + i])^
+						results := simd.fma(vals, scale_vec, shift_vec)
+						(^#simd[2]f64)(&result.data[base_idx + i])^ = results
+					}
+
+					// Handle remainder
+					for ; i < spatial_size; i += 1 {
+						idx := base_idx + i
+						result.data[idx] = x.data[idx] * scales[ch] + shifts[ch]
+					}
+				}
+			}
+		} else {
+			// Original scalar code for other types
+			for batch in 0 ..< n {
+				batch_offset := batch * c * spatial_size
+				for ch in 0 ..< c {
+					scale := scales[ch]
+					shift := shifts[ch]
+
+					base_idx := batch_offset + ch * spatial_size
+
+					i := uint(0)
+					for ; i + UNROLL_FACTOR <= spatial_size; i += UNROLL_FACTOR {
+						#unroll for j in 0 ..< UNROLL_FACTOR {
+							idx := base_idx + i + uint(j)
+							result.data[idx] = x.data[idx] * scale + shift
+						}
+					}
+
+					for ; i < spatial_size; i += 1 {
+						idx := base_idx + i
+						result.data[idx] = x.data[idx] * scale + shift
+					}
+				}
 			}
 		}
 	}

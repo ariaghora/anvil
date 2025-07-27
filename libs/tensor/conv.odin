@@ -409,10 +409,7 @@ conv2d_grouped :: proc(
 
 	// Split input and kernel into groups
 	input_chunks := chunk(input, groups, 1, context.temp_allocator) // Split along channel dimension
-	// Note: temp_allocator chunks will be cleaned up automatically
-
 	kernel_chunks := chunk(kernel, groups, 0, context.temp_allocator) // Split along output channel dimension
-	// Note: temp_allocator chunks will be cleaned up automatically
 
 	// Apply convolution to each group
 	results := make([]^Tensor(T), groups, context.temp_allocator)
