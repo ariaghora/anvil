@@ -1,7 +1,12 @@
 package tensor
 
+import "../tensor"
 import "../trace"
+import "core:os"
 import "core:simd"
+import "core:sync"
+import "core:thread"
+
 
 // NOTE(Aria): tuned for M1 chips. Basically this depends on cache size
 TILE_H :: 64
@@ -21,8 +26,8 @@ im2col :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
-	conv_bn_trace := trace.TRACE_FUNCTION("im2col")
-	defer trace.end_scoped_trace(conv_bn_trace)
+	// conv_bn_trace := trace.TRACE_FUNCTION("im2col")
+	// defer trace.end_scoped_trace(conv_bn_trace)
 
 	b, c, h, w := t.shape[0], t.shape[1], t.shape[2], t.shape[3]
 	h_out, w_out := get_hw(h, w, h_k, w_k, stride, dilation, padding)
@@ -35,8 +40,7 @@ im2col :: proc(
 	dst_size := b * h_out * w_out * c * h_k * w_k
 	dst := make([]T, dst_size, allocator, loc)
 
-	im2col_building := trace.TRACE_SECTION("im2col_building")
-
+	// im2col_building := trace.TRACE_SECTION("im2col_building")
 	if stride == 1 && dilation == 1 && padding == 0 && t.contiguous {
 		if h_k == 1 && w_k == 1 {
 			im2col_fast_1x1(src, dst, b, c, h, w, h_out, w_out)
@@ -78,8 +82,7 @@ im2col :: proc(
 			t.strides,
 		)
 	}
-
-	trace.end_scoped_trace(im2col_building)
+	// trace.end_scoped_trace(im2col_building)
 
 	t_out := tensor_alloc(T, []uint{b, h_out * w_out, c * h_k * w_k}, false, allocator, loc)
 	t_out.data = dst
@@ -87,8 +90,8 @@ im2col :: proc(
 }
 
 im2col_fast_1x1 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
-	im2col_trace := trace.TRACE_FUNCTION("im2col_1x1")
-	defer trace.end_scoped_trace(im2col_trace)
+	// im2col_trace := trace.TRACE_FUNCTION("im2col_1x1")
+	// defer trace.end_scoped_trace(im2col_trace)
 
 	hw := h * w
 	chw := c * hw
@@ -248,8 +251,8 @@ im2col_fast_1x1 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
 }
 
 im2col_fast_3x3 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
-	im2col_trace := trace.TRACE_FUNCTION("im2col_3x3")
-	defer trace.end_scoped_trace(im2col_trace)
+	// im2col_trace := trace.TRACE_FUNCTION("im2col_3x3")
+	// defer trace.end_scoped_trace(im2col_trace)
 
 	dst_idx := 0
 	hw := h * w
@@ -282,8 +285,8 @@ im2col_general :: proc(
 	stride, dilation, padding: uint,
 	strides: []uint,
 ) {
-	im2col_trace := trace.TRACE_FUNCTION("im2col_general")
-	defer trace.end_scoped_trace(im2col_trace)
+	// im2col_trace := trace.TRACE_FUNCTION("im2col_general")
+	// defer trace.end_scoped_trace(im2col_trace)
 	src_s0, src_s1, src_s2, src_s3 := strides[0], strides[1], strides[2], strides[3]
 
 	for b_idx in 0 ..< b {
@@ -407,33 +410,256 @@ conv2d_grouped :: proc(
 		return conv2d_single(input, kernel, stride, dilation, padding, allocator, loc)
 	}
 
-	// Split input and kernel into groups
-	input_chunks := chunk(input, groups, 1, context.temp_allocator) // Split along channel dimension
-	kernel_chunks := chunk(kernel, groups, 0, context.temp_allocator) // Split along output channel dimension
+	// Calculate output dimensions
+	h_out, w_out := get_hw(h, w, k_h, k_w, stride, dilation, padding)
 
-	// Apply convolution to each group
-	results := make([]^Tensor(T), groups, context.temp_allocator)
-	defer delete(results, context.temp_allocator)
+	// Allocate output tensor once
+	result := tensor_alloc(T, []uint{b, c_out, h_out, w_out}, true, allocator, loc)
 
-	grouped_conv_trace := trace.TRACE_SECTION("grouped_conv")
-	for i in 0 ..< groups {
-		results[i] = conv2d_single(
-			input_chunks[i],
-			kernel_chunks[i],
-			stride,
-			dilation,
-			padding,
-			context.temp_allocator,
-		)
+	c_in_per_group := c_in / groups
+	c_out_per_group := c_out / groups
+
+	// Decide whether to parallelize based on workload
+	work_per_group := c_in_per_group * c_out_per_group * h * w * k_h * k_w
+	MIN_WORK_FOR_PARALLEL :: 100000 // Tune this threshold
+
+	if groups >= 4 && work_per_group > MIN_WORK_FOR_PARALLEL {
+		// Parallel path using thread pool
+		grouped_conv_trace := trace.TRACE_SECTION("grouped_conv_parallel")
+		defer trace.end_scoped_trace(grouped_conv_trace)
+
+		// Create a thread pool with optimal number of threads
+		num_threads := min(int(groups), os.processor_core_count())
+		pool: thread.Pool
+		thread.pool_init(&pool, context.allocator, num_threads)
+		defer thread.pool_destroy(&pool)
+		thread.pool_start(&pool)
+
+		// Work data for each group
+		Group_Work_Data :: struct {
+			input:                     ^Tensor(T),
+			kernel:                    ^Tensor(T),
+			result:                    ^Tensor(T),
+			group_idx:                 uint,
+			c_in_per_group:            uint,
+			c_out_per_group:           uint,
+			b, h, w, h_out, w_out:     uint,
+			k_h, k_w:                  uint,
+			stride, dilation, padding: uint,
+		}
+
+		// Allocate work items
+		work_items := make([]Group_Work_Data, groups, context.temp_allocator)
+		// defer delete(work_items)
+
+		// Process group function
+		process_group_task :: proc(t: thread.Task) {
+			work := cast(^Group_Work_Data)t.data
+
+			// Create views for this group
+			input_offset := work.group_idx * work.c_in_per_group
+			kernel_offset := work.group_idx * work.c_out_per_group
+			output_offset := work.group_idx * work.c_out_per_group
+
+			// Calculate offsets for views
+			input_data_offset := work.b * input_offset * work.h * work.w
+			kernel_data_offset := kernel_offset * work.c_in_per_group * work.k_h * work.k_w
+
+			input_view := Tensor(T) {
+				data       = work.input.data[input_data_offset:],
+				shape      = []uint{work.b, work.c_in_per_group, work.h, work.w},
+				strides    = work.input.strides,
+				contiguous = work.input.contiguous,
+			}
+
+			kernel_view := Tensor(T) {
+				data       = work.kernel.data[kernel_data_offset:],
+				shape      = []uint{work.c_out_per_group, work.c_in_per_group, work.k_h, work.k_w},
+				strides    = work.kernel.strides,
+				contiguous = work.kernel.contiguous,
+			}
+
+			// Run convolution for this group
+			group_output := conv2d_single(
+				&input_view,
+				&kernel_view,
+				work.stride,
+				work.dilation,
+				work.padding,
+				context.temp_allocator,
+			)
+			// defer tensor.free_tensor(group_output)
+
+			// Copy to result (thread-safe as each group writes to different channels)
+			copy_group_output_parallel(
+				work.result,
+				group_output,
+				work.b,
+				output_offset,
+				work.c_out_per_group,
+				work.h_out,
+				work.w_out,
+			)
+		}
+
+		// Create work items and submit tasks
+		for g in 0 ..< groups {
+			work_items[g] = Group_Work_Data {
+				input           = input,
+				kernel          = kernel,
+				result          = result,
+				group_idx       = g,
+				c_in_per_group  = c_in_per_group,
+				c_out_per_group = c_out_per_group,
+				b               = b,
+				h               = h,
+				w               = w,
+				h_out           = h_out,
+				w_out           = w_out,
+				k_h             = k_h,
+				k_w             = k_w,
+				stride          = stride,
+				dilation        = dilation,
+				padding         = padding,
+			}
+
+			// Add task to pool
+			thread.pool_add_task(&pool, context.temp_allocator, process_group_task, &work_items[g])
+
+		}
+
+		// Wait for all tasks to complete
+		thread.pool_finish(&pool)
+
+	} else {
+		// Sequential path for small workloads
+		grouped_conv_trace := trace.TRACE_SECTION("grouped_conv_sequential")
+		defer trace.end_scoped_trace(grouped_conv_trace)
+
+		for g in 0 ..< groups {
+			input_offset := g * c_in_per_group
+			kernel_offset := g * c_out_per_group
+			output_offset := g * c_out_per_group
+
+			input_data_offset := b * input_offset * h * w
+			kernel_data_offset := kernel_offset * c_in_per_group * k_h * k_w
+
+			input_view := Tensor(T) {
+				data       = input.data[input_data_offset:],
+				shape      = []uint{b, c_in_per_group, h, w},
+				strides    = input.strides,
+				contiguous = input.contiguous,
+			}
+
+			kernel_view := Tensor(T) {
+				data       = kernel.data[kernel_data_offset:],
+				shape      = []uint{c_out_per_group, c_in_per_group, k_h, k_w},
+				strides    = kernel.strides,
+				contiguous = kernel.contiguous,
+			}
+
+			group_output := conv2d_single(
+				&input_view,
+				&kernel_view,
+				stride,
+				dilation,
+				padding,
+				context.temp_allocator,
+			)
+			// defer tensor.free_tensor(group_output)
+
+			copy_group_output_parallel(
+				result,
+				group_output,
+				b,
+				output_offset,
+				c_out_per_group,
+				h_out,
+				w_out,
+			)
+		}
 	}
-	trace.end_scoped_trace(grouped_conv_trace)
 
-	// Concatenate results along output channel dimension (dim=1)
-	grouped_conv_cat_trace := trace.TRACE_SECTION("grouped_conv_cat")
-	final_result := cat(results, 1, allocator, loc)
-	trace.end_scoped_trace(grouped_conv_cat_trace)
+	return result
+}
 
-	return final_result
+@(private)
+copy_group_output_parallel :: proc(
+	dst: ^Tensor($T),
+	src: ^Tensor(T),
+	batch: uint,
+	channel_offset: uint,
+	channels_per_group: uint,
+	h_out: uint,
+	w_out: uint,
+) {
+	hw_out := h_out * w_out
+	dst_channels_total := dst.shape[1]
+
+	#no_bounds_check {
+		when T == f32 {
+			for b in 0 ..< batch {
+				for c in 0 ..< channels_per_group {
+					src_offset := (b * channels_per_group + c) * hw_out
+					dst_offset := (b * dst_channels_total + channel_offset + c) * hw_out
+
+					// Copy spatial data with SIMD
+					i := uint(0)
+					for ; i + 8 <= hw_out; i += 8 {
+						vals1 := (^#simd[4]f32)(&src.data[src_offset + i])^
+						vals2 := (^#simd[4]f32)(&src.data[src_offset + i + 4])^
+						(^#simd[4]f32)(&dst.data[dst_offset + i])^ = vals1
+						(^#simd[4]f32)(&dst.data[dst_offset + i + 4])^ = vals2
+					}
+
+					for ; i + 4 <= hw_out; i += 4 {
+						vals := (^#simd[4]f32)(&src.data[src_offset + i])^
+						(^#simd[4]f32)(&dst.data[dst_offset + i])^ = vals
+					}
+
+					for ; i < hw_out; i += 1 {
+						dst.data[dst_offset + i] = src.data[src_offset + i]
+					}
+				}
+			}
+		} else when T == f64 {
+			for b in 0 ..< batch {
+				for c in 0 ..< channels_per_group {
+					src_offset := (b * channels_per_group + c) * hw_out
+					dst_offset := (b * dst_channels_total + channel_offset + c) * hw_out
+
+					i := uint(0)
+					for ; i + 4 <= hw_out; i += 4 {
+						vals1 := (^#simd[2]f64)(&src.data[src_offset + i])^
+						vals2 := (^#simd[2]f64)(&src.data[src_offset + i + 2])^
+						(^#simd[2]f64)(&dst.data[dst_offset + i])^ = vals1
+						(^#simd[2]f64)(&dst.data[dst_offset + i + 2])^ = vals2
+					}
+
+					for ; i + 2 <= hw_out; i += 2 {
+						vals := (^#simd[2]f64)(&src.data[src_offset + i])^
+						(^#simd[2]f64)(&dst.data[dst_offset + i])^ = vals
+					}
+
+					for ; i < hw_out; i += 1 {
+						dst.data[dst_offset + i] = src.data[src_offset + i]
+					}
+				}
+			}
+		} else {
+			// Scalar copy for other types
+			for b in 0 ..< batch {
+				for c in 0 ..< channels_per_group {
+					src_offset := (b * channels_per_group + c) * hw_out
+					dst_offset := (b * dst_channels_total + channel_offset + c) * hw_out
+
+					for i in 0 ..< hw_out {
+						dst.data[dst_offset + i] = src.data[src_offset + i]
+					}
+				}
+			}
+		}
+	}
 }
 
 conv2d :: proc {
@@ -654,21 +880,21 @@ conv2d_single :: proc(
 	col := im2col(input, k_h, k_w, stride, dilation, padding, allocator)
 
 	// Step 2: Reshape kernel - (C_out, C_in, K_h, K_w) -> (C_in * K_h * K_w, C_out)
-	im2col_transpose_kernel_trace := trace.TRACE_SECTION("im2col_transpose_kernel")
+	// im2col_transpose_kernel_trace := trace.TRACE_SECTION("im2col_transpose_kernel")
 	kernel_2d := reshape(kernel, []uint{c_out, c_in * k_h * k_w}, allocator)
 	kernel_transposed := transpose(kernel_2d, 0, 1, allocator, loc) // -> (C_in * K_h * K_w, C_out)
-	trace.end_scoped_trace(im2col_transpose_kernel_trace)
+	// trace.end_scoped_trace(im2col_transpose_kernel_trace)
 
 	// Step 3: Batched matrix multiplication
 	// (B, H_out * W_out, C_in * K_h * K_w) @ (C_in * K_h * K_w, C_out) -> (B, H_out * W_out, C_out)
-	im2col_matmul_trace := trace.TRACE_SECTION("im2col_matmul")
+	// im2col_matmul_trace := trace.TRACE_SECTION("im2col_matmul")
 	result := matmul(col, kernel_transposed, allocator, loc)
-	trace.end_scoped_trace(im2col_matmul_trace)
+	// trace.end_scoped_trace(im2col_matmul_trace)
 
 	// Step 4: Reshape back to (B, C_out, H_out, W_out)
-	reshape_back_get_strided_data_trace := trace.TRACE_SECTION("reshape_back_get_strided_data")
+	// reshape_back_get_strided_data_trace := trace.TRACE_SECTION("reshape_back_get_strided_data")
 	final := reshape_bhwc_to_bchw(result, b, h_out, w_out, c_out, allocator)
-	trace.end_scoped_trace(reshape_back_get_strided_data_trace)
+	// trace.end_scoped_trace(reshape_back_get_strided_data_trace)
 
 	return final
 }

@@ -633,27 +633,156 @@ forward_attention :: proc(
 	#no_bounds_check for bh in 0 ..< b * h {
 		for row in 0 ..< n {
 			row_offset := bh * n * n + row * n
+			row_data := attn_scores.data[row_offset:][:n]
 
-			// Find max
-			max_val := attn_scores.data[row_offset]
-			for col in 1 ..< n {
-				if attn_scores.data[row_offset + col] > max_val {
-					max_val = attn_scores.data[row_offset + col]
+			when T == f32 {
+				// Find max using SIMD
+				col := uint(0)
+				max_vec := #simd[4]f32 {
+					math.inf_f32(-1),
+					math.inf_f32(-1),
+					math.inf_f32(-1),
+					math.inf_f32(-1),
 				}
-			}
 
-			// Exp and sum
-			sum := T(0)
-			for col in 0 ..< n {
-				val := math.exp(attn_scores.data[row_offset + col] - max_val)
-				attn_scores.data[row_offset + col] = val
-				sum += val
-			}
+				for ; col + 4 <= n; col += 4 {
+					vals := (^#simd[4]f32)(&row_data[col])^
+					max_vec = simd.max(max_vec, vals)
+				}
 
-			// Normalize
-			inv_sum := T(1) / sum
-			for col in 0 ..< n {
-				attn_scores.data[row_offset + col] *= inv_sum
+				// Reduce max_vec to scalar
+				max_val := max(
+					max(simd.extract(max_vec, 0), simd.extract(max_vec, 1)),
+					max(simd.extract(max_vec, 2), simd.extract(max_vec, 3)),
+				)
+
+				// Handle remainder
+				for ; col < n; col += 1 {
+					max_val = max(max_val, row_data[col])
+				}
+
+				sum := f32(0)
+				col = 0
+				sum_vec := #simd[4]f32{0, 0, 0, 0}
+
+				for ; col + 4 <= n; col += 4 {
+					vals := (^#simd[4]f32)(&row_data[col])^
+
+					// Have to extract for exp :(
+					exp_vals: #simd[4]f32
+					exp_vals = simd.replace(exp_vals, 0, math.exp(simd.extract(vals, 0) - max_val))
+					exp_vals = simd.replace(exp_vals, 1, math.exp(simd.extract(vals, 1) - max_val))
+					exp_vals = simd.replace(exp_vals, 2, math.exp(simd.extract(vals, 2) - max_val))
+					exp_vals = simd.replace(exp_vals, 3, math.exp(simd.extract(vals, 3) - max_val))
+
+
+					(^#simd[4]f32)(&row_data[col])^ = exp_vals
+					sum_vec = simd.add(sum_vec, exp_vals)
+				}
+
+				// Sum the vector elements
+				sum =
+					simd.extract(sum_vec, 0) +
+					simd.extract(sum_vec, 1) +
+					simd.extract(sum_vec, 2) +
+					simd.extract(sum_vec, 3)
+
+				// Handle remainder
+				for ; col < n; col += 1 {
+					val := math.exp(row_data[col] - max_val)
+					row_data[col] = val
+					sum += val
+				}
+
+				// Normalize with SIMD - this part is fully SIMD
+				inv_sum := f32(1) / sum
+				inv_sum_vec := #simd[4]f32{inv_sum, inv_sum, inv_sum, inv_sum}
+
+				col = 0
+				for ; col + 4 <= n; col += 4 {
+					vals := (^#simd[4]f32)(&row_data[col])^
+					vals = simd.mul(vals, inv_sum_vec)
+					(^#simd[4]f32)(&row_data[col])^ = vals
+				}
+
+				// Handle remainder
+				for ; col < n; col += 1 {
+					row_data[col] *= inv_sum
+				}
+
+			} else when T == f64 {
+				// Similar with 2-wide SIMD
+				col := uint(0)
+				max_vec := #simd[2]f64{math.inf_f64(-1), math.inf_f64(-1)}
+
+				for ; col + 2 <= n; col += 2 {
+					vals := (^#simd[2]f64)(&row_data[col])^
+					max_vec = simd.max(max_vec, vals)
+				}
+
+				max_val := max(simd.extract(max_vec, 0), simd.extract(max_vec, 1))
+
+				for ; col < n; col += 1 {
+					max_val = max(max_val, row_data[col])
+				}
+
+				sum := f64(0)
+				col = 0
+				sum_vec := #simd[2]f64{0, 0}
+
+				for ; col + 2 <= n; col += 2 {
+					vals := (^#simd[2]f64)(&row_data[col])^
+
+					exp_vals: #simd[2]f64
+					exp_vals = simd.replace(exp_vals, 0, math.exp(simd.extract(vals, 0) - max_val))
+					exp_vals = simd.replace(exp_vals, 1, math.exp(simd.extract(vals, 1) - max_val))
+
+
+					(^#simd[2]f64)(&row_data[col])^ = exp_vals
+					sum_vec = simd.add(sum_vec, exp_vals)
+				}
+
+				sum = simd.extract(sum_vec, 0) + simd.extract(sum_vec, 1)
+
+				for ; col < n; col += 1 {
+					val := math.exp(row_data[col] - max_val)
+					row_data[col] = val
+					sum += val
+				}
+
+				inv_sum := f64(1) / sum
+				inv_sum_vec := #simd[2]f64{inv_sum, inv_sum}
+
+				col = 0
+				for ; col + 2 <= n; col += 2 {
+					vals := (^#simd[2]f64)(&row_data[col])^
+					vals = simd.mul(vals, inv_sum_vec)
+					(^#simd[2]f64)(&row_data[col])^ = vals
+				}
+
+				for ; col < n; col += 1 {
+					row_data[col] *= inv_sum
+				}
+			} else {
+				// Original scalar code
+				max_val := row_data[0]
+				for col in 1 ..< n {
+					if row_data[col] > max_val {
+						max_val = row_data[col]
+					}
+				}
+
+				sum := T(0)
+				for col in 0 ..< n {
+					val := math.exp(row_data[col] - max_val)
+					row_data[col] = val
+					sum += val
+				}
+
+				inv_sum := T(1) / sum
+				for col in 0 ..< n {
+					row_data[col] *= inv_sum
+				}
 			}
 		}
 	}

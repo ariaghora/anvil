@@ -389,7 +389,6 @@ copy_strided_4d :: proc(dst, src: []$T, shape, strides: []uint) {
 			}
 		}
 	} else {
-		// Original scalar code
 		for i in 0 ..< d0 {
 			src_batch := i * s0
 			for j in 0 ..< d1 {
