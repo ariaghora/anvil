@@ -110,8 +110,63 @@ get_strided_data :: proc(
 @(private = "file")
 copy_strided_1d :: proc(dst, src: []$T, shape, strides: []uint) {
 	s0 := strides[0]
-	for i in 0 ..< shape[0] {
-		dst[i] = src[i * s0]
+
+	when T == f32 {
+		i := uint(0)
+
+		// SIMD path for unit stride (contiguous)
+		if s0 == 1 {
+			for ; i + 8 <= shape[0]; i += 8 {
+				vals1 := (^#simd[4]f32)(&src[i])^
+				vals2 := (^#simd[4]f32)(&src[i + 4])^
+				(^#simd[4]f32)(&dst[i])^ = vals1
+				(^#simd[4]f32)(&dst[i + 4])^ = vals2
+			}
+
+			for ; i + 4 <= shape[0]; i += 4 {
+				(^#simd[4]f32)(&dst[i])^ = (^#simd[4]f32)(&src[i])^
+			}
+		} else if s0 == 2 {
+			// Special case for stride 2 (every other element)
+			for ; i + 4 <= shape[0]; i += 4 {
+				vals := #simd[4]f32 {
+					src[i * 2],
+					src[(i + 1) * 2],
+					src[(i + 2) * 2],
+					src[(i + 3) * 2],
+				}
+				(^#simd[4]f32)(&dst[i])^ = vals
+			}
+		}
+
+		// Scalar remainder
+		for ; i < shape[0]; i += 1 {
+			dst[i] = src[i * s0]
+		}
+	} else when T == f64 {
+		i := uint(0)
+
+		if s0 == 1 {
+			for ; i + 4 <= shape[0]; i += 4 {
+				vals1 := (^#simd[2]f64)(&src[i])^
+				vals2 := (^#simd[2]f64)(&src[i + 2])^
+				(^#simd[2]f64)(&dst[i])^ = vals1
+				(^#simd[2]f64)(&dst[i + 2])^ = vals2
+			}
+
+			for ; i + 2 <= shape[0]; i += 2 {
+				(^#simd[2]f64)(&dst[i])^ = (^#simd[2]f64)(&src[i])^
+			}
+		}
+
+		for ; i < shape[0]; i += 1 {
+			dst[i] = src[i * s0]
+		}
+	} else {
+		// Original scalar code
+		for i in 0 ..< shape[0] {
+			dst[i] = src[i * s0]
+		}
 	}
 }
 
@@ -119,13 +174,100 @@ copy_strided_1d :: proc(dst, src: []$T, shape, strides: []uint) {
 copy_strided_2d :: proc(dst, src: []$T, shape, strides: []uint) {
 	s0, s1 := strides[0], strides[1]
 	d0, d1 := shape[0], shape[1]
-	dst_idx := 0
+	dst_idx := uint(0)
 
-	for i in 0 ..< d0 {
-		src_row := i * s0
-		for j in 0 ..< d1 {
-			dst[dst_idx] = src[src_row + j * s1]
-			dst_idx += 1
+	when T == f32 {
+		// Special case for row-major contiguous (s1 == 1)
+		if s1 == 1 {
+			for i in 0 ..< d0 {
+				src_row_start := i * s0
+
+				j := uint(0)
+				// Copy entire rows with SIMD
+				for ; j + 8 <= d1; j += 8 {
+					vals1 := (^#simd[4]f32)(&src[src_row_start + j])^
+					vals2 := (^#simd[4]f32)(&src[src_row_start + j + 4])^
+					(^#simd[4]f32)(&dst[dst_idx])^ = vals1
+					(^#simd[4]f32)(&dst[dst_idx + 4])^ = vals2
+					dst_idx += 8
+				}
+
+				for ; j + 4 <= d1; j += 4 {
+					(^#simd[4]f32)(&dst[dst_idx])^ = (^#simd[4]f32)(&src[src_row_start + j])^
+					dst_idx += 4
+				}
+
+				for ; j < d1; j += 1 {
+					dst[dst_idx] = src[src_row_start + j]
+					dst_idx += 1
+				}
+			}
+		} else {
+			// General strided case
+			for i in 0 ..< d0 {
+				src_row := i * s0
+
+				j := uint(0)
+				// Process 4 elements at a time with gather-like pattern
+				for ; j + 4 <= d1; j += 4 {
+					vals := #simd[4]f32 {
+						src[src_row + j * s1],
+						src[src_row + (j + 1) * s1],
+						src[src_row + (j + 2) * s1],
+						src[src_row + (j + 3) * s1],
+					}
+					(^#simd[4]f32)(&dst[dst_idx])^ = vals
+					dst_idx += 4
+				}
+
+				for ; j < d1; j += 1 {
+					dst[dst_idx] = src[src_row + j * s1]
+					dst_idx += 1
+				}
+			}
+		}
+	} else when T == f64 {
+		if s1 == 1 {
+			for i in 0 ..< d0 {
+				src_row_start := i * s0
+
+				j := uint(0)
+				for ; j + 4 <= d1; j += 4 {
+					vals1 := (^#simd[2]f64)(&src[src_row_start + j])^
+					vals2 := (^#simd[2]f64)(&src[src_row_start + j + 2])^
+					(^#simd[2]f64)(&dst[dst_idx])^ = vals1
+					(^#simd[2]f64)(&dst[dst_idx + 2])^ = vals2
+					dst_idx += 4
+				}
+
+				for ; j + 2 <= d1; j += 2 {
+					(^#simd[2]f64)(&dst[dst_idx])^ = (^#simd[2]f64)(&src[src_row_start + j])^
+					dst_idx += 2
+				}
+
+				for ; j < d1; j += 1 {
+					dst[dst_idx] = src[src_row_start + j]
+					dst_idx += 1
+				}
+			}
+		} else {
+			// General strided case
+			for i in 0 ..< d0 {
+				src_row := i * s0
+				for j in 0 ..< d1 {
+					dst[dst_idx] = src[src_row + j * s1]
+					dst_idx += 1
+				}
+			}
+		}
+	} else {
+		// Original scalar code
+		for i in 0 ..< d0 {
+			src_row := i * s0
+			for j in 0 ..< d1 {
+				dst[dst_idx] = src[src_row + j * s1]
+				dst_idx += 1
+			}
 		}
 	}
 }
@@ -134,15 +276,59 @@ copy_strided_2d :: proc(dst, src: []$T, shape, strides: []uint) {
 copy_strided_3d :: proc(dst, src: []$T, shape, strides: []uint) {
 	s0, s1, s2 := strides[0], strides[1], strides[2]
 	d0, d1, d2 := shape[0], shape[1], shape[2]
-	dst_idx := 0
+	dst_idx := uint(0)
 
-	for i in 0 ..< d0 {
-		src_plane := i * s0
-		for j in 0 ..< d1 {
-			src_row := src_plane + j * s1
-			for k in 0 ..< d2 {
-				dst[dst_idx] = src[src_row + k * s2]
-				dst_idx += 1
+	when T == f32 {
+		// Optimize for contiguous inner dimension
+		if s2 == 1 {
+			for i in 0 ..< d0 {
+				src_plane := i * s0
+				for j in 0 ..< d1 {
+					src_row_start := src_plane + j * s1
+
+					k := uint(0)
+					for ; k + 8 <= d2; k += 8 {
+						vals1 := (^#simd[4]f32)(&src[src_row_start + k])^
+						vals2 := (^#simd[4]f32)(&src[src_row_start + k + 4])^
+						(^#simd[4]f32)(&dst[dst_idx])^ = vals1
+						(^#simd[4]f32)(&dst[dst_idx + 4])^ = vals2
+						dst_idx += 8
+					}
+
+					for ; k + 4 <= d2; k += 4 {
+						(^#simd[4]f32)(&dst[dst_idx])^ = (^#simd[4]f32)(&src[src_row_start + k])^
+						dst_idx += 4
+					}
+
+					for ; k < d2; k += 1 {
+						dst[dst_idx] = src[src_row_start + k]
+						dst_idx += 1
+					}
+				}
+			}
+		} else {
+			// General case
+			for i in 0 ..< d0 {
+				src_plane := i * s0
+				for j in 0 ..< d1 {
+					src_row := src_plane + j * s1
+					for k in 0 ..< d2 {
+						dst[dst_idx] = src[src_row + k * s2]
+						dst_idx += 1
+					}
+				}
+			}
+		}
+	} else {
+		// Original scalar code for non-f32
+		for i in 0 ..< d0 {
+			src_plane := i * s0
+			for j in 0 ..< d1 {
+				src_row := src_plane + j * s1
+				for k in 0 ..< d2 {
+					dst[dst_idx] = src[src_row + k * s2]
+					dst_idx += 1
+				}
 			}
 		}
 	}
@@ -152,17 +338,68 @@ copy_strided_3d :: proc(dst, src: []$T, shape, strides: []uint) {
 copy_strided_4d :: proc(dst, src: []$T, shape, strides: []uint) {
 	s0, s1, s2, s3 := strides[0], strides[1], strides[2], strides[3]
 	d0, d1, d2, d3 := shape[0], shape[1], shape[2], shape[3]
-	dst_idx := 0
+	dst_idx := uint(0)
 
-	for i in 0 ..< d0 {
-		src_batch := i * s0
-		for j in 0 ..< d1 {
-			src_plane := src_batch + j * s1
-			for k in 0 ..< d2 {
-				src_row := src_plane + k * s2
-				for l in 0 ..< d3 {
-					dst[dst_idx] = src[src_row + l * s3]
-					dst_idx += 1
+	when T == f32 {
+		// Optimize for contiguous inner dimension (common in NCHW layout)
+		if s3 == 1 {
+			for i in 0 ..< d0 {
+				src_batch := i * s0
+				for j in 0 ..< d1 {
+					src_plane := src_batch + j * s1
+					for k in 0 ..< d2 {
+						src_row_start := src_plane + k * s2
+
+						l := uint(0)
+						for ; l + 8 <= d3; l += 8 {
+							vals1 := (^#simd[4]f32)(&src[src_row_start + l])^
+							vals2 := (^#simd[4]f32)(&src[src_row_start + l + 4])^
+							(^#simd[4]f32)(&dst[dst_idx])^ = vals1
+							(^#simd[4]f32)(&dst[dst_idx + 4])^ = vals2
+							dst_idx += 8
+						}
+
+						for ; l + 4 <= d3; l += 4 {
+							(^#simd[4]f32)(&dst[dst_idx])^ =
+							(^#simd[4]f32)(&src[src_row_start + l])^
+							dst_idx += 4
+						}
+
+						for ; l < d3; l += 1 {
+							dst[dst_idx] = src[src_row_start + l]
+							dst_idx += 1
+						}
+					}
+				}
+			}
+		} else {
+			// General case
+			for i in 0 ..< d0 {
+				src_batch := i * s0
+				for j in 0 ..< d1 {
+					src_plane := src_batch + j * s1
+					for k in 0 ..< d2 {
+						src_row := src_plane + k * s2
+						for l in 0 ..< d3 {
+							dst[dst_idx] = src[src_row + l * s3]
+							dst_idx += 1
+						}
+					}
+				}
+			}
+		}
+	} else {
+		// Original scalar code
+		for i in 0 ..< d0 {
+			src_batch := i * s0
+			for j in 0 ..< d1 {
+				src_plane := src_batch + j * s1
+				for k in 0 ..< d2 {
+					src_row := src_plane + k * s2
+					for l in 0 ..< d3 {
+						dst[dst_idx] = src[src_row + l * s3]
+						dst_idx += 1
+					}
 				}
 			}
 		}
@@ -651,7 +888,6 @@ matrix_transpose :: proc(
 	return transpose(tensor, second_last, last, allocator, loc)
 }
 
-// Split tensor into chunks along specified dimension
 // Split tensor into chunks along specified dimension
 chunk :: proc(
 	tensor: ^Tensor($T),
