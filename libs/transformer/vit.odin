@@ -3,6 +3,7 @@ package transformer
 import "../nn"
 import "../tensor"
 import "../trace"
+import "base:runtime"
 import "core:fmt"
 import "core:math"
 import "core:simd"
@@ -188,7 +189,7 @@ new_conv_2d_bn :: proc(
 		padding,
 		1,
 		groups,
-		true,
+		use_bias = false,
 		init = init,
 		allocator = allocator,
 	)
@@ -559,7 +560,7 @@ forward_attention :: proc(
 	d_v := attn.d
 
 	// Layer norm
-	xs := nn.forward_layer_norm(attn.norm, x, context.temp_allocator)
+	xs := nn.forward_layer_norm_1d(attn.norm, x, context.temp_allocator)
 
 	// QKV projection
 	qkv := nn.forward_linear(attn.qkv, xs, context.temp_allocator)
@@ -839,7 +840,7 @@ forward_mlp :: proc(
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
 	start_time := time.now()
-	norm_out := nn.forward_layer_norm(mlp.norm, x, context.temp_allocator)
+	norm_out := nn.forward_layer_norm_1d(mlp.norm, x, context.temp_allocator)
 	fc1_out := nn.forward_linear(mlp.fc1, norm_out, context.temp_allocator)
 	gelu_out := gelu_fast(fc1_out, context.temp_allocator)
 	fc2_out := nn.forward_linear(mlp.fc2, gelu_out, allocator, loc)
@@ -1192,12 +1193,12 @@ new_tiny_vit_5m :: proc(
 	patch_embed := new_patch_embed(T, IN_CHANNELS, embed_dims[0], init, allocator)
 	patches_resolution := uint(input_size / 4) // After patch embedding
 
-	// Layer 0 (ConvLayer) - downsamples 256->128
+	// Layer 0 (ConvLayer) -
 	layer0 := new_conv_layer(
 		T,
 		embed_dims[0],
 		embed_dims[1],
-		[2]uint{patches_resolution, patches_resolution}, // 256x256
+		[2]uint{patches_resolution, patches_resolution},
 		depths[0],
 		true, // downsample
 		MBCONV_EXPAND_RATIO,
@@ -1231,7 +1232,6 @@ new_tiny_vit_5m :: proc(
 
 	// Neck layers
 	last_embed_dim := embed_dims[len(embed_dims) - 1]
-	// Neck: 320 -> 256 channels (SAM compatible)
 	neck_conv1 := nn.new_conv2d(
 		T,
 		last_embed_dim, // 320 input channels
@@ -1248,7 +1248,7 @@ new_tiny_vit_5m :: proc(
 	// LayerNorm2d expects spatial dimensions based on final output
 	// Final spatial dimension after all downsampling: input_size / 4 / (1 << min(3,2)) = input_size / 16
 	final_spatial_dim := uint(input_size / 16)
-	neck_ln1 := nn.new_layer_norm_2d(T, []uint{final_spatial_dim, final_spatial_dim}, allocator)
+	neck_ln1 := nn.new_layer_norm_2d(T, {256}, allocator)
 	neck_conv2 := nn.new_conv2d(
 		T,
 		256, // 256 input channels
@@ -1262,7 +1262,7 @@ new_tiny_vit_5m :: proc(
 		init,
 		allocator,
 	)
-	neck_ln2 := nn.new_layer_norm_2d(T, []uint{final_spatial_dim, final_spatial_dim}, allocator)
+	neck_ln2 := nn.new_layer_norm_2d(T, []uint{256}, allocator)
 
 	return new_clone(
 		Tiny_ViT_5m(T) {
@@ -1278,21 +1278,28 @@ new_tiny_vit_5m :: proc(
 	)
 }
 
+Tiny_Vit_Result :: struct($T: typeid) {
+	patch_embedding: ^tensor.Tensor(T),
+	output_final:    ^tensor.Tensor(T),
+}
+
+// Argument return_intermediary_tensors has no effect for arena allocators
 forward_tiny_vit_5m :: proc(
 	model: ^Tiny_ViT_5m($T),
 	x: ^tensor.Tensor(T),
+	return_intermediary_tensors: bool = false,
 	allocator := context.allocator,
 	loc := #caller_location,
-) -> ^tensor.Tensor(T) {
+) -> Tiny_Vit_Result(T) {
 	tiny_vit_trace := trace.TRACE_FUNCTION("tiny_vit_5m_forward")
 	defer trace.end_scoped_trace(tiny_vit_trace)
 
 	// Patch embedding
-	xs := forward_patch_embed(model.patch_embed, x, context.temp_allocator)
+	patch_embedding := forward_patch_embed(model.patch_embed, x, allocator)
 
 	// Layer 0
 	layer0_trace := trace.TRACE_SECTION("layer0_conv")
-	xs = forward_conv_layer(model.layer0, xs, context.temp_allocator)
+	xs := forward_conv_layer(model.layer0, patch_embedding, context.temp_allocator)
 	trace.end_scoped_trace(layer0_trace)
 
 	// Remaining layers
@@ -1311,8 +1318,6 @@ forward_tiny_vit_5m :: proc(
 	c := xs.shape[2]
 
 	// Calculate correct spatial dimensions based on actual sequence length
-	// For 1024x1024 input: sequence_length = 4096 (64x64)
-	// For 256x256 input: sequence_length = 1024 (32x32)
 	sequence_length := xs.shape[1]
 	spatial_dim := uint(math.sqrt(f64(sequence_length)))
 	xs_4d := tensor.reshape(xs, []uint{b, spatial_dim, spatial_dim, c}, context.temp_allocator)
@@ -1320,13 +1325,20 @@ forward_tiny_vit_5m :: proc(
 
 	// Apply neck convolutions with layer norms
 	conv1_out := nn.forward_conv2d(model.neck_conv1, xs_conv, context.temp_allocator)
-	ln1_out := nn.forward_layer_norm(model.neck_ln1, conv1_out, context.temp_allocator)
+	ln1_out := nn.forward_layer_norm_2d(model.neck_ln1, conv1_out, context.temp_allocator)
 
+	fmt.println(model.neck_conv2)
+	fmt.println(ln1_out.shape)
 	conv2_out := nn.forward_conv2d(model.neck_conv2, ln1_out, context.temp_allocator)
-	result := nn.forward_layer_norm(model.neck_ln2, conv2_out, allocator, loc)
+
+	result := nn.forward_layer_norm_2d(model.neck_ln2, conv2_out, allocator, loc)
 	trace.end_scoped_trace(neck_trace)
 
-	return result
+	if !return_intermediary_tensors {
+		tensor.free_tensor(patch_embedding, allocator)
+	}
+
+	return {patch_embedding = patch_embedding, output_final = result}
 }
 
 free_tiny_vit_5m :: proc(model: ^Tiny_ViT_5m($T), allocator := context.allocator) {

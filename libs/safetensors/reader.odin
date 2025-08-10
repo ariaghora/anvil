@@ -8,18 +8,21 @@ import "core:os"
 import "core:slice"
 
 Assignment_Incompatible_Shape :: struct {}
-Tensor_Not_Found :: struct {}
-Non_Contiguous_Tensor :: struct {}
+Tensor_Not_Found :: struct {
+	key: string,
+}
+Tensors_Names_Length_Mismatch :: struct {}
 IO_Error :: struct {
 	msg: string,
 }
 
 Safe_Tensors_Error :: union {
+	json.Marshal_Error,
 	json.Unmarshal_Error,
 	Assignment_Incompatible_Shape,
 	IO_Error,
 	Tensor_Not_Found,
-	Non_Contiguous_Tensor,
+	Tensors_Names_Length_Mismatch,
 }
 
 Tensor_Info :: struct {
@@ -99,20 +102,37 @@ free_safe_tensors :: proc(
 	free(st, allocator)
 }
 
-tensor_assign_from_safe_tensors :: proc(
+tensor_assign_from_safe_tensors :: proc {
+	tensor_assign_from_safe_tensors_one,
+	tensor_assign_from_safe_tensors_many,
+}
+
+tensor_assign_from_safe_tensors_one :: proc(
 	t: ^tensor.Tensor($T),
 	tensor_name: string,
 	safe_tensors: ^Safe_Tensors(T),
 ) -> Safe_Tensors_Error {
 	t_from, ok := safe_tensors.tensors[tensor_name]
-	if !ok do return Tensor_Not_Found{}
+	if !ok do return Tensor_Not_Found{tensor_name}
 	if !slice.equal(t.shape, t_from.shape) do return Assignment_Incompatible_Shape{}
-	if !t.contiguous do return Non_Contiguous_Tensor{}
+	if !t.contiguous do return Tensors_Names_Length_Mismatch{}
 
 	if t.owns_data {
 		copy(t.data, t_from.data)
 	} else {
 		t.data = t_from.data
+	}
+	return nil
+}
+
+tensor_assign_from_safe_tensors_many :: proc(
+	tensors: []^tensor.Tensor($T),
+	tensor_names: []string,
+	safe_tensors: ^Safe_Tensors(T),
+) -> Safe_Tensors_Error {
+	if len(tensors) != len(tensor_names) do return Tensors_Names_Length_Mismatch{}
+	for i in 0 ..< len(tensors) {
+		tensor_assign_from_safe_tensors(tensors[i], tensor_names[i], safe_tensors) or_return
 	}
 	return nil
 }

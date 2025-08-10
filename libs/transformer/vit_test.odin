@@ -168,11 +168,11 @@ test_tiny_vit_5m_integration :: proc(t: ^testing.T) {
 	// Apply neck convolutions with layer norms
 	conv1_out := nn.forward_conv2d(model.neck_conv1, xs_conv, context.temp_allocator)
 
-	ln1_out := nn.forward_layer_norm(model.neck_ln1, conv1_out, context.temp_allocator)
+	ln1_out := nn.forward_layer_norm_2d(model.neck_ln1, conv1_out, context.temp_allocator)
 
 	conv2_out := nn.forward_conv2d(model.neck_conv2, ln1_out, context.temp_allocator)
 
-	output := nn.forward_layer_norm(model.neck_ln2, conv2_out, context.temp_allocator)
+	output := nn.forward_layer_norm_2d(model.neck_ln2, conv2_out, context.temp_allocator)
 
 	// Check output shape
 	testing.expect(t, len(output.shape) == 4, "Output should be 4D")

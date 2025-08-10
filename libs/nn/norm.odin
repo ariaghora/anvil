@@ -2,6 +2,7 @@ package nn
 
 import "../tensor"
 import "../trace"
+import "core:fmt"
 import "core:math"
 import "core:simd"
 
@@ -57,6 +58,7 @@ forward_batch_norm_2d :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
+	assert(len(x.shape) == 4, "expected 4-dim tensor with NCHW format")
 	n, c, h, w := x.shape[0], x.shape[1], x.shape[2], x.shape[3]
 	spatial_size := h * w
 
@@ -242,38 +244,131 @@ forward_batch_norm_1d :: proc(
 		panic("Input features mismatch with num_features")
 	}
 
-	// For broadcasting: (C,) -> (1, C)
-	mean_reshaped := tensor.reshape(
-		bn.running_mean,
-		[]uint{1, bn.num_features},
-		context.temp_allocator,
-	)
-	var_reshaped := tensor.reshape(
-		bn.running_var,
-		[]uint{1, bn.num_features},
-		context.temp_allocator,
-	)
-	weight_reshaped := tensor.reshape(
-		bn.weight,
-		[]uint{1, bn.num_features},
-		context.temp_allocator,
-	)
-	bias_reshaped := tensor.reshape(bn.bias, []uint{1, bn.num_features}, context.temp_allocator)
+	n, c := x.shape[0], x.shape[1]
+	result := tensor.zeros(T, x.shape, allocator, loc)
 
-	// Compute: (x - mean) / sqrt(var + eps) * weight + bias
-	x_centered := tensor.sub(x, mean_reshaped, context.temp_allocator)
+	// Precompute scales and shifts for all channels
+	scales := make([]T, c, context.temp_allocator)
+	shifts := make([]T, c, context.temp_allocator)
 
-	eps_tensor := tensor.new_with_init([]T{bn.eps}, []uint{1, 1}, context.temp_allocator)
-	var_eps := tensor.add(var_reshaped, eps_tensor, context.temp_allocator)
-	std := tensor.sqrt(var_eps, context.temp_allocator)
+	#no_bounds_check for ch in 0 ..< c {
+		mean := bn.running_mean.data[ch]
+		var := bn.running_var.data[ch]
+		weight := bn.weight.data[ch]
+		bias := bn.bias.data[ch]
 
-	x_normalized := tensor.div(x_centered, std, context.temp_allocator)
-	x_scaled := tensor.mul(x_normalized, weight_reshaped, context.temp_allocator)
-	result := tensor.add(x_scaled, bias_reshaped, allocator, loc)
+		scale := weight / math.sqrt(var + bn.eps)
+		scales[ch] = scale
+		shifts[ch] = bias - mean * scale
+	}
+
+	#no_bounds_check {
+		when T == f32 {
+			// Process multiple samples and channels with SIMD
+			for batch in 0 ..< n {
+				base_idx := batch * c
+
+				ch := uint(0)
+				// Process 8 channels at a time
+				for ; ch + 8 <= c; ch += 8 {
+					// Load scales and shifts
+					scale_vec1 := (^#simd[4]f32)(&scales[ch])^
+					scale_vec2 := (^#simd[4]f32)(&scales[ch + 4])^
+					shift_vec1 := (^#simd[4]f32)(&shifts[ch])^
+					shift_vec2 := (^#simd[4]f32)(&shifts[ch + 4])^
+
+					// Load input values
+					vals1 := (^#simd[4]f32)(&x.data[base_idx + ch])^
+					vals2 := (^#simd[4]f32)(&x.data[base_idx + ch + 4])^
+
+					// Apply batch norm: result = x * scale + shift
+					results1 := simd.fma(vals1, scale_vec1, shift_vec1)
+					results2 := simd.fma(vals2, scale_vec2, shift_vec2)
+
+					// Store results
+					(^#simd[4]f32)(&result.data[base_idx + ch])^ = results1
+					(^#simd[4]f32)(&result.data[base_idx + ch + 4])^ = results2
+				}
+
+				// Process 4 channels at a time
+				for ; ch + 4 <= c; ch += 4 {
+					scale_vec := (^#simd[4]f32)(&scales[ch])^
+					shift_vec := (^#simd[4]f32)(&shifts[ch])^
+					vals := (^#simd[4]f32)(&x.data[base_idx + ch])^
+					results := simd.fma(vals, scale_vec, shift_vec)
+					(^#simd[4]f32)(&result.data[base_idx + ch])^ = results
+				}
+
+				// Handle remainder
+				for ; ch < c; ch += 1 {
+					idx := base_idx + ch
+					result.data[idx] = x.data[idx] * scales[ch] + shifts[ch]
+				}
+			}
+		} else when T == f64 {
+			// Process multiple samples and channels with SIMD
+			for batch in 0 ..< n {
+				base_idx := batch * c
+
+				ch := uint(0)
+				// Process 4 channels at a time
+				for ; ch + 4 <= c; ch += 4 {
+					scale_vec1 := (^#simd[2]f64)(&scales[ch])^
+					scale_vec2 := (^#simd[2]f64)(&scales[ch + 2])^
+					shift_vec1 := (^#simd[2]f64)(&shifts[ch])^
+					shift_vec2 := (^#simd[2]f64)(&shifts[ch + 2])^
+
+					vals1 := (^#simd[2]f64)(&x.data[base_idx + ch])^
+					vals2 := (^#simd[2]f64)(&x.data[base_idx + ch + 2])^
+
+					results1 := simd.fma(vals1, scale_vec1, shift_vec1)
+					results2 := simd.fma(vals2, scale_vec2, shift_vec2)
+
+					(^#simd[2]f64)(&result.data[base_idx + ch])^ = results1
+					(^#simd[2]f64)(&result.data[base_idx + ch + 2])^ = results2
+				}
+
+				// Process 2 channels at a time
+				for ; ch + 2 <= c; ch += 2 {
+					scale_vec := (^#simd[2]f64)(&scales[ch])^
+					shift_vec := (^#simd[2]f64)(&shifts[ch])^
+					vals := (^#simd[2]f64)(&x.data[base_idx + ch])^
+					results := simd.fma(vals, scale_vec, shift_vec)
+					(^#simd[2]f64)(&result.data[base_idx + ch])^ = results
+				}
+
+				// Handle remainder
+				for ; ch < c; ch += 1 {
+					idx := base_idx + ch
+					result.data[idx] = x.data[idx] * scales[ch] + shifts[ch]
+				}
+			}
+		} else {
+			// Scalar code for other types
+			for batch in 0 ..< n {
+				base_idx := batch * c
+
+				ch := uint(0)
+				// Unroll by 4 for better performance
+				for ; ch + 4 <= c; ch += 4 {
+					#unroll for j in 0 ..< 4 {
+						idx := base_idx + ch + uint(j)
+						result.data[idx] =
+							x.data[idx] * scales[ch + uint(j)] + shifts[ch + uint(j)]
+					}
+				}
+
+				// Handle remainder
+				for ; ch < c; ch += 1 {
+					idx := base_idx + ch
+					result.data[idx] = x.data[idx] * scales[ch] + shifts[ch]
+				}
+			}
+		}
+	}
 
 	return result
 }
-
 // LayerNorm - Layer Normalization
 // Normalizes over the last dimension(s) of the input
 Layer_Norm :: struct($T: typeid) {
@@ -313,40 +408,6 @@ free_layer_norm :: proc(ln: ^Layer_Norm($T), allocator := context.allocator) {
 	tensor.free_tensor(ln.bias, allocator)
 	delete(ln.normalized_shape, allocator)
 	free(ln, allocator)
-}
-
-forward_layer_norm :: proc(
-	ln: ^Layer_Norm($T),
-	x: ^tensor.Tensor(T),
-	allocator := context.allocator,
-	loc := #caller_location,
-) -> ^tensor.Tensor(T) {
-	forward_layer_norm_trace := trace.TRACE_FUNCTION("forward_layer_norm")
-	defer trace.end_scoped_trace(forward_layer_norm_trace)
-
-	// Validate that the last dimensions match normalized_shape
-	input_rank := len(x.shape)
-	norm_rank := len(ln.normalized_shape)
-
-	if input_rank < norm_rank {
-		panic("Input tensor has fewer dimensions than normalized_shape")
-	}
-
-	// Check that the last norm_rank dimensions match
-	for i in 0 ..< norm_rank {
-		input_dim := x.shape[input_rank - norm_rank + i]
-		norm_dim := ln.normalized_shape[i]
-		if input_dim != norm_dim {
-			panic("Input shape mismatch with normalized_shape")
-		}
-	}
-
-	// Compute statistics over the normalized dimensions
-	if norm_rank == 1 {
-		return forward_layer_norm_1d(ln, x, allocator, loc)
-	} else {
-		return forward_layer_norm_nd(ln, x, allocator, loc)
-	}
 }
 
 // Helper for 1D LayerNorm (most common case)
@@ -409,53 +470,155 @@ forward_layer_norm_1d :: proc(
 	return result
 }
 
-
-// Helper for multi-dimensional LayerNorm
-forward_layer_norm_nd :: proc(
+// SIMD-optimized LayerNorm2d
+forward_layer_norm_2d :: proc(
 	ln: ^Layer_Norm($T),
-	x: ^tensor.Tensor(T),
+	x: ^tensor.Tensor(T), // Expected shape: [B, C, H, W]
 	allocator := context.allocator,
 	loc := #caller_location,
-) -> ^tensor.Tensor(T) {
-	forward_layer_norm_trace := trace.TRACE_FUNCTION("forward_layer_norm_nd")
-	defer trace.end_scoped_trace(forward_layer_norm_trace)
-	input_rank := len(x.shape)
-	norm_rank := len(ln.normalized_shape)
+) -> ^tensor.Tensor(T) where T == f32 || T == f64 {
+	forward_layer_norm_2d_trace := trace.TRACE_FUNCTION("forward_layer_norm_2d_simd")
+	defer trace.end_scoped_trace(forward_layer_norm_2d_trace)
 
-	// Create axes to reduce over (the last norm_rank dimensions)
-	reduce_axes := make([]int, norm_rank, context.temp_allocator)
-	for i in 0 ..< norm_rank {
-		reduce_axes[i] = input_rank - norm_rank + i
+	// Validate input
+	if len(x.shape) != 4 {
+		panic("LayerNorm2d expects 4D input [B, C, H, W]")
 	}
 
-	// Compute mean over the normalized dimensions
-	// We need to reduce sequentially over each axis
-	mean := x
-	for axis in reduce_axes {
-		mean = tensor.tensor_mean(mean, axis, true, context.temp_allocator)
+	if len(ln.normalized_shape) != 1 || x.shape[1] != ln.normalized_shape[0] {
+		fmt.panicf("Channel mismatch: %v vs %v", x.shape[1], ln.normalized_shape[0])
 	}
 
-	// Compute variance: E[(x - mean)^2]
-	x_centered := tensor.sub(x, mean, context.temp_allocator)
-	x_squared := tensor.mul(x_centered, x_centered, context.temp_allocator)
+	b, c, h, w := x.shape[0], x.shape[1], x.shape[2], x.shape[3]
+	spatial_size := h * w
 
-	variance := x_squared
-	for axis in reduce_axes {
-		variance = tensor.tensor_mean(variance, axis, true, context.temp_allocator)
+	result := tensor.zeros(T, x.shape, allocator, loc)
+
+	when T == f32 {
+		#no_bounds_check for batch in 0 ..< b {
+			// Process multiple spatial positions at once
+			spatial := uint(0)
+			for ; spatial + 4 <= spatial_size; spatial += 4 {
+				// Compute positions for 4 spatial locations
+				positions: [4][2]uint
+				for i in 0 ..< 4 {
+					s := spatial + uint(i)
+					positions[i][0] = s / w // h_idx
+					positions[i][1] = s % w // w_idx
+				}
+
+				// Compute means for 4 spatial positions
+				mean_vec := #simd[4]f32{0, 0, 0, 0}
+
+				for ch in 0 ..< c {
+					vals := #simd[4]f32 {
+						x.data[((batch * c + ch) * h + positions[0][0]) * w + positions[0][1]],
+						x.data[((batch * c + ch) * h + positions[1][0]) * w + positions[1][1]],
+						x.data[((batch * c + ch) * h + positions[2][0]) * w + positions[2][1]],
+						x.data[((batch * c + ch) * h + positions[3][0]) * w + positions[3][1]],
+					}
+					mean_vec = simd.add(mean_vec, vals)
+				}
+
+				c_vec := #simd[4]f32{f32(c), f32(c), f32(c), f32(c)}
+				mean_vec = simd.div(mean_vec, c_vec)
+
+				// Compute variances
+				var_vec := #simd[4]f32{0, 0, 0, 0}
+
+				for ch in 0 ..< c {
+					vals := #simd[4]f32 {
+						x.data[((batch * c + ch) * h + positions[0][0]) * w + positions[0][1]],
+						x.data[((batch * c + ch) * h + positions[1][0]) * w + positions[1][1]],
+						x.data[((batch * c + ch) * h + positions[2][0]) * w + positions[2][1]],
+						x.data[((batch * c + ch) * h + positions[3][0]) * w + positions[3][1]],
+					}
+					diff := simd.sub(vals, mean_vec)
+					var_vec = simd.fma(diff, diff, var_vec)
+				}
+
+				var_vec = simd.div(var_vec, c_vec)
+
+				// Compute inv_std
+				eps_vec := #simd[4]f32{ln.eps, ln.eps, ln.eps, ln.eps}
+				var_eps := simd.add(var_vec, eps_vec)
+				inv_std_vec := simd.div(#simd[4]f32{1, 1, 1, 1}, simd.sqrt(var_eps))
+
+				// Apply normalization
+				for ch in 0 ..< c {
+					indices: [4]uint
+					for i in 0 ..< 4 {
+						indices[i] = ((batch * c + ch) * h + positions[i][0]) * w + positions[i][1]
+					}
+
+					vals := #simd[4]f32 {
+						x.data[indices[0]],
+						x.data[indices[1]],
+						x.data[indices[2]],
+						x.data[indices[3]],
+					}
+
+					// (x - mean) * inv_std
+					normalized := simd.mul(simd.sub(vals, mean_vec), inv_std_vec)
+
+					// scale and bias
+					weight_vec := #simd[4]f32 {
+						ln.weight.data[ch],
+						ln.weight.data[ch],
+						ln.weight.data[ch],
+						ln.weight.data[ch],
+					}
+					bias_vec := #simd[4]f32 {
+						ln.bias.data[ch],
+						ln.bias.data[ch],
+						ln.bias.data[ch],
+						ln.bias.data[ch],
+					}
+
+					results := simd.fma(normalized, weight_vec, bias_vec)
+
+					// Store results
+					result.data[indices[0]] = simd.extract(results, 0)
+					result.data[indices[1]] = simd.extract(results, 1)
+					result.data[indices[2]] = simd.extract(results, 2)
+					result.data[indices[3]] = simd.extract(results, 3)
+				}
+			}
+
+			// Handle remainder spatial positions
+			for ; spatial < spatial_size; spatial += 1 {
+				h_idx := spatial / w
+				w_idx := spatial % w
+
+				mean := f32(0)
+				for ch in 0 ..< c {
+					idx := ((batch * c + ch) * h + h_idx) * w + w_idx
+					mean += x.data[idx]
+				}
+				mean /= f32(c)
+
+				variance := f32(0)
+				for ch in 0 ..< c {
+					idx := ((batch * c + ch) * h + h_idx) * w + w_idx
+					diff := x.data[idx] - mean
+					variance += diff * diff
+				}
+				variance /= f32(c)
+
+				inv_std := f32(1) / math.sqrt(variance + ln.eps)
+
+				for ch in 0 ..< c {
+					idx := ((batch * c + ch) * h + h_idx) * w + w_idx
+					normalized := (x.data[idx] - mean) * inv_std
+					result.data[idx] = normalized * ln.weight.data[ch] + ln.bias.data[ch]
+				}
+			}
+		}
+	} else when T == f64 {
+		// Similar implementation with #simd[2]f64
+		// ... (following same pattern but processing 2 spatial positions at once)
+		#panic("not implemented yet")
 	}
-
-	// Add eps and take sqrt
-	eps_tensor := tensor.new_with_init([]T{ln.eps}, []uint{1}, context.temp_allocator)
-	var_eps := tensor.add(variance, eps_tensor, context.temp_allocator)
-	std := tensor.sqrt(var_eps, context.temp_allocator)
-
-	// Normalize: (x - mean) / std
-	x_norm := tensor.div(x_centered, std, context.temp_allocator)
-
-	// Scale and shift: x_norm * weight + bias
-	// Broadcasting handled automatically by tensor operations
-	x_scaled := tensor.mul(x_norm, ln.weight, context.temp_allocator)
-	result := tensor.add(x_scaled, ln.bias, allocator, loc)
 
 	return result
 }

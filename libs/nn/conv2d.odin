@@ -129,23 +129,74 @@ forward_conv2d :: proc(
 		out_channels := out.shape[1]
 		spatial_size := out.shape[2] * out.shape[3]
 
-		// Just add the damn bias directly
-		#no_bounds_check for b in 0 ..< batch_size {
-			for c in 0 ..< out_channels {
-				bias_val := bias.data[c]
-				base_idx := (b * out_channels + c) * spatial_size
+		#no_bounds_check when T == f32 {
+			for b in 0 ..< batch_size {
+				for c in 0 ..< out_channels {
+					base_idx := (b * out_channels + c) * spatial_size
+					bias_val := bias.data[c]
 
-				// Unroll for vectorization
-				i := uint(0)
-				for ; i + UNROLL_FACTOR <= spatial_size; i += UNROLL_FACTOR {
-					#unroll for j in 0 ..< UNROLL_FACTOR {
-						out.data[base_idx + i + uint(j)] += bias_val
+					bias_vec4 := #simd[4]f32{bias_val, bias_val, bias_val, bias_val}
+					bias_vec8 := #simd[8]f32 {
+						bias_val,
+						bias_val,
+						bias_val,
+						bias_val,
+						bias_val,
+						bias_val,
+						bias_val,
+						bias_val,
+					}
+
+					i := uint(0)
+					for ; i + 8 <= spatial_size; i += 8 {
+						ptr0 := (^#simd[4]f32)(&out.data[base_idx + i]) // first 4
+						ptr1 := (^#simd[4]f32)(&out.data[base_idx + i + 4]) // next 4
+						ptr0^ += bias_vec4
+						ptr1^ += bias_vec4
+					}
+					for ; i + 4 <= spatial_size; i += 4 {
+						ptr := (^#simd[4]f32)(&out.data[base_idx + i])
+						ptr^ += bias_vec4
+					}
+					for ; i < spatial_size; i += 1 {
+						out.data[base_idx + i] += bias_val
 					}
 				}
+			}
+		} else when T == f64 {
+			for b in 0 ..< batch_size {
+				for c in 0 ..< out_channels {
+					base_idx := (b * out_channels + c) * spatial_size
+					bias_val := bias.data[c]
 
-				// Handle remainder
-				for ; i < spatial_size; i += 1 {
-					out.data[base_idx + i] += bias_val
+					bias_vec2 := #simd[2]f64{bias_val, bias_val}
+					bias_vec4 := #simd[4]f64{bias_val, bias_val, bias_val, bias_val}
+
+					i := uint(0)
+					for ; i + 4 <= spatial_size; i += 4 {
+						ptr0 := (^#simd[2]f64)(&out.data[base_idx + i])
+						ptr1 := (^#simd[2]f64)(&out.data[base_idx + i + 2])
+						ptr0^ += bias_vec2
+						ptr1^ += bias_vec2
+					}
+					for ; i + 2 <= spatial_size; i += 2 {
+						ptr := (^#simd[2]f64)(&out.data[base_idx + i])
+						ptr^ += bias_vec2
+					}
+					for ; i < spatial_size; i += 1 {
+						out.data[base_idx + i] += bias_val
+					}
+				}
+			}
+		} else {
+			// Scalar fallback
+			for b in 0 ..< batch_size {
+				for c in 0 ..< out_channels {
+					bias_val := bias.data[c]
+					base_idx := (b * out_channels + c) * spatial_size
+					for i in 0 ..< spatial_size {
+						out.data[base_idx + i] += bias_val
+					}
 				}
 			}
 		}
@@ -153,7 +204,6 @@ forward_conv2d :: proc(
 		trace.end_scoped_trace(conv_add_bias)
 		return out
 	}
-
 	return out
 }
 

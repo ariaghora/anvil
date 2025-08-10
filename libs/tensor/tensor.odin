@@ -341,7 +341,105 @@ copy_strided_4d :: proc(dst, src: []$T, shape, strides: []uint) {
 	dst_idx := uint(0)
 
 	when T == f32 {
-		// Optimize for contiguous inner dimension (common in NCHW layout)
+		// Case 1: Fully contiguous (can do one big memcpy)
+		if s0 == d1 * d2 * d3 && s1 == d2 * d3 && s2 == d3 && s3 == 1 {
+			copy(dst, src[:d0 * d1 * d2 * d3])
+			return
+		}
+
+		// Case 2: Last 2 dimensions contiguous (common for NCHW)
+		if s2 == d3 && s3 == 1 {
+			row_size := d2 * d3
+			for i in 0 ..< d0 {
+				src_batch := i * s0
+				for j in 0 ..< d1 {
+					src_plane_start := src_batch + j * s1
+
+					// Copy entire HW plane at once
+					copy(
+						dst[dst_idx:dst_idx + row_size],
+						src[src_plane_start:src_plane_start + row_size],
+					)
+					dst_idx += row_size
+				}
+			}
+			return
+		}
+
+		// Case 3: Only last dimension contiguous
+		if s3 == 1 {
+			for i in 0 ..< d0 {
+				src_batch := i * s0
+				for j in 0 ..< d1 {
+					src_plane := src_batch + j * s1
+					for k in 0 ..< d2 {
+						src_row_start := src_plane + k * s2
+
+						// Unroll more aggressively with prefetch
+						l := uint(0)
+
+						// Process 16 elements at a time
+						for ; l + 16 <= d3; l += 16 {
+							// Prefetch next row if available
+							if k + 1 < d2 {
+								_ = src[src_plane + (k + 1) * s2] // Prefetch hint
+							}
+
+							vals0 := (^#simd[4]f32)(&src[src_row_start + l])^
+							vals1 := (^#simd[4]f32)(&src[src_row_start + l + 4])^
+							vals2 := (^#simd[4]f32)(&src[src_row_start + l + 8])^
+							vals3 := (^#simd[4]f32)(&src[src_row_start + l + 12])^
+
+							(^#simd[4]f32)(&dst[dst_idx])^ = vals0
+							(^#simd[4]f32)(&dst[dst_idx + 4])^ = vals1
+							(^#simd[4]f32)(&dst[dst_idx + 8])^ = vals2
+							(^#simd[4]f32)(&dst[dst_idx + 12])^ = vals3
+							dst_idx += 16
+						}
+
+						// Handle remainder with existing code
+						for ; l + 4 <= d3; l += 4 {
+							(^#simd[4]f32)(&dst[dst_idx])^ =
+							(^#simd[4]f32)(&src[src_row_start + l])^
+							dst_idx += 4
+						}
+
+						for ; l < d3; l += 1 {
+							dst[dst_idx] = src[src_row_start + l]
+							dst_idx += 1
+						}
+					}
+				}
+			}
+		} else {
+			// General case - no contiguity
+			for i in 0 ..< d0 {
+				src_batch := i * s0
+				for j in 0 ..< d1 {
+					src_plane := src_batch + j * s1
+					for k in 0 ..< d2 {
+						src_row := src_plane + k * s2
+
+						// Unroll the innermost loop
+						l := uint(0)
+						for ; l + 4 <= d3; l += 4 {
+							dst[dst_idx] = src[src_row + l * s3]
+							dst[dst_idx + 1] = src[src_row + (l + 1) * s3]
+							dst[dst_idx + 2] = src[src_row + (l + 2) * s3]
+							dst[dst_idx + 3] = src[src_row + (l + 3) * s3]
+							dst_idx += 4
+						}
+
+						for ; l < d3; l += 1 {
+							dst[dst_idx] = src[src_row + l * s3]
+							dst_idx += 1
+						}
+					}
+				}
+			}
+		}
+	} else when T == f64 {
+		// Similar optimizations for f64 with #simd[2]f64
 		if s3 == 1 {
 			for i in 0 ..< d0 {
 				src_batch := i * s0
@@ -352,17 +450,16 @@ copy_strided_4d :: proc(dst, src: []$T, shape, strides: []uint) {
 
 						l := uint(0)
 						for ; l + 8 <= d3; l += 8 {
-							vals1 := (^#simd[4]f32)(&src[src_row_start + l])^
-							vals2 := (^#simd[4]f32)(&src[src_row_start + l + 4])^
-							(^#simd[4]f32)(&dst[dst_idx])^ = vals1
-							(^#simd[4]f32)(&dst[dst_idx + 4])^ = vals2
-							dst_idx += 8
-						}
+							vals0 := (^#simd[2]f64)(&src[src_row_start + l])^
+							vals1 := (^#simd[2]f64)(&src[src_row_start + l + 2])^
+							vals2 := (^#simd[2]f64)(&src[src_row_start + l + 4])^
+							vals3 := (^#simd[2]f64)(&src[src_row_start + l + 6])^
 
-						for ; l + 4 <= d3; l += 4 {
-							(^#simd[4]f32)(&dst[dst_idx])^ =
-							(^#simd[4]f32)(&src[src_row_start + l])^
-							dst_idx += 4
+							(^#simd[2]f64)(&dst[dst_idx])^ = vals0
+							(^#simd[2]f64)(&dst[dst_idx + 2])^ = vals1
+							(^#simd[2]f64)(&dst[dst_idx + 4])^ = vals2
+							(^#simd[2]f64)(&dst[dst_idx + 6])^ = vals3
+							dst_idx += 8
 						}
 
 						for ; l < d3; l += 1 {
@@ -389,6 +486,7 @@ copy_strided_4d :: proc(dst, src: []$T, shape, strides: []uint) {
 			}
 		}
 	} else {
+		// Non-SIMD types
 		for i in 0 ..< d0 {
 			src_batch := i * s0
 			for j in 0 ..< d1 {

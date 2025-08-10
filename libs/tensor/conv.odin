@@ -421,9 +421,9 @@ conv2d_grouped :: proc(
 
 	// Decide whether to parallelize based on workload
 	work_per_group := c_in_per_group * c_out_per_group * h * w * k_h * k_w
-	MIN_WORK_FOR_PARALLEL :: 100000 // Tune this threshold
+	// MIN_WORK_FOR_PARALLEL :: 100000 // Tune this threshold
 
-	if groups >= 4 && work_per_group > MIN_WORK_FOR_PARALLEL {
+	if groups >= 4 {
 		// Parallel path using thread pool
 		grouped_conv_trace := trace.TRACE_SECTION("grouped_conv_parallel")
 		defer trace.end_scoped_trace(grouped_conv_trace)
@@ -832,7 +832,7 @@ reshape_bhwc_to_bchw :: proc(
 				}
 			}
 		} else {
-			// Original tiled code
+			// Non-SIMD, tiled
 			for b in 0 ..< batch {
 				for c_tile := uint(0); c_tile < channels; c_tile += TILE_SIZE {
 					c_end := min(c_tile + TILE_SIZE, channels)

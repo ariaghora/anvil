@@ -132,7 +132,7 @@ test_layer_norm :: proc(t: ^testing.T) {
 	input := tensor.new_with_init(input_data, []uint{2, 3, 4}, context.temp_allocator)
 	
 	// Forward pass
-	output := forward_layer_norm(ln, input, context.temp_allocator)
+	output := forward_layer_norm_1d(ln, input, context.temp_allocator)
 	
 	// Check output shape matches input
 	testing.expect(t, len(output.shape) == 3, "Output should be 3D")
@@ -142,7 +142,7 @@ test_layer_norm :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_layer_norm_2d :: proc(t: ^testing.T) {
+test_layer_norm_1d :: proc(t: ^testing.T) {
 	// Test LayerNorm with 2D input (N, C)
 	ln := new_layer_norm_1d(f32, 5, allocator=context.temp_allocator)
 	
@@ -155,33 +155,10 @@ test_layer_norm_2d :: proc(t: ^testing.T) {
 	input := tensor.new_with_init(input_data, []uint{3, 5}, context.temp_allocator)
 	
 	// Forward pass
-	output := forward_layer_norm(ln, input, context.temp_allocator)
+	output := forward_layer_norm_1d(ln, input, context.temp_allocator)
 	
 	// Check output shape
 	testing.expect(t, len(output.shape) == 2, "Output should be 2D")
 	testing.expect(t, output.shape[0] == 3, "Batch dimension should be preserved")
 	testing.expect(t, output.shape[1] == 5, "Feature dimension should be preserved")
-}
-
-@(test)
-test_layer_norm_multi_dim :: proc(t: ^testing.T) {
-	// Test LayerNorm with multi-dimensional normalized_shape
-	// Input: (2, 3, 4, 4), normalize over last 2 dims (4, 4)
-	ln := new_layer_norm_2d(f32, []uint{4, 4}, allocator=context.temp_allocator)
-	
-	// Create input tensor: (2, 3, 4, 4)
-	input_data := make([]f32, 96, context.temp_allocator) // 2*3*4*4 = 96
-	for i in 0..<96 {
-		input_data[i] = f32(i + 1) * 0.1
-	}
-	input := tensor.new_with_init(input_data, []uint{2, 3, 4, 4}, context.temp_allocator)
-	
-	// Forward pass
-	output := forward_layer_norm(ln, input, context.temp_allocator)
-	
-	// Check output shape matches input
-	testing.expect(t, len(output.shape) == 4, "Output should be 4D")
-	for i in 0..<len(input.shape) {
-		testing.expect(t, output.shape[i] == input.shape[i], "Output shape should match input")
-	}
 }

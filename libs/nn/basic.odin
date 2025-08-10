@@ -47,32 +47,78 @@ forward_linear :: proc(
 
 	out := tensor.matmul(x, l.w, allocator, loc)
 
-	// Add bias if present
+
+	// Add bias in-place
 	if bias, has_bias := l.b.?; has_bias {
-		// Get dimensions
 		out_features := out.shape[len(out.shape) - 1]
 		total_elements := tensor.shape_to_size(out.shape)
 		batch_elements := total_elements / out_features
 
-		// Add bias in-place
-		for i in 0 ..< batch_elements {
-			base_idx := i * out_features
+		#no_bounds_check {
+			when T == f32 {
+				for i in 0 ..< batch_elements {
+					base_idx := i * out_features
+					j := uint(0)
 
-			// Vectorized bias addition
-			j := uint(0)
-			for ; j + UNROLL_FACTOR <= out_features; j += UNROLL_FACTOR {
-				#unroll for k in 0 ..< UNROLL_FACTOR {
-					out.data[base_idx + j + uint(k)] += bias.data[j + uint(k)]
+					for ; j + 8 <= out_features; j += 8 {
+						b0 := (^#simd[4]f32)(&bias.data[j])^
+						b1 := (^#simd[4]f32)(&bias.data[j + 4])^
+
+						o0 := (^#simd[4]f32)(&out.data[base_idx + j])^
+						o1 := (^#simd[4]f32)(&out.data[base_idx + j + 4])^
+
+						(^#simd[4]f32)(&out.data[base_idx + j])^ = o0 + b0
+						(^#simd[4]f32)(&out.data[base_idx + j + 4])^ = o1 + b1
+					}
+
+					for ; j + 4 <= out_features; j += 4 {
+						b := (^#simd[4]f32)(&bias.data[j])^
+						o := (^#simd[4]f32)(&out.data[base_idx + j])^
+						(^#simd[4]f32)(&out.data[base_idx + j])^ = o + b
+					}
+
+					for ; j < out_features; j += 1 {
+						out.data[base_idx + j] += bias.data[j]
+					}
+				}
+
+			} else when T == f64 {
+				for i in 0 ..< batch_elements {
+					base_idx := i * out_features
+					j := uint(0)
+
+					for ; j + 4 <= out_features; j += 4 {
+						b0 := (^#simd[2]f64)(&bias.data[j])^
+						b1 := (^#simd[2]f64)(&bias.data[j + 2])^
+
+						o0 := (^#simd[2]f64)(&out.data[base_idx + j])^
+						o1 := (^#simd[2]f64)(&out.data[base_idx + j + 2])^
+
+						(^#simd[2]f64)(&out.data[base_idx + j])^ = o0 + b0
+						(^#simd[2]f64)(&out.data[base_idx + j + 2])^ = o1 + b1
+					}
+
+					for ; j + 2 <= out_features; j += 2 {
+						b := (^#simd[2]f64)(&bias.data[j])^
+						o := (^#simd[2]f64)(&out.data[base_idx + j])^
+						(^#simd[2]f64)(&out.data[base_idx + j])^ = o + b
+					}
+
+					for ; j < out_features; j += 1 {
+						out.data[base_idx + j] += bias.data[j]
+					}
+				}
+
+			} else {
+				// Scalar fallback
+				for i in 0 ..< batch_elements {
+					base_idx := i * out_features
+					for j in 0 ..< out_features {
+						out.data[base_idx + j] += bias.data[j]
+					}
 				}
 			}
-
-			// Handle remainder
-			for ; j < out_features; j += 1 {
-				out.data[base_idx + j] += bias.data[j]
-			}
 		}
-
-		return out
 	}
 
 	return out
