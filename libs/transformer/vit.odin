@@ -82,6 +82,9 @@ gelu_fast :: proc(
 	total_elements := len(x.data)
 
 	when T == f32 {
+		// In the name of God...
+		// Look. I'm sorry if this is fucked up. But if anything, see tanh_fast_simd_4xf32.
+		// This is just my attempt to be fast.
 		sqrt_2_over_pi := f32(0.7978845608028654)
 		coeff := f32(0.044715)
 		half := f32(0.5)
@@ -138,8 +141,8 @@ gelu_fast :: proc(
 }
 
 tanh_fast_simd_4xf32 :: proc(x: #simd[4]f32) -> #simd[4]f32 {
-	// NOTE(Aria): idk why this works okay-ish 
-
+	// NOTE(Aria): idk why this works okay-ish. Especially compared to huggingface's 
+	// SAM with tiny ViT.
 	max_val := #simd[4]f32{3.0, 3.0, 3.0, 3.0}
 	min_val := #simd[4]f32{-3.0, -3.0, -3.0, -3.0}
 	x_clamped := simd.min(simd.max(x, min_val), max_val)
