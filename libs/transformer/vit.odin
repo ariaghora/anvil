@@ -77,98 +77,83 @@ gelu_fast :: proc(
 	x: ^tensor.Tensor($T),
 	allocator := context.allocator,
 	loc := #caller_location,
-) -> ^tensor.Tensor(T) where T == f32 ||
-	T == f64 {
-	gelu_fast_trace := trace.TRACE_FUNCTION("gelu_fast")
-	defer trace.end_scoped_trace(gelu_fast_trace)
-
+) -> ^tensor.Tensor(T) {
 	result := tensor.tensor_alloc(T, x.shape, true, allocator, loc)
+	total_elements := len(x.data)
 
-	#no_bounds_check {
-		i := uint(0)
-		n := uint(len(x.data))
+	when T == f32 {
+		sqrt_2_over_pi := f32(0.7978845608028654)
+		coeff := f32(0.044715)
+		half := f32(0.5)
+		one := f32(1.0)
 
-		when T == f32 {
-			scale_vec := #simd[4]f32{1.702, 1.702, 1.702, 1.702}
-			half_vec := #simd[4]f32{0.5, 0.5, 0.5, 0.5}
-			one_vec := #simd[4]f32{1.0, 1.0, 1.0, 1.0}
+		i := 0
 
-			for ; i + 4 <= n; i += 4 {
-				vals := (^#simd[4]f32)(&x.data[i])^
-				sigmoid_inputs := simd.mul(vals, scale_vec)
-				tanh_vals := tanh_fast_simd_4xf32(simd.mul(sigmoid_inputs, half_vec))
-				sigmoids := simd.fma(half_vec, tanh_vals, half_vec)
-				results := simd.mul(vals, sigmoids)
-				(^#simd[4]f32)(&result.data[i])^ = results
-			}
-		} else when T == f64 {
-			scale_vec := #simd[2]f64{1.702, 1.702}
-			half_vec := #simd[2]f64{0.5, 0.5}
-			one_vec := #simd[2]f64{1.0, 1.0}
+		// SIMD path for chunks of 4
+		for ; i + 4 <= total_elements; i += 4 {
+			v := (^#simd[4]f32)(&x.data[i])^
 
-			for ; i + 2 <= n; i += 2 {
-				vals := (^#simd[2]f64)(&x.data[i])^
-				sigmoid_inputs := simd.mul(vals, scale_vec)
-				tanh_vals := tanh_fast_simd_2xf64(simd.mul(sigmoid_inputs, half_vec))
-				sigmoids := simd.fma(half_vec, tanh_vals, half_vec)
-				results := simd.mul(vals, sigmoids)
-				(^#simd[2]f64)(&result.data[i])^ = results
-			}
-		} else {
-			#panic("fast gelu is not available for other than f32 and f64")
+			// Compute argument to tanh: sqrt_2_over_pi * v * (1.0 + 0.044715 * v * v)
+			v2 := simd.mul(v, v)
+			inner := simd.fma(
+				v2,
+				#simd[4]f32{coeff, coeff, coeff, coeff},
+				#simd[4]f32{one, one, one, one},
+			)
+			arg := simd.mul(
+				simd.mul(v, inner),
+				#simd[4]f32{sqrt_2_over_pi, sqrt_2_over_pi, sqrt_2_over_pi, sqrt_2_over_pi},
+			)
+
+			// Apply tanh approximation
+			tanh_result := tanh_fast_simd_4xf32(arg)
+
+			// Final GELU: 0.5 * v * (1.0 + tanh_result)
+			gelu_result := simd.mul(
+				simd.mul(v, #simd[4]f32{half, half, half, half}),
+				simd.add(#simd[4]f32{one, one, one, one}, tanh_result),
+			)
+
+			(^#simd[4]f32)(&result.data[i])^ = gelu_result
 		}
 
-		// Handle remainder
-		for ; i < n; i += 1 {
-			val := x.data[i]
-			sigmoid_input := T(1.702) * val
-			sigmoid := T(0.5) * (T(1.0) + tanh_fast(sigmoid_input * T(0.5)))
-			result.data[i] = val * sigmoid
+		// Scalar fallback for remainder
+		for ; i < total_elements; i += 1 {
+			v := x.data[i]
+			result.data[i] =
+				0.5 * v * (1.0 + math.tanh(sqrt_2_over_pi * v * (1.0 + 0.044715 * v * v)))
+		}
+
+	} else {
+		// Non-SIMD path for other types
+		sqrt_2_over_pi := T(0.7978845608028654)
+		for i in 0 ..< total_elements {
+			v := x.data[i]
+			result.data[i] =
+				0.5 * v * (1.0 + math.tanh(sqrt_2_over_pi * v * (1.0 + 0.044715 * v * v)))
 		}
 	}
 
 	return result
 }
 
-// SIMD version of tanh_fast for 4xf32
 tanh_fast_simd_4xf32 :: proc(x: #simd[4]f32) -> #simd[4]f32 {
-	x2 := simd.mul(x, x)
+	// NOTE(Aria): idk why this works okay-ish 
 
-	c135135 := #simd[4]f32{135135, 135135, 135135, 135135}
-	c17325 := #simd[4]f32{17325, 17325, 17325, 17325}
-	c378 := #simd[4]f32{378, 378, 378, 378}
-	c62370 := #simd[4]f32{62370, 62370, 62370, 62370}
-	c3150 := #simd[4]f32{3150, 3150, 3150, 3150}
-	c28 := #simd[4]f32{28, 28, 28, 28}
+	max_val := #simd[4]f32{3.0, 3.0, 3.0, 3.0}
+	min_val := #simd[4]f32{-3.0, -3.0, -3.0, -3.0}
+	x_clamped := simd.min(simd.max(x, min_val), max_val)
 
-	a_inner := simd.fma(x2, simd.fma(x2, x2, c378), c17325)
-	a := simd.mul(x, simd.fma(x2, a_inner, c135135))
+	x2 := simd.mul(x_clamped, x_clamped)
+	c27 := #simd[4]f32{27.0, 27.0, 27.0, 27.0}
+	c9 := #simd[4]f32{9.0, 9.0, 9.0, 9.0}
 
-	b_inner := simd.fma(x2, simd.fma(x2, c28, c3150), c62370)
-	b := simd.fma(x2, b_inner, c135135)
+	numerator := simd.mul(x_clamped, simd.add(c27, x2))
+	denominator := simd.fma(x2, c9, c27)
 
-	return simd.div(a, b)
+	return simd.div(numerator, denominator)
 }
 
-// SIMD version of tanh_fast for 2xf64
-tanh_fast_simd_2xf64 :: proc(x: #simd[2]f64) -> #simd[2]f64 {
-	x2 := simd.mul(x, x)
-
-	c135135 := #simd[2]f64{135135, 135135}
-	c17325 := #simd[2]f64{17325, 17325}
-	c378 := #simd[2]f64{378, 378}
-	c62370 := #simd[2]f64{62370, 62370}
-	c3150 := #simd[2]f64{3150, 3150}
-	c28 := #simd[2]f64{28, 28}
-
-	a_inner := simd.fma(x2, simd.fma(x2, x2, c378), c17325)
-	a := simd.mul(x, simd.fma(x2, a_inner, c135135))
-
-	b_inner := simd.fma(x2, simd.fma(x2, c28, c3150), c62370)
-	b := simd.fma(x2, b_inner, c135135)
-
-	return simd.div(a, b)
-}
 
 new_conv_2d_bn :: proc(
 	$T: typeid,

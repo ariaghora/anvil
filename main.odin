@@ -96,18 +96,29 @@ main :: proc() {
 	assert(err_in_st == nil)
 	input := input_st.tensors["image"]
 
-	trace.trace_instant("starting_forward_pass")
-	forward_trace := trace.TRACE_SECTION("tiny_vit_forward_pass")
-	output := tf.forward_tiny_vit_5m(vit, input, true, arena_alloc)
-	trace.end_scoped_trace(forward_trace)
-	trace.trace_instant("forward_pass_completed")
+	// Patch embedding
+	talloc := context.temp_allocator
+	patch_embedding_conv1 := tf.forward_conv_2d_bn(vit.patch_embed.conv1, input, talloc)
+	patch_embedding_conv1_gelu := tf.gelu_fast(patch_embedding_conv1, talloc)
+	patch_embedding_conv2 := tf.forward_conv_2d_bn(
+		vit.patch_embed.conv2,
+		patch_embedding_conv1_gelu,
+		talloc,
+	)
 
-	tensor.print(output.patch_embedding)
-	tensor.print(output.output_final)
+
+	// trace.trace_instant("starting_forward_pass")
+	// forward_trace := trace.TRACE_SECTION("tiny_vit_forward_pass")
+	// output := tf.forward_tiny_vit_5m(vit, input, true, arena_alloc)
+	// trace.end_scoped_trace(forward_trace)
+	// trace.trace_instant("forward_pass_completed")
 
 	output_tensors := make(map[string]^tensor.Tensor(f32), context.temp_allocator)
 	map_insert(&output_tensors, "input", input)
-	map_insert(&output_tensors, "patch_embedding", output.patch_embedding)
+	// map_insert(&output_tensors, "patch_embedding", output.patch_embedding)
+	map_insert(&output_tensors, "patch_embedding_conv1", patch_embedding_conv1)
+	map_insert(&output_tensors, "patch_embedding_conv1_gelu", patch_embedding_conv1_gelu)
+	map_insert(&output_tensors, "patch_embedding_conv2", patch_embedding_conv2)
 
 	err_st_wr := st.write_tensors_to_file(
 		&st.Safe_Tensors(f32){tensors = output_tensors},

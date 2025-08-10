@@ -283,6 +283,8 @@ update_current_tensor_texture :: proc(pane: ^Pane) -> bool {
 			pane.max_val = slice.max(ch_img_data)
 			pane.min_val = slice.min(ch_img_data)
 
+			fmt.println(pane.min_val, pane.max_val)
+
 			defer delete(ch_img_data)
 			ch_min, ch_max := slice.min(ch_img_data), slice.max(ch_img_data)
 			image_colors := make([]rl.Color, h * w)
