@@ -9,4 +9,4 @@ odin-simd
 
 *.tensor
 tensorgen/safetensors
-libs.bin
+*.bin
