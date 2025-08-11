@@ -3,7 +3,7 @@
 CLAUDE.md
 .claude
 
-models/mobile_sam-tiny-vitt.safetensors
+*.safetensors
 trace.json
 odin-simd
 

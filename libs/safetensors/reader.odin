@@ -111,16 +111,26 @@ tensor_assign_from_safe_tensors_one :: proc(
 	t: ^tensor.Tensor($T),
 	tensor_name: string,
 	safe_tensors: ^Safe_Tensors(T),
+	should_transpose := false,
 ) -> Safe_Tensors_Error {
 	t_from, ok := safe_tensors.tensors[tensor_name]
 	if !ok do return Tensor_Not_Found{tensor_name}
+
+	if should_transpose do t_from = tensor.transpose(t_from, 0, 1)
+
 	if !slice.equal(t.shape, t_from.shape) do return Assignment_Incompatible_Shape{}
 	if !t.contiguous do return Tensors_Names_Length_Mismatch{}
+
 
 	if t.owns_data {
 		copy(t.data, t_from.data)
 	} else {
-		t.data = t_from.data
+		if should_transpose {
+			copy(t.data, t_from.data)
+			tensor.free_tensor(t_from)
+		} else {
+			t.data = t_from.data
+		}
 	}
 	return nil
 }
@@ -129,6 +139,7 @@ tensor_assign_from_safe_tensors_many :: proc(
 	tensors: []^tensor.Tensor($T),
 	tensor_names: []string,
 	safe_tensors: ^Safe_Tensors(T),
+	should_transpose := false,
 ) -> Safe_Tensors_Error {
 	if len(tensors) != len(tensor_names) do return Tensors_Names_Length_Mismatch{}
 	for i in 0 ..< len(tensors) {

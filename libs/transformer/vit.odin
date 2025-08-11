@@ -1,6 +1,7 @@
 package transformer
 
 import "../nn"
+import st "../safetensors"
 import "../tensor"
 import "../trace"
 import "base:runtime"
@@ -30,47 +31,6 @@ tanh_fast :: proc(x: $T) -> T where T == f32 || T == f64 {
 	a := x * (T(135135) + x2 * (T(17325) + x2 * (T(378) + x2)))
 	b := T(135135) + x2 * (T(62370) + x2 * (T(3150) + x2 * T(28)))
 	return a / b
-}
-
-// GELU approximation, inspired from from BERT
-gelu_fast_no_simd :: proc(
-	x: ^tensor.Tensor($T),
-	allocator := context.allocator,
-	loc := #caller_location,
-) -> ^tensor.Tensor(T) where T == f32 ||
-	T == f64 {
-	gelu_fast_trace := trace.TRACE_FUNCTION("gelu_fast")
-	defer trace.end_scoped_trace(gelu_fast_trace)
-
-	result := tensor.tensor_alloc(T, x.shape, true, allocator, loc)
-
-	// Constants for sigmoid approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-	// Can be approximated as: x * sigmoid(1.702 * x)
-	scale := T(1.702)
-
-	#no_bounds_check {
-		i := uint(0)
-		n := uint(len(x.data))
-
-		for ; i + GELU_UNFOLD_FACTOR <= n; i += GELU_UNFOLD_FACTOR {
-			#unroll for j in 0 ..< GELU_UNFOLD_FACTOR {
-				val := x.data[i + uint(j)]
-				sigmoid_input := scale * val
-				sigmoid := T(0.5) * (T(1.0) + tanh_fast(sigmoid_input * T(0.5)))
-				result.data[i + uint(j)] = val * sigmoid
-			}
-		}
-
-		// Handle remainder
-		for ; i < n; i += 1 {
-			val := x.data[i]
-			sigmoid_input := scale * val
-			sigmoid := T(0.5) * (T(1.0) + tanh_fast(sigmoid_input * T(0.5)))
-			result.data[i] = val * sigmoid
-		}
-	}
-
-	return result
 }
 
 gelu_fast :: proc(
@@ -160,6 +120,7 @@ tanh_fast_simd_4xf32 :: proc(x: #simd[4]f32) -> #simd[4]f32 {
 
 new_conv_2d_bn :: proc(
 	$T: typeid,
+	vb: ^Var_Builder(T),
 	in_channels, out_channels: uint,
 	kernel_size: uint,
 	stride: uint = 1,
@@ -181,7 +142,13 @@ new_conv_2d_bn :: proc(
 		init = init,
 		allocator = allocator,
 	)
+	vb_assignt_to_tensor(vb, "c.weight", conv.w)
+
 	bn := nn.new_batch_norm_2d(T, out_channels, allocator)
+	vb_assignt_to_tensor(vb, "bn.weight", bn.weight)
+	vb_assignt_to_tensor(vb, "bn.bias", bn.bias)
+	vb_assignt_to_tensor(vb, "bn.running_mean", bn.running_mean)
+	vb_assignt_to_tensor(vb, "bn.running_var", bn.running_var)
 
 	return new_clone(Conv_2d_BN(T){conv = conv, bn = bn}, allocator)
 }
@@ -219,13 +186,15 @@ Patch_Embed :: struct($T: typeid) {
 
 new_patch_embed :: proc(
 	$T: typeid,
+	vb_patch_embed: ^Var_Builder(T),
 	in_channels, embed_dim: uint,
 	init := true,
 	allocator := context.allocator,
 ) -> ^Patch_Embed(T) {
-	// stride=2, padding=1, kernel_size=3
-	conv1 := new_conv_2d_bn(T, in_channels, embed_dim / 2, 3, 2, 1, 1, init, allocator)
-	conv2 := new_conv_2d_bn(T, embed_dim / 2, embed_dim, 3, 2, 1, 1, init, allocator)
+	vb_conv1 := vb_make(T, "seq.0", vb_patch_embed)
+	vb_conv2 := vb_make(T, "seq.2", vb_patch_embed)
+	conv1 := new_conv_2d_bn(T, &vb_conv1, in_channels, embed_dim / 2, 3, 2, 1, 1, init, allocator)
+	conv2 := new_conv_2d_bn(T, &vb_conv2, embed_dim / 2, embed_dim, 3, 2, 1, 1, init, allocator)
 
 	return new_clone(Patch_Embed(T){conv1 = conv1, conv2 = conv2}, allocator)
 }
@@ -262,6 +231,7 @@ MB_Conv :: struct($T: typeid) {
 
 new_mb_conv :: proc(
 	$T: typeid,
+	vb: ^Var_Builder(T),
 	in_channels, out_channels: uint,
 	expand_ratio: uint,
 	init := true,
@@ -269,12 +239,12 @@ new_mb_conv :: proc(
 ) -> ^MB_Conv(T) {
 	hidden := in_channels * expand_ratio
 
-	// Pointwise expansion
-	conv1 := new_conv_2d_bn(T, in_channels, hidden, 1, 1, 0, 1, init, allocator)
-	// Depthwise convolution with groups=hidden
-	conv2 := new_conv_2d_bn(T, hidden, hidden, 3, 1, 1, hidden, init, allocator)
-	// Pointwise projection
-	conv3 := new_conv_2d_bn(T, hidden, out_channels, 1, 1, 0, 1, init, allocator)
+	vb_conv1 := vb_make(T, "conv1", vb)
+	vb_conv2 := vb_make(T, "conv2", vb)
+	vb_conv3 := vb_make(T, "conv3", vb)
+	conv1 := new_conv_2d_bn(T, &vb_conv1, in_channels, hidden, 1, 1, 0, 1, init, allocator)
+	conv2 := new_conv_2d_bn(T, &vb_conv2, hidden, hidden, 3, 1, 1, hidden, init, allocator)
+	conv3 := new_conv_2d_bn(T, &vb_conv3, hidden, out_channels, 1, 1, 0, 1, init, allocator)
 
 	return new_clone(MB_Conv(T){conv1 = conv1, conv2 = conv2, conv3 = conv3}, allocator)
 }
@@ -336,6 +306,7 @@ Patch_Merging :: struct($T: typeid) {
 
 new_patch_merging :: proc(
 	$T: typeid,
+	vb: ^Var_Builder(T),
 	input_resolution: [2]uint,
 	dim, out: uint,
 	init := true,
@@ -347,9 +318,12 @@ new_patch_merging :: proc(
 		stride = 1
 	}
 
-	conv1 := new_conv_2d_bn(T, dim, out, 1, 1, 0, 1, init, allocator)
-	conv2 := new_conv_2d_bn(T, out, out, 3, stride, 1, out, init, allocator) // groups=out (depthwise)
-	conv3 := new_conv_2d_bn(T, out, out, 1, 1, 0, 1, init, allocator)
+	vb_conv1 := vb_make(T, "conv1", vb)
+	vb_conv2 := vb_make(T, "conv2", vb)
+	vb_conv3 := vb_make(T, "conv3", vb)
+	conv1 := new_conv_2d_bn(T, &vb_conv1, dim, out, 1, 1, 0, 1, init, allocator)
+	conv2 := new_conv_2d_bn(T, &vb_conv2, out, out, 3, stride, 1, out, init, allocator) // groups=out (depthwise)
+	conv3 := new_conv_2d_bn(T, &vb_conv3, out, out, 1, 1, 0, 1, init, allocator)
 
 	return new_clone(
 		Patch_Merging(T) {
@@ -417,6 +391,7 @@ Conv_Layer :: struct($T: typeid) {
 
 new_conv_layer :: proc(
 	$T: typeid,
+	vb: ^Var_Builder(T),
 	dim, out: uint,
 	input_resolution: [2]uint,
 	depth: uint,
@@ -425,16 +400,26 @@ new_conv_layer :: proc(
 	init := true,
 	allocator := context.allocator,
 ) -> ^Conv_Layer(T) {
-	// Create blocks
 	blocks := make([]^MB_Conv(T), depth, allocator)
+	vb_blocks := vb_make(T, "blocks", vb)
 	for i in 0 ..< depth {
-		blocks[i] = new_mb_conv(T, dim, dim, conv_expand_ratio, init, allocator)
+		vb_blocks_i := vb_make(T, fmt.tprintf("%d", i), &vb_blocks)
+		blocks[i] = new_mb_conv(T, &vb_blocks_i, dim, dim, conv_expand_ratio, init, allocator)
 	}
 
 	// Create downsample if needed
 	downsample_layer: Maybe(^Patch_Merging(T)) = nil
+	vb_downsample := vb_make(T, "downsample", vb)
 	if downsample {
-		downsample_layer = new_patch_merging(T, input_resolution, dim, out, init, allocator)
+		downsample_layer = new_patch_merging(
+			T,
+			&vb_downsample,
+			input_resolution,
+			dim,
+			out,
+			init,
+			allocator,
+		)
 	}
 
 	return new_clone(Conv_Layer(T){blocks = blocks, downsample = downsample_layer}, allocator)
@@ -452,9 +437,6 @@ forward_conv_layer :: proc(
 	// Apply all blocks
 	for block in layer.blocks {
 		new_xs := forward_mb_conv(block, xs, context.temp_allocator)
-		if xs != x { 	// Don't free the input
-			// Free intermediate results would go here if needed
-		}
 		xs = new_xs
 	}
 
@@ -496,6 +478,7 @@ Attention :: struct($T: typeid) {
 
 new_attention :: proc(
 	$T: typeid,
+	vb: ^Var_Builder(T),
 	dim, key_dim, num_heads, attn_ratio: uint,
 	resolution: [2]uint,
 	init := true,
@@ -507,13 +490,66 @@ new_attention :: proc(
 	h := dh + nh_kd * 2 // query + key + value
 
 	norm := nn.new_layer_norm_1d(T, dim, allocator)
-	qkv := nn.new_linear(T, dim, h, true, init, allocator)
-	proj := nn.new_linear(T, dh, dim, true, init, allocator)
+	vb_assignt_to_tensor(vb, "norm.weight", norm.weight)
+	vb_assignt_to_tensor(vb, "norm.bias", norm.bias)
 
-	// Create attention biases - will be resized based on actual sequence length during forward pass
-	// For now, create a reasonable default size that can be resized
-	max_seq_len := resolution[0] * resolution[1] * 4 // Allow for multiple scales
-	ab := tensor.zeros(T, []uint{num_heads, max_seq_len, max_seq_len}, allocator)
+	qkv := nn.new_linear(T, dim, h, true, init, allocator)
+	vb_assignt_to_tensor(vb, "qkv.weight", qkv.w, true)
+	vb_assignt_to_tensor(vb, "qkv.bias", qkv.b.?)
+
+	proj := nn.new_linear(T, dh, dim, true, init, allocator)
+	vb_assignt_to_tensor(vb, "proj.weight", proj.w, true)
+	vb_assignt_to_tensor(vb, "proj.bias", proj.b.?)
+
+	// Build relative position bias indices
+	num_points := resolution[0] * resolution[1]
+	// Create points grid
+	points := make([][2]int, num_points, context.temp_allocator)
+	idx := 0
+	for x in 0 ..< resolution[0] {
+		for y in 0 ..< resolution[1] {
+			points[idx] = {int(x), int(y)}
+			idx += 1
+		}
+	}
+	// Map relative offsets to unique indices
+	offset_map := make(map[[2]uint]uint, context.temp_allocator)
+	idxs := make([]uint, num_points * num_points, allocator)
+
+	idx = 0
+	for p1 in points {
+		for p2 in points {
+			offset := [2]uint{uint(abs(p2[0] - p1[0])), uint(abs(p2[1] - p1[1]))}
+
+			if existing_idx, ok := offset_map[offset]; ok {
+				idxs[idx] = existing_idx
+			} else {
+				new_idx := uint(len(offset_map))
+				offset_map[offset] = new_idx
+				idxs[idx] = new_idx
+			}
+			idx += 1
+		}
+	}
+
+	num_unique_offsets := uint(len(offset_map))
+	attention_biases := tensor.zeros(T, []uint{num_heads, num_unique_offsets})
+	defer tensor.free_tensor(attention_biases)
+	vb_assignt_to_tensor(vb, "attention_biases", attention_biases)
+
+
+	ab := tensor.zeros(T, []uint{num_heads, num_points, num_points}, allocator)
+	// ab[head, i] = attention_biases[head, idxs[i]]
+	for head in 0 ..< num_heads {
+		for i in 0 ..< (num_points * num_points) {
+			src_idx := idxs[i]
+			// Copy from attention_biases[head, src_idx] to ab[head, i//num_points, i%num_points]
+			row := i / num_points
+			col := i % num_points
+			ab.data[head * num_points * num_points + row * num_points + col] =
+				attention_biases.data[head * num_unique_offsets + src_idx]
+		}
+	}
 
 	scale := T(1.0 / math.sqrt(f64(key_dim)))
 
@@ -810,13 +846,22 @@ Mlp :: struct($T: typeid) {
 
 new_mlp :: proc(
 	$T: typeid,
+	vb: ^Var_Builder(T),
 	in_features, hidden_features: uint,
 	init := true,
 	allocator := context.allocator,
 ) -> ^Mlp(T) {
 	norm := nn.new_layer_norm_1d(T, in_features, allocator)
+	vb_assignt_to_tensor(vb, "norm.weight", norm.weight)
+	vb_assignt_to_tensor(vb, "norm.bias", norm.bias)
+
 	fc1 := nn.new_linear(T, in_features, hidden_features, true, init, allocator)
 	fc2 := nn.new_linear(T, hidden_features, in_features, true, init, allocator)
+	// Should transpose since pytorch's way of fc is tranposed matmul  
+	vb_assignt_to_tensor(vb, "fc1.weight", fc1.w, should_transpose = true)
+	vb_assignt_to_tensor(vb, "fc2.weight", fc2.w, should_transpose = true)
+	vb_assignt_to_tensor(vb, "fc1.bias", fc1.b.?)
+	vb_assignt_to_tensor(vb, "fc2.bias", fc2.b.?)
 
 	return new_clone(Mlp(T){norm = norm, fc1 = fc1, fc2 = fc2}, allocator)
 }
@@ -854,15 +899,18 @@ Tiny_ViT_Block :: struct($T: typeid) {
 
 new_tiny_vit_block :: proc(
 	$T: typeid,
+	vb: ^Var_Builder(T),
 	dim: uint,
 	input_resolution: [2]uint,
 	num_heads, window_size: uint,
 	init := true,
 	allocator := context.allocator,
 ) -> ^Tiny_ViT_Block(T) {
+	vb_attn := vb_make(T, "attn", vb)
 	head_dim := dim / num_heads
 	attn := new_attention(
 		T,
+		&vb_attn,
 		dim,
 		head_dim,
 		num_heads,
@@ -871,9 +919,14 @@ new_tiny_vit_block :: proc(
 		init,
 		allocator,
 	)
-	mlp := new_mlp(T, dim, dim * MLP_RATIO, init, allocator)
+
+	vb_mlp := vb_make(T, "mlp", vb)
+	mlp := new_mlp(T, &vb_mlp, dim, dim * MLP_RATIO, init, allocator)
+
+	vb_local_conv := vb_make(T, "local_conv", vb)
 	local_conv := new_conv_2d_bn(
 		T,
+		&vb_local_conv,
 		dim,
 		dim,
 		LOCAL_CONV_SIZE,
@@ -1087,6 +1140,7 @@ Basic_Layer :: struct($T: typeid) {
 
 new_basic_layer :: proc(
 	$T: typeid,
+	vb: ^Var_Builder(T),
 	dim, out: uint,
 	input_resolution: [2]uint,
 	depth, num_heads, window_size: uint,
@@ -1096,9 +1150,12 @@ new_basic_layer :: proc(
 ) -> ^Basic_Layer(T) {
 	// Create blocks
 	blocks := make([]^Tiny_ViT_Block(T), depth, allocator)
+	vb_blocks := vb_make(T, "blocks", vb)
 	for i in 0 ..< depth {
+		vb_blocks_i := vb_make(T, fmt.tprintf("%d", i), &vb_blocks)
 		blocks[i] = new_tiny_vit_block(
 			T,
+			&vb_blocks_i,
 			dim,
 			input_resolution,
 			num_heads,
@@ -1111,7 +1168,16 @@ new_basic_layer :: proc(
 	// Create downsample if needed
 	downsample_layer: Maybe(^Patch_Merging(T)) = nil
 	if downsample {
-		downsample_layer = new_patch_merging(T, input_resolution, dim, out, init, allocator)
+		vb_downsample := vb_make(T, "downsample", vb)
+		downsample_layer = new_patch_merging(
+			T,
+			&vb_downsample,
+			input_resolution,
+			dim,
+			out,
+			init,
+			allocator,
+		)
 	}
 
 	return new_clone(Basic_Layer(T){blocks = blocks, downsample = downsample_layer}, allocator)
@@ -1167,8 +1233,10 @@ Tiny_ViT_5m :: struct($T: typeid) {
 	neck_ln1, neck_ln2:     ^nn.Layer_Norm(T),
 }
 
+
 new_tiny_vit_5m :: proc(
 	$T: typeid,
+	safetensors: ^st.Safe_Tensors(T),
 	input_size: uint = IMG_SIZE,
 	init := true,
 	allocator := context.allocator,
@@ -1178,12 +1246,19 @@ new_tiny_vit_5m :: proc(
 	num_heads := []uint{2, 4, 5, 10}
 	window_sizes := []uint{7, 7, 14, 7}
 
-	patch_embed := new_patch_embed(T, IN_CHANNELS, embed_dims[0], init, allocator)
+	vb_root := Var_Builder(T){"image_encoder", safetensors, nil}
+	vb_patch_embed := vb_make(T, "patch_embed", &vb_root)
+
+	patch_embed := new_patch_embed(T, &vb_patch_embed, IN_CHANNELS, embed_dims[0], init, allocator)
 	patches_resolution := uint(input_size / 4) // After patch embedding
 
+	vb_layers := vb_make(T, "layers", &vb_root)
+
 	// Layer 0 (ConvLayer) -
+	vb_layer0 := vb_make(T, "0", &vb_layers)
 	layer0 := new_conv_layer(
 		T,
+		&vb_layer0,
 		embed_dims[0],
 		embed_dims[1],
 		[2]uint{patches_resolution, patches_resolution},
@@ -1203,8 +1278,10 @@ new_tiny_vit_5m :: proc(
 		// Calculate current resolution using Rust formula: original_patches_resolution / (1 << min(i_layer, 2))
 		current_resolution := original_patches_resolution / (1 << min(uint(i_layer), 2))
 
+		vb_layer_i := vb_make(T, fmt.tprintf("%d", i_layer), &vb_layers)
 		layer := new_basic_layer(
 			T,
+			&vb_layer_i,
 			embed_dims[i_layer],
 			embed_dims[min(i_layer + 1, num_layers - 1)],
 			[2]uint{current_resolution, current_resolution},
@@ -1233,10 +1310,15 @@ new_tiny_vit_5m :: proc(
 		init = init,
 		allocator = allocator,
 	)
+	vb_assignt_to_tensor(&vb_root, "neck.0.weight", neck_conv1.w)
+
 	// LayerNorm2d expects spatial dimensions based on final output
 	// Final spatial dimension after all downsampling: input_size / 4 / (1 << min(3,2)) = input_size / 16
 	final_spatial_dim := uint(input_size / 16)
 	neck_ln1 := nn.new_layer_norm_2d(T, {256}, allocator)
+	vb_assignt_to_tensor(&vb_root, "neck.1.weight", neck_ln1.weight)
+	vb_assignt_to_tensor(&vb_root, "neck.1.bias", neck_ln1.bias)
+
 	neck_conv2 := nn.new_conv2d(
 		T,
 		256, // 256 input channels
@@ -1250,7 +1332,11 @@ new_tiny_vit_5m :: proc(
 		init,
 		allocator,
 	)
+	vb_assignt_to_tensor(&vb_root, "neck.2.weight", neck_conv2.w)
+
 	neck_ln2 := nn.new_layer_norm_2d(T, []uint{256}, allocator)
+	vb_assignt_to_tensor(&vb_root, "neck.3.weight", neck_ln2.weight)
+	vb_assignt_to_tensor(&vb_root, "neck.3.bias", neck_ln2.bias)
 
 	return new_clone(
 		Tiny_ViT_5m(T) {
@@ -1305,7 +1391,6 @@ forward_tiny_vit_5m :: proc(
 	b := xs.shape[0]
 	c := xs.shape[2]
 
-	// Calculate correct spatial dimensions based on actual sequence length
 	sequence_length := xs.shape[1]
 	spatial_dim := uint(math.sqrt(f64(sequence_length)))
 	xs_4d := tensor.reshape(xs, []uint{b, spatial_dim, spatial_dim, c}, context.temp_allocator)
@@ -1315,8 +1400,6 @@ forward_tiny_vit_5m :: proc(
 	conv1_out := nn.forward_conv2d(model.neck_conv1, xs_conv, context.temp_allocator)
 	ln1_out := nn.forward_layer_norm_2d(model.neck_ln1, conv1_out, context.temp_allocator)
 
-	fmt.println(model.neck_conv2)
-	fmt.println(ln1_out.shape)
 	conv2_out := nn.forward_conv2d(model.neck_conv2, ln1_out, context.temp_allocator)
 
 	result := nn.forward_layer_norm_2d(model.neck_ln2, conv2_out, allocator, loc)

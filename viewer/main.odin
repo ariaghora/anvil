@@ -272,8 +272,16 @@ draw_ui :: proc(app: ^App, ctx: ^nui.UI_Context, input: nui.UI_Input) {
 
 update_current_tensor_texture :: proc(pane: ^Pane) -> bool {
 	if t := pane.tensors.tensors[pane.selected_tensor_name]; t != nil {
-		if len(t.shape) == 4 {
-			b, c, h, w := t.shape[0], t.shape[1], t.shape[2], t.shape[3]
+		if len(t.shape) >= 3 && len(t.shape) <= 4 {
+			b, c, h, w: uint
+			if len(t.shape) == 4 {
+				b, c, h, w = t.shape[0], t.shape[1], t.shape[2], t.shape[3]
+			} else if len(t.shape) == 3 {
+				b, c, h, w = t.shape[0], 1, t.shape[1], t.shape[2]
+			} else {
+				return false
+			}
+
 			if b > 1 do return false
 
 			pane.max_channel = c
@@ -282,8 +290,6 @@ update_current_tensor_texture :: proc(pane: ^Pane) -> bool {
 			ch_img_data := slice.clone(t.data[offset:offset + h * w])
 			pane.max_val = slice.max(ch_img_data)
 			pane.min_val = slice.min(ch_img_data)
-
-			fmt.println(pane.min_val, pane.max_val)
 
 			defer delete(ch_img_data)
 			ch_min, ch_max := slice.min(ch_img_data), slice.max(ch_img_data)
