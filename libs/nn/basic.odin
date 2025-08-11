@@ -60,17 +60,6 @@ forward_linear :: proc(
 					base_idx := i * out_features
 					j := uint(0)
 
-					for ; j + 8 <= out_features; j += 8 {
-						b0 := (^#simd[4]f32)(&bias.data[j])^
-						b1 := (^#simd[4]f32)(&bias.data[j + 4])^
-
-						o0 := (^#simd[4]f32)(&out.data[base_idx + j])^
-						o1 := (^#simd[4]f32)(&out.data[base_idx + j + 4])^
-
-						(^#simd[4]f32)(&out.data[base_idx + j])^ = o0 + b0
-						(^#simd[4]f32)(&out.data[base_idx + j + 4])^ = o1 + b1
-					}
-
 					for ; j + 4 <= out_features; j += 4 {
 						b := (^#simd[4]f32)(&bias.data[j])^
 						o := (^#simd[4]f32)(&out.data[base_idx + j])^
@@ -86,17 +75,6 @@ forward_linear :: proc(
 				for i in 0 ..< batch_elements {
 					base_idx := i * out_features
 					j := uint(0)
-
-					for ; j + 4 <= out_features; j += 4 {
-						b0 := (^#simd[2]f64)(&bias.data[j])^
-						b1 := (^#simd[2]f64)(&bias.data[j + 2])^
-
-						o0 := (^#simd[2]f64)(&out.data[base_idx + j])^
-						o1 := (^#simd[2]f64)(&out.data[base_idx + j + 2])^
-
-						(^#simd[2]f64)(&out.data[base_idx + j])^ = o0 + b0
-						(^#simd[2]f64)(&out.data[base_idx + j + 2])^ = o1 + b1
-					}
 
 					for ; j + 2 <= out_features; j += 2 {
 						b := (^#simd[2]f64)(&bias.data[j])^

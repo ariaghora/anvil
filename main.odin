@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:math"
 import "core:math/rand"
 import vmem "core:mem/virtual"
+import "core:time"
 import "libs/nn"
 import st "libs/safetensors"
 import "libs/tensor"
@@ -43,6 +44,7 @@ main :: proc() {
 	input := input_st.tensors["image"]
 
 	// Patch embedding
+	t := time.now()
 	talloc := context.temp_allocator
 	patch_embedding_conv1 := tf.forward_conv_2d_bn(vit.patch_embed.conv1, input, talloc)
 	patch_embedding_conv1_gelu := tf.gelu_fast(patch_embedding_conv1, talloc)
@@ -72,6 +74,8 @@ main :: proc() {
 	neck_ln1 := nn.forward_layer_norm_2d(vit.neck_ln1, neck_conv1, talloc)
 	neck_conv2 := nn.forward_conv2d(vit.neck_conv2, neck_ln1, talloc)
 	neck_ln2 := nn.forward_layer_norm_2d(vit.neck_ln2, neck_conv2, talloc)
+
+	fmt.println("inference time:", time.since(t))
 
 	output_tensors := make(map[string]^tensor.Tensor(f32), context.temp_allocator)
 	map_insert(&output_tensors, "1-input", input)
