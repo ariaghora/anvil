@@ -5,6 +5,7 @@ import "../trace"
 import "core:fmt"
 import "core:math"
 import "core:simd"
+import "core:slice"
 
 UNROLL_FACTOR :: 16
 
@@ -375,14 +376,15 @@ Layer_Norm :: struct($T: typeid) {
 	weight:           ^tensor.Tensor(T), // learnable scale parameter γ
 	bias:             ^tensor.Tensor(T), // learnable shift parameter β
 	normalized_shape: []uint, // shape of the normalization dimensions
+	num_channels:     u64,
 	eps:              T, // small constant for numerical stability
 }
 
 new_layer_norm :: proc(
 	$T: typeid,
 	normalized_shape: []uint,
+	eps: T,
 	allocator := context.allocator,
-	eps := 1e-5,
 ) -> ^Layer_Norm(T) {
 	// Create weight and bias tensors with the normalized shape
 	weight := tensor.ones(T, normalized_shape, allocator)
@@ -470,126 +472,150 @@ forward_layer_norm_1d :: proc(
 	return result
 }
 
-// SIMD-optimized LayerNorm2d
 forward_layer_norm_2d :: proc(
 	ln: ^Layer_Norm($T),
 	x: ^tensor.Tensor(T), // Expected shape: [B, C, H, W]
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) where T == f32 || T == f64 {
-	forward_layer_norm_2d_trace := trace.TRACE_FUNCTION("forward_layer_norm_2d_simd")
-	defer trace.end_scoped_trace(forward_layer_norm_2d_trace)
-
-	// Validate input
-	if len(x.shape) != 4 {
-		panic("LayerNorm2d expects 4D input [B, C, H, W]")
-	}
-
-	if len(ln.normalized_shape) != 1 || x.shape[1] != ln.normalized_shape[0] {
-		fmt.panicf("Channel mismatch: %v vs %v", x.shape[1], ln.normalized_shape[0])
-	}
-
-	b, c, h, w := x.shape[0], x.shape[1], x.shape[2], x.shape[3]
+	// return result
+	n, c, h, w := x.shape[0], x.shape[1], x.shape[2], x.shape[3]
 	spatial_size := h * w
+
+	reshaped := tensor.reshape(x, []uint{n * c, spatial_size}, context.temp_allocator)
+	spatial_ln := new_layer_norm(T, []uint{spatial_size}, ln.eps, context.temp_allocator)
+	normalized := forward_layer_norm_1d(spatial_ln, reshaped, context.temp_allocator)
+	normalized = tensor.reshape(normalized, []uint{n, c, h, w}, context.temp_allocator)
+
+	result := tensor.zeros(T, x.shape, allocator, loc)
+	when T == f32 {
+		#no_bounds_check for batch in 0 ..< n {
+			for ch in 0 ..< c {
+				weight_val := ln.weight.data[ch]
+				bias_val := ln.bias.data[ch]
+				base_idx := (batch * c + ch) * spatial_size
+
+				i := uint(0)
+				// Process 8 at a time with SIMD
+				for ; i + 8 <= spatial_size; i += 8 {
+					weight_vec := #simd[8]f32 {
+						weight_val,
+						weight_val,
+						weight_val,
+						weight_val,
+						weight_val,
+						weight_val,
+						weight_val,
+						weight_val,
+					}
+					bias_vec := #simd[8]f32 {
+						bias_val,
+						bias_val,
+						bias_val,
+						bias_val,
+						bias_val,
+						bias_val,
+						bias_val,
+						bias_val,
+					}
+
+					vals := (^#simd[8]f32)(&normalized.data[base_idx + i])^
+					results := simd.fma(vals, weight_vec, bias_vec)
+					(^#simd[8]f32)(&result.data[base_idx + i])^ = results
+				}
+
+				// Process 4 at a time
+				for ; i + 4 <= spatial_size; i += 4 {
+					weight_vec := #simd[4]f32{weight_val, weight_val, weight_val, weight_val}
+					bias_vec := #simd[4]f32{bias_val, bias_val, bias_val, bias_val}
+
+					vals := (^#simd[4]f32)(&normalized.data[base_idx + i])^
+					results := simd.fma(vals, weight_vec, bias_vec)
+					(^#simd[4]f32)(&result.data[base_idx + i])^ = results
+				}
+
+				// Scalar remainder
+				for ; i < spatial_size; i += 1 {
+					result.data[base_idx + i] =
+						normalized.data[base_idx + i] * weight_val + bias_val
+				}
+			}
+		}
+	}
+
+	return result
+}
+
+// Common convenience constructor for ViT-style LayerNorm (1D)
+new_layer_norm_1d :: proc(
+	$T: typeid,
+	embed_dim: uint,
+	eps: T,
+	allocator := context.allocator,
+) -> ^Layer_Norm(T) {
+	return new_layer_norm(T, []uint{embed_dim}, eps, allocator)
+}
+
+new_layer_norm_2d :: proc(
+	$T: typeid,
+	num_channels: uint,
+	eps: f32 = 1e-5,
+	allocator := context.allocator,
+) -> ^Layer_Norm(T) {
+	return new_layer_norm_1d(T, num_channels, eps, allocator)
+}
+
+// Based on
+// https://github.com/facebookresearch/ConvNeXt/blob/d1fa8f6fef0a165b27399986cc2bdacc92777e40/models/convnext.py#L119
+// facebook & huggingface named this LayerNorm and LayerNorm2d while in fact this is nonstandard
+// way to do layer normalization. So I created a separated struct doing different thing.
+Channel_Layer_Norm :: struct($T: typeid) {
+	weight:       ^tensor.Tensor(T), // (C,)
+	bias:         ^tensor.Tensor(T), // (C,)
+	num_channels: uint,
+	eps:          T,
+}
+
+new_channel_layer_norm :: proc(
+	$T: typeid,
+	num_channels: uint,
+	eps: T, // ConvNeXt default
+	allocator := context.allocator,
+) -> ^Channel_Layer_Norm(T) {
+	weight := tensor.ones(T, []uint{num_channels}, allocator)
+	bias := tensor.zeros(T, []uint{num_channels}, allocator)
+
+	return new_clone(
+		Channel_Layer_Norm(T) {
+			weight = weight,
+			bias = bias,
+			num_channels = num_channels,
+			eps = eps,
+		},
+		allocator,
+	)
+}
+
+forward_channel_layer_norm :: proc(
+	ln: ^Channel_Layer_Norm($T),
+	x: ^tensor.Tensor(T), // (N, C, H, W)
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^tensor.Tensor(T) {
+	// Normalizes across channels at each (n, h, w) position
+	// This is what ConvNeXt/SAM uses
+	assert(len(x.shape) == 4)
+	n, c, h, w := x.shape[0], x.shape[1], x.shape[2], x.shape[3]
 
 	result := tensor.zeros(T, x.shape, allocator, loc)
 
 	when T == f32 {
-		#no_bounds_check for batch in 0 ..< b {
-			// Process multiple spatial positions at once
-			spatial := uint(0)
-			for ; spatial + 4 <= spatial_size; spatial += 4 {
-				// Compute positions for 4 spatial locations
-				positions: [4][2]uint
-				for i in 0 ..< 4 {
-					s := spatial + uint(i)
-					positions[i][0] = s / w // h_idx
-					positions[i][1] = s % w // w_idx
-				}
-
-				// Compute means for 4 spatial positions
-				mean_vec := #simd[4]f32{0, 0, 0, 0}
-
-				for ch in 0 ..< c {
-					vals := #simd[4]f32 {
-						x.data[((batch * c + ch) * h + positions[0][0]) * w + positions[0][1]],
-						x.data[((batch * c + ch) * h + positions[1][0]) * w + positions[1][1]],
-						x.data[((batch * c + ch) * h + positions[2][0]) * w + positions[2][1]],
-						x.data[((batch * c + ch) * h + positions[3][0]) * w + positions[3][1]],
-					}
-					mean_vec = simd.add(mean_vec, vals)
-				}
-
-				c_vec := #simd[4]f32{f32(c), f32(c), f32(c), f32(c)}
-				mean_vec = simd.div(mean_vec, c_vec)
-
-				// Compute variances
-				var_vec := #simd[4]f32{0, 0, 0, 0}
-
-				for ch in 0 ..< c {
-					vals := #simd[4]f32 {
-						x.data[((batch * c + ch) * h + positions[0][0]) * w + positions[0][1]],
-						x.data[((batch * c + ch) * h + positions[1][0]) * w + positions[1][1]],
-						x.data[((batch * c + ch) * h + positions[2][0]) * w + positions[2][1]],
-						x.data[((batch * c + ch) * h + positions[3][0]) * w + positions[3][1]],
-					}
-					diff := simd.sub(vals, mean_vec)
-					var_vec = simd.fma(diff, diff, var_vec)
-				}
-
-				var_vec = simd.div(var_vec, c_vec)
-
-				// Compute inv_std
-				eps_vec := #simd[4]f32{ln.eps, ln.eps, ln.eps, ln.eps}
-				var_eps := simd.add(var_vec, eps_vec)
-				inv_std_vec := simd.div(#simd[4]f32{1, 1, 1, 1}, simd.sqrt(var_eps))
-
-				// Apply normalization
-				for ch in 0 ..< c {
-					indices: [4]uint
-					for i in 0 ..< 4 {
-						indices[i] = ((batch * c + ch) * h + positions[i][0]) * w + positions[i][1]
-					}
-
-					vals := #simd[4]f32 {
-						x.data[indices[0]],
-						x.data[indices[1]],
-						x.data[indices[2]],
-						x.data[indices[3]],
-					}
-
-					// (x - mean) * inv_std
-					normalized := simd.mul(simd.sub(vals, mean_vec), inv_std_vec)
-
-					// scale and bias
-					weight_vec := #simd[4]f32 {
-						ln.weight.data[ch],
-						ln.weight.data[ch],
-						ln.weight.data[ch],
-						ln.weight.data[ch],
-					}
-					bias_vec := #simd[4]f32 {
-						ln.bias.data[ch],
-						ln.bias.data[ch],
-						ln.bias.data[ch],
-						ln.bias.data[ch],
-					}
-
-					results := simd.fma(normalized, weight_vec, bias_vec)
-
-					// Store results
-					result.data[indices[0]] = simd.extract(results, 0)
-					result.data[indices[1]] = simd.extract(results, 1)
-					result.data[indices[2]] = simd.extract(results, 2)
-					result.data[indices[3]] = simd.extract(results, 3)
-				}
-			}
-
-			// Handle remainder spatial positions
-			for ; spatial < spatial_size; spatial += 1 {
+		#no_bounds_check for batch in 0 ..< n {
+			for spatial in 0 ..< (h * w) {
 				h_idx := spatial / w
 				w_idx := spatial % w
 
+				// Mean across channels
 				mean := f32(0)
 				for ch in 0 ..< c {
 					idx := ((batch * c + ch) * h + h_idx) * w + w_idx
@@ -597,6 +623,7 @@ forward_layer_norm_2d :: proc(
 				}
 				mean /= f32(c)
 
+				// Variance across channels
 				variance := f32(0)
 				for ch in 0 ..< c {
 					idx := ((batch * c + ch) * h + h_idx) * w + w_idx
@@ -607,6 +634,7 @@ forward_layer_norm_2d :: proc(
 
 				inv_std := f32(1) / math.sqrt(variance + ln.eps)
 
+				// Apply normalization and channel weights
 				for ch in 0 ..< c {
 					idx := ((batch * c + ch) * h + h_idx) * w + w_idx
 					normalized := (x.data[idx] - mean) * inv_std
@@ -614,32 +642,13 @@ forward_layer_norm_2d :: proc(
 				}
 			}
 		}
-	} else when T == f64 {
-		// Similar implementation with #simd[2]f64
-		// ... (following same pattern but processing 2 spatial positions at once)
-		#panic("not implemented yet")
 	}
 
 	return result
 }
 
-// Common convenience constructor for ViT-style LayerNorm (1D)
-new_layer_norm_1d :: proc(
-	$T: typeid,
-	embed_dim: uint,
-	allocator := context.allocator,
-	eps := 1e-5,
-) -> ^Layer_Norm(T) {
-	return new_layer_norm(T, []uint{embed_dim}, allocator, eps)
-}
-
-// Common convenience constructor for 2D LayerNorm (typically for spatial normalization)
-// Normalizes over spatial dimensions (H, W) for input shape (N, C, H, W)
-new_layer_norm_2d :: proc(
-	$T: typeid,
-	normalized_shape: []uint, // Typically [H, W] for spatial normalization
-	allocator := context.allocator,
-	eps := 1e-5,
-) -> ^Layer_Norm(T) {
-	return new_layer_norm(T, normalized_shape, allocator, eps)
+free_channel_layer_norm :: proc(ln: ^Channel_Layer_Norm($T), allocator := context.allocator) {
+	tensor.free_tensor(ln.weight, allocator)
+	tensor.free_tensor(ln.bias, allocator)
+	free(ln, allocator)
 }

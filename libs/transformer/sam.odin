@@ -1,5 +1,6 @@
 package transformer
 
+import st "../safetensors"
 import "../tensor"
 
 VIT_PATCH_SIZE :: 16
@@ -14,11 +15,16 @@ Sam :: struct($T: typeid) {
 }
 
 
-new_tiny :: proc($T: typeid, allocator := context.allocator) -> ^Sam(T) {
+new_tiny :: proc(
+	$T: typeid,
+	safetensors: ^st.Safe_Tensors(T),
+	allocator := context.allocator,
+) -> ^Sam(T) {
 	image_embedding_size := u64(IMAGE_SIZE / VIT_PATCH_SIZE)
-	image_encoder := new_vit_5m(T, allocator)
+	image_encoder := new_tiny_vit_5m(T, safetensors, IMAGE_SIZE, false, allocator)
 	promt_encoder := new_prompt_encoder(
 		T,
+		safetensors,
 		PROMPT_EMBED_DIM,
 		[2]u64{image_embedding_size, image_embedding_size},
 		[2]u64{IMAGE_SIZE, IMAGE_SIZE},
@@ -39,8 +45,8 @@ new_tiny :: proc($T: typeid, allocator := context.allocator) -> ^Sam(T) {
 }
 
 free_tiny :: proc(sam: ^Sam($T), allocator := context.allocator) {
-	free_prompt_encoder(sam.prompt_encoder)
-	free_image_encoder(sam.image_encoder)
+	free_prompt_encoder(sam.prompt_encoder, allocator)
+	free_image_encoder(sam.image_encoder, allocator)
 
 	// free image encoder
 	// TODO
@@ -49,7 +55,7 @@ free_tiny :: proc(sam: ^Sam($T), allocator := context.allocator) {
 	// TODO
 
 	// free tensors
-	// tensor.tensor_free(sam.pixel_mean, sam.pixel_std)
+	// TODO tensor.tensor_free(sam.pixel_mean, sam.pixel_std)
 
 	free(sam, allocator)
 }

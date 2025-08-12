@@ -174,7 +174,7 @@ forward_conv_2d_bn :: proc(
 }
 
 free_conv_2d_bn :: proc(layer: ^Conv_2d_BN($T), allocator := context.allocator) {
-	nn.free_conv_2d(layer.conv, allocator)
+	nn.free_conv2d(layer.conv, allocator)
 	nn.free_batch_norm_2d(layer.bn, allocator)
 	free(layer, allocator)
 }
@@ -489,7 +489,7 @@ new_attention :: proc(
 	nh_kd := key_dim * num_heads
 	h := dh + nh_kd * 2 // query + key + value
 
-	norm := nn.new_layer_norm_1d(T, dim, allocator)
+	norm := nn.new_layer_norm_1d(T, dim, 1e-5, allocator)
 	vb_assignt_to_tensor(vb, "norm.weight", norm.weight)
 	vb_assignt_to_tensor(vb, "norm.bias", norm.bias)
 
@@ -851,7 +851,7 @@ new_mlp :: proc(
 	init := true,
 	allocator := context.allocator,
 ) -> ^Mlp(T) {
-	norm := nn.new_layer_norm_1d(T, in_features, allocator)
+	norm := nn.new_layer_norm_1d(T, in_features, 1e-5, allocator)
 	vb_assignt_to_tensor(vb, "norm.weight", norm.weight)
 	vb_assignt_to_tensor(vb, "norm.bias", norm.bias)
 
@@ -1230,7 +1230,7 @@ Tiny_ViT_5m :: struct($T: typeid) {
 	layer0:                 ^Conv_Layer(T),
 	layers:                 []^Basic_Layer(T),
 	neck_conv1, neck_conv2: ^nn.Conv_2d(T),
-	neck_ln1, neck_ln2:     ^nn.Layer_Norm(T),
+	neck_ln1, neck_ln2:     ^nn.Channel_Layer_Norm(T),
 }
 
 
@@ -1315,7 +1315,7 @@ new_tiny_vit_5m :: proc(
 	// LayerNorm2d expects spatial dimensions based on final output
 	// Final spatial dimension after all downsampling: input_size / 4 / (1 << min(3,2)) = input_size / 16
 	final_spatial_dim := uint(input_size / 16)
-	neck_ln1 := nn.new_layer_norm_2d(T, {256}, allocator)
+	neck_ln1 := nn.new_channel_layer_norm(T, 256, 1e-5, allocator)
 	vb_assignt_to_tensor(&vb_root, "neck.1.weight", neck_ln1.weight)
 	vb_assignt_to_tensor(&vb_root, "neck.1.bias", neck_ln1.bias)
 
@@ -1334,7 +1334,7 @@ new_tiny_vit_5m :: proc(
 	)
 	vb_assignt_to_tensor(&vb_root, "neck.2.weight", neck_conv2.w)
 
-	neck_ln2 := nn.new_layer_norm_2d(T, []uint{256}, allocator)
+	neck_ln2 := nn.new_channel_layer_norm(T, 256, 1e-5, allocator)
 	vb_assignt_to_tensor(&vb_root, "neck.3.weight", neck_ln2.weight)
 	vb_assignt_to_tensor(&vb_root, "neck.3.bias", neck_ln2.bias)
 
@@ -1421,9 +1421,9 @@ free_tiny_vit_5m :: proc(model: ^Tiny_ViT_5m($T), allocator := context.allocator
 	}
 	delete(model.layers, allocator)
 
-	nn.free_conv_2d(model.neck_conv1, allocator)
-	nn.free_layer_norm(model.neck_ln1, allocator)
-	nn.free_conv_2d(model.neck_conv2, allocator)
-	nn.free_layer_norm(model.neck_ln2, allocator)
+	nn.free_conv2d(model.neck_conv1, allocator)
+	nn.free_channel_layer_norm(model.neck_ln1, allocator)
+	nn.free_conv2d(model.neck_conv2, allocator)
+	nn.free_channel_layer_norm(model.neck_ln2, allocator)
 	free(model, allocator)
 }

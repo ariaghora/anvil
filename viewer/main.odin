@@ -69,7 +69,7 @@ main :: proc() {
 	nctx := nui.create_context(&renderer)
 	defer nui.destroy_context(nctx)
 
-	file_name_left := "tensorgen/safetensors/patch_embedding_odin.safetensors"
+	file_name_left := "models/patch_embedding_odin.safetensors"
 	safetensors_left, err_st_l := st.read_from_file(f32, file_name_left)
 	if err_st_l != nil do fmt.println(err_st_l)
 	assert(err_st_l == nil)
@@ -77,7 +77,7 @@ main :: proc() {
 	tensor_names_left, _ := slice.map_keys(safetensors_left.tensors, context.temp_allocator)
 	slice.sort(tensor_names_left[:])
 
-	file_name_right := "tensorgen/safetensors/patch_embedding.safetensors"
+	file_name_right := "models/patch_embedding.safetensors"
 	safetensors_right, err_st_r := st.read_from_file(f32, file_name_right)
 	assert(err_st_r == nil)
 	defer st.free_safe_tensors(safetensors_right)

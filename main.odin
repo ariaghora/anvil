@@ -26,21 +26,24 @@ main :: proc() {
 	main_trace := trace.TRACE_FUNCTION("main")
 	defer trace.end_scoped_trace(main_trace)
 
-
 	model_file := "models/mobile_sam-tiny-vitt.safetensors"
 	safetensors, err_st_load := st.read_from_file(f32, model_file, arena_alloc)
 	assert(err_st_load == nil)
 
 	model_init_trace := trace.TRACE_SECTION("model_initialization")
-	vit := tf.new_tiny_vit_5m(f32, safetensors, IMAGE_SIZE, false, arena_alloc)
+	sam := tf.new_tiny(f32, safetensors, arena_alloc)
+	defer tf.free_tiny(sam, arena_alloc)
+	vit := sam.image_encoder.(^tf.Tiny_ViT_5m(f32))
 	trace.end_scoped_trace(model_init_trace)
 
 	input_st, err_in_st := st.read_from_file(
 		f32,
-		"tensorgen/safetensors/image.safetensors",
+		"models/image.safetensors",
 		context.temp_allocator,
 	)
-	assert(err_in_st == nil)
+	if err_in_st != nil {
+		fmt.panicf("cannot set tensors: %v\n", err_in_st)
+	}
 	input := input_st.tensors["image"]
 
 	// Patch embedding
@@ -71,9 +74,9 @@ main :: proc() {
 	layers_4d := tensor.reshape(layers, []uint{b, spatial_dim, spatial_dim, c}, talloc)
 	layers_conv := tensor.permute(layers_4d, []uint{0, 3, 1, 2}, talloc)
 	neck_conv1 := nn.forward_conv2d(vit.neck_conv1, layers_conv, talloc)
-	neck_ln1 := nn.forward_layer_norm_2d(vit.neck_ln1, neck_conv1, talloc)
+	neck_ln1 := nn.forward_channel_layer_norm(vit.neck_ln1, neck_conv1, talloc)
 	neck_conv2 := nn.forward_conv2d(vit.neck_conv2, neck_ln1, talloc)
-	neck_ln2 := nn.forward_layer_norm_2d(vit.neck_ln2, neck_conv2, talloc)
+	neck_ln2 := nn.forward_channel_layer_norm(vit.neck_ln2, neck_conv2, talloc)
 
 	fmt.println("inference time:", time.since(t))
 
@@ -91,7 +94,7 @@ main :: proc() {
 
 	err_st_wr := st.write_tensors_to_file(
 		&st.Safe_Tensors(f32){tensors = output_tensors},
-		"tensorgen/safetensors/patch_embedding_odin.safetensors",
+		"models/patch_embedding_odin.safetensors",
 	)
 	assert(err_st_wr == nil)
 
