@@ -3,6 +3,7 @@ package transformer
 import "../nn"
 import st "../safetensors"
 import "../tensor"
+import "core:fmt"
 
 NUM_POINTS_EMBEDDINGS :: 4
 
@@ -12,7 +13,7 @@ Position_Embedding_Random :: struct($T: typeid) {
 
 Prompt_Encoder :: struct($T: typeid) {
 	pe_layer:               ^Position_Embedding_Random(T),
-	point_embeddings:       []^nn.Embedding(T),
+	point_embeddings:       [dynamic]^nn.Embedding(T),
 	not_a_point_embed:      ^nn.Embedding(T),
 	mask_downscaling_conv1: ^nn.Conv_2d(T),
 	mask_downscaling_conv2: ^nn.Conv_2d(T),
@@ -98,17 +99,40 @@ new_prompt_encoder :: proc(
 	vb_assignt_to_tensor(&vb_prompt_encoder, "mask_downscaling.6.weight", mask_downscaling_conv3.w)
 	vb_assignt_to_tensor(&vb_prompt_encoder, "mask_downscaling.6.bias", mask_downscaling_conv3.b.?)
 
-	mask_downscaling_ln1 := nn.new_channel_layer_norm(T, uint(mask_in_chans / 4), 1e-6)
+	mask_downscaling_ln1 := nn.new_channel_layer_norm(T, uint(mask_in_chans / 4), 1e-6, allocator)
+	vb_assignt_to_tensor(
+		&vb_prompt_encoder,
+		"mask_downscaling.1.weight",
+		mask_downscaling_ln1.weight,
+	)
+
+	mask_downscaling_ln2 := nn.new_channel_layer_norm(T, uint(mask_in_chans), 1e-6, allocator)
+	vb_assignt_to_tensor(
+		&vb_prompt_encoder,
+		"mask_downscaling.4.weight",
+		mask_downscaling_ln2.weight,
+	)
+
+	point_embeddings: [dynamic]^nn.Embedding(T)
+	for i in 0 ..< NUM_POINTS_EMBEDDINGS {
+		emb := nn.new_embedding(T, 1, uint(embed_dim), true, allocator)
+		vb_assignt_to_tensor(
+			&vb_prompt_encoder,
+			fmt.tprintf("point_embeddings.%d.weight", i),
+			emb.weight,
+		)
+		append(&point_embeddings, emb)
+	}
 
 	pe := new_clone(
 		Prompt_Encoder(T) {
 			pe_layer = pe_layer,
-			point_embeddings = nil,
+			point_embeddings = point_embeddings,
 			not_a_point_embed = not_a_point_embed,
 			mask_downscaling_conv1 = mask_downscaling_conv1,
-			mask_downscaling_ln1 = nil,
+			mask_downscaling_ln1 = mask_downscaling_ln1,
 			mask_downscaling_conv2 = mask_downscaling_conv2,
-			mask_downscaling_ln2 = nil,
+			mask_downscaling_ln2 = mask_downscaling_ln2,
 			mask_downscaling_conv3 = mask_downscaling_conv3,
 			no_mask_embed = no_mask_embed,
 			image_embedding_size = image_embedding_size,
@@ -127,5 +151,12 @@ free_prompt_encoder :: proc(pe: ^Prompt_Encoder($T), allocator := context.alloca
 	nn.free_conv2d(pe.mask_downscaling_conv1, allocator)
 	nn.free_conv2d(pe.mask_downscaling_conv2, allocator)
 	nn.free_conv2d(pe.mask_downscaling_conv3, allocator)
+	nn.free_channel_layer_norm(pe.mask_downscaling_ln1, allocator)
+	nn.free_channel_layer_norm(pe.mask_downscaling_ln2, allocator)
+	for e in pe.point_embeddings {
+		nn.free_embedding(e, allocator)
+	}
+	delete(pe.point_embeddings)
+
 	free(pe, allocator)
 }
