@@ -19,8 +19,10 @@ pe_encoding :: proc(
 	coords: ^tensor.Tensor(T),
 	allocator := context.allocator,
 ) -> ^tensor.Tensor(T) {
+	talloc := context.temp_allocator
+
 	// coords = coords * 2 - 1 (affine transformation)
-	coords_transformed := tensor.clone(coords, allocator)
+	coords_transformed := tensor.clone(coords, talloc)
 	for v, i in coords_transformed.data {
 		coords_transformed.data[i] = coords_transformed.data[i] * 2 - 1
 	}
@@ -29,20 +31,16 @@ pe_encoding :: proc(
 	coords_encoded := tensor.matmul(
 		coords_transformed,
 		pe.positional_encoding_gaussian_matrix,
-		allocator,
+		talloc,
 	)
-	defer tensor.free_tensor(coords_transformed, allocator)
 
 	// Multiply by 2π
-	two_pi := tensor.new_with_init([]T{T(2 * math.PI)}, []uint{}, allocator)
-	coords_scaled_pi := tensor.mul(coords_encoded, two_pi, allocator)
-	defer tensor.free_tensor(coords_encoded, allocator)
-	defer tensor.free_tensor(two_pi, allocator)
+	two_pi := tensor.new_with_init([]T{T(2 * math.PI)}, []uint{}, talloc)
+	coords_scaled_pi := tensor.mul(coords_encoded, two_pi, talloc)
 
 	// Get sin and cos
-	sin_coords := tensor.sin(coords_scaled_pi, allocator)
-	cos_coords := tensor.cos(coords_scaled_pi, allocator)
-	defer tensor.free_tensor(coords_scaled_pi, allocator)
+	sin_coords := tensor.sin(coords_scaled_pi, talloc)
+	cos_coords := tensor.cos(coords_scaled_pi, talloc)
 
 	// Concatenate along last dimension
 	result := tensor.cat(
@@ -50,9 +48,6 @@ pe_encoding :: proc(
 		uint(len(coords.shape) - 1),
 		allocator,
 	)
-
-	tensor.free_tensor(sin_coords, allocator)
-	tensor.free_tensor(cos_coords, allocator)
 
 	return result
 }
@@ -62,40 +57,28 @@ forward_position_embedding :: proc(
 	h, w: uint,
 	allocator := context.allocator,
 ) -> ^tensor.Tensor(T) {
+	talloc := context.temp_allocator
+
 	// Create x coordinates: [0, 1, ..., w-1] + 0.5
-	x_embed_norm := tensor.arange(T, w, allocator)
+	x_embed_norm := tensor.arange(T, w, talloc)
 	for v, i in x_embed_norm.data do x_embed_norm.data[i] = (v + T(0.5)) / T(w)
-	// Reshape to (1, w) then broadcast to (h, w)
+
 	x_embed_reshaped := tensor.reshape(x_embed_norm, []uint{1, w}, allocator)
-	x_embed_broadcast := tensor.broadcast_as(x_embed_reshaped, []uint{h, w}, allocator)
-	defer tensor.free_tensor(x_embed_norm, allocator)
-	defer tensor.free_tensor(x_embed_reshaped, allocator)
+	x_embed_broadcast := tensor.broadcast_as(x_embed_reshaped, []uint{h, w}, talloc)
 
 	// Create y coordinates similarly
-	y_embed_norm := tensor.arange(T, h, allocator)
+	y_embed_norm := tensor.arange(T, h, talloc)
 	for v, i in y_embed_norm.data do y_embed_norm.data[i] = (v + T(0.5)) / T(h)
-	// Reshape to (h, 1) then broadcast to (h, w)
-	y_embed_reshaped := tensor.reshape(y_embed_norm, []uint{h, 1}, allocator)
-	y_embed_broadcast := tensor.broadcast_as(y_embed_reshaped, []uint{h, w}, allocator)
-	defer tensor.free_tensor(y_embed_norm, allocator)
-	defer tensor.free_tensor(y_embed_reshaped, allocator)
-
-	// Stack along last dimension to get (h, w, 2)
+	y_embed_reshaped := tensor.reshape(y_embed_norm, []uint{h, 1}, talloc)
+	y_embed_broadcast := tensor.broadcast_as(y_embed_reshaped, []uint{h, w}, talloc)
 	coords := tensor.stack(
 		[]^tensor.Tensor(T){x_embed_broadcast, y_embed_broadcast},
 		2, // last axis
-		allocator,
+		talloc,
 	)
-	defer tensor.free_tensor(x_embed_broadcast, allocator)
-	defer tensor.free_tensor(y_embed_broadcast, allocator)
 
-	// Apply PE encoding
-	encoded := pe_encoding(pe, coords, allocator)
-	defer tensor.free_tensor(coords, allocator)
-
-	// Permute from (h, w, C) to (C, h, w)
+	encoded := pe_encoding(pe, coords, talloc)
 	result := tensor.permute(encoded, []uint{2, 0, 1}, allocator)
-	tensor.free_tensor(encoded, allocator)
 
 	return result
 }

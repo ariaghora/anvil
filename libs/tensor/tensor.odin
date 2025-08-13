@@ -790,7 +790,6 @@ matmul :: proc(
 	if !broadcastable {
 		panic("Batch dimensions cannot be broadcasted")
 	}
-	defer delete(result_batch, context.temp_allocator)
 
 	// Construct result shape: [...batch_dims, m, n]
 	result_shape := make([]uint, len(result_batch) + 2, allocator, loc)
@@ -810,8 +809,6 @@ matmul :: proc(
 	// Compute broadcasted strides for batch dimensions
 	a_full_batch := make([]uint, len(result_batch), context.temp_allocator)
 	b_full_batch := make([]uint, len(result_batch), context.temp_allocator)
-	// defer delete(a_full_batch, context.temp_allocator)
-	// defer delete(b_full_batch, context.temp_allocator)
 
 	// Pad batch dimensions with 1s if needed for stride calculation
 	if len(a_batch) < len(result_batch) {
@@ -835,8 +832,6 @@ matmul :: proc(
 	// Create temporary strides for batch dimensions only
 	a_batch_strides := make([]uint, len(result_batch), context.temp_allocator)
 	b_batch_strides := make([]uint, len(result_batch), context.temp_allocator)
-	defer delete(a_batch_strides, context.temp_allocator)
-	defer delete(b_batch_strides, context.temp_allocator)
 
 	// Compute strides for batch dimensions manually
 	if len(result_batch) > 0 {
@@ -868,7 +863,6 @@ matmul :: proc(
 	for batch_idx in 0 ..< batch_size {
 		// Calculate batch indices
 		batch_indices := make([]uint, len(result_batch), context.temp_allocator)
-		defer delete(batch_indices, context.temp_allocator)
 
 		temp_idx := batch_idx
 		for dim := len(result_batch) - 1; dim >= 0; dim -= 1 {
@@ -1074,18 +1068,39 @@ cat :: proc(
 	}
 	output_shape[dim] = total_dim_size
 
-	// Create output tensor
 	result := tensor_alloc(T, output_shape, true, allocator, loc)
 
-	// Copy data from each tensor
-	offset: uint = 0
-	for tensor in tensors {
-		tensor_data, allocated := get_strided_data(tensor, allocator = context.temp_allocator)
-		defer if allocated do delete(tensor_data, context.temp_allocator)
+	// Get all strided data upfront
+	tensor_datas := make([][]T, len(tensors), context.temp_allocator)
 
-		tensor_size := shape_to_size(tensor.shape)
-		copy(result.data[offset:offset + tensor_size], tensor_data)
-		offset += tensor_size
+	for tensor, i in tensors {
+		tensor_datas[i], _ = get_strided_data(tensor, allocator = context.temp_allocator)
+	}
+
+	// Calculate sizes for proper copying
+	outer_size := uint(1)
+	for i in 0 ..< dim {
+		outer_size *= first.shape[i]
+	}
+
+	inner_size := uint(1)
+	for i in dim + 1 ..< uint(len(first.shape)) {
+		inner_size *= first.shape[i]
+	}
+
+	// Copy with correct interleaving
+	result_offset := uint(0)
+	for outer in 0 ..< outer_size {
+		for tensor, tensor_idx in tensors {
+			chunk_size := tensor.shape[dim] * inner_size
+			src_offset := outer * chunk_size
+
+			copy(
+				result.data[result_offset:result_offset + chunk_size],
+				tensor_datas[tensor_idx][src_offset:src_offset + chunk_size],
+			)
+			result_offset += chunk_size
+		}
 	}
 
 	return result
@@ -1104,6 +1119,7 @@ stack :: proc(tensors: []^Tensor($T), axis: int, allocator := context.allocator)
 		panic("Cannot stack empty tensor list")
 	}
 
+	// All tensors must have same shape
 	first_shape := tensors[0].shape
 	for t in tensors[1:] {
 		if !slice.equal(t.shape, first_shape) {
@@ -1123,6 +1139,13 @@ stack :: proc(tensors: []^Tensor($T), axis: int, allocator := context.allocator)
 
 	result := tensor_alloc(T, new_shape, true, allocator)
 
+	// Get all strided data upfront
+	tensor_datas := make([][]T, len(tensors), context.temp_allocator)
+
+	for tensor, i in tensors {
+		tensor_datas[i], _ = get_strided_data(tensor, allocator = context.temp_allocator)
+	}
+
 	// Calculate sizes for proper striding
 	outer_size := uint(1)
 	for i in 0 ..< axis {
@@ -1137,12 +1160,11 @@ stack :: proc(tensors: []^Tensor($T), axis: int, allocator := context.allocator)
 	// Copy data with correct interleaving
 	result_offset := uint(0)
 	for outer in 0 ..< outer_size {
-		for tensor, tensor_idx in tensors {
-			t_data, _ := get_strided_data(tensor, allocator = context.temp_allocator)
+		for tensor_idx in 0 ..< len(tensors) {
 			src_offset := outer * inner_size
 			copy(
 				result.data[result_offset:result_offset + inner_size],
-				t_data[src_offset:src_offset + inner_size],
+				tensor_datas[tensor_idx][src_offset:src_offset + inner_size],
 			)
 			result_offset += inner_size
 		}
@@ -1172,7 +1194,6 @@ broadcast_as :: proc(
 		tensor.strides,
 		context.temp_allocator,
 	)
-	defer delete(broadcast_strides, context.temp_allocator)
 
 	// Fill result using broadcast indexing
 	total_elements := shape_to_size(target_shape)
@@ -1182,4 +1203,133 @@ broadcast_as :: proc(
 	}
 
 	return result
+}
+
+Range :: struct {
+	start: int,
+	end:   int,
+	step:  int,
+}
+
+slice :: proc(input: ^Tensor($T), ranges: []Range, allocator := context.allocator) -> ^Tensor(T) {
+	rank := len(input.shape)
+	assert(len(ranges) == rank, "ranges must match tensor rank")
+
+	output_shape := make([]uint, rank, allocator)
+	actual_starts := make([]int, rank, context.temp_allocator)
+	actual_steps := make([]int, rank, context.temp_allocator)
+
+	for i in 0 ..< rank {
+		r := ranges[i]
+		dim_size := int(input.shape[i])
+
+		start := r.start
+		end := r.end if r.end != 0 else dim_size
+		step := r.step if r.step != 0 else 1
+
+		if step < 0 {
+			panic("Negative steps not supported")
+		}
+
+		if start < 0 do start += dim_size
+		if end < 0 do end += dim_size
+
+		start = max(0, min(start, dim_size - 1))
+		end = max(0, min(end, dim_size))
+
+		slice_length := (end - start + step - 1) / step
+		output_shape[i] = uint(max(0, slice_length))
+
+		actual_starts[i] = start
+		actual_steps[i] = step
+	}
+
+	output := tensor_alloc(T, output_shape, true, allocator)
+
+	// Find the innermost contiguous dimensions (where step=1)
+	contiguous_dims := rank
+	for i := rank - 1; i >= 0; i -= 1 {
+		if actual_steps[i] != 1 {
+			contiguous_dims = i + 1
+			break
+		}
+	}
+
+	// Calculate sizes
+	contiguous_size := uint(1)
+	for i in contiguous_dims ..< rank {
+		contiguous_size *= output_shape[i]
+	}
+
+	outer_size := uint(1)
+	for i in 0 ..< contiguous_dims {
+		outer_size *= output_shape[i]
+	}
+
+	// Calculate strides for input
+	input_strides := make([]uint, rank, context.temp_allocator)
+	input_strides[rank - 1] = 1
+	for i := rank - 2; i >= 0; i -= 1 {
+		input_strides[i] = input_strides[i + 1] * input.shape[i + 1]
+	}
+
+	if contiguous_size > 1 {
+		// Fast path: copy contiguous chunks
+		output_offset := uint(0)
+		outer_indices := make([]int, contiguous_dims, context.temp_allocator)
+
+		for _ in 0 ..< outer_size {
+			// Calculate input offset for this outer position
+			input_offset := uint(0)
+			for i in 0 ..< contiguous_dims {
+				input_idx := actual_starts[i] + outer_indices[i] * actual_steps[i]
+				input_offset += uint(input_idx) * input_strides[i]
+			}
+			// Add offset for the start of contiguous dimensions
+			for i in contiguous_dims ..< rank {
+				input_offset += uint(actual_starts[i]) * input_strides[i]
+			}
+
+			// Copy the contiguous chunk
+			copy(
+				output.data[output_offset:output_offset + contiguous_size],
+				input.data[input_offset:input_offset + contiguous_size],
+			)
+			output_offset += contiguous_size
+
+			// Update outer indices
+			for j := contiguous_dims - 1; j >= 0; j -= 1 {
+				outer_indices[j] += 1
+				if outer_indices[j] < int(output_shape[j]) do break
+				outer_indices[j] = 0
+			}
+		}
+	} else {
+		// Slow path: everything is strided, copy element by element
+		output_indices := make([]int, rank, context.temp_allocator)
+		output_flat_idx := uint(0)
+
+		for {
+			// Calculate input index from output index
+			input_flat_idx := uint(0)
+			for i in 0 ..< rank {
+				input_idx := actual_starts[i] + output_indices[i] * actual_steps[i]
+				input_flat_idx += uint(input_idx) * input_strides[i]
+			}
+
+			output.data[output_flat_idx] = input.data[input_flat_idx]
+			output_flat_idx += 1
+
+			// Update output indices
+			j := rank - 1
+			for ; j >= 0; j -= 1 {
+				output_indices[j] += 1
+				if output_indices[j] < int(output_shape[j]) do break
+				output_indices[j] = 0
+			}
+			if j < 0 do break
+		}
+	}
+
+	return output
 }

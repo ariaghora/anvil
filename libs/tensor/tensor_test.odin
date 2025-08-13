@@ -616,3 +616,32 @@ test_contiguousness_edge_cases :: proc(t: ^testing.T) {
 		)
 	}
 }
+
+@(test)
+test_stack :: proc(t: ^testing.T) {
+	// Create two 2x3 tensors for easy verification
+	a_data := []i32{1, 2, 3, 4, 5, 6}
+	b_data := []i32{7, 8, 9, 10, 11, 12}
+
+	a := tensor_alloc(i32, {2, 3}, true, context.temp_allocator)
+	copy(a.data, a_data)
+	b := tensor_alloc(i32, {2, 3}, true, context.temp_allocator)
+	copy(b.data, b_data)
+
+	// Stack on axis 0 - should give (2,2,3)
+	s0 := stack([]^Tensor(i32){a, b}, 0, context.temp_allocator)
+	testing.expect(t, slice.equal(s0.shape, []uint{2, 2, 3}))
+	// Should be [1,2,3,4,5,6,7,8,9,10,11,12]
+	testing.expect(t, slice.equal(s0.data, []i32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}))
+
+	// Stack on axis 1 - should give (2,2,3)  
+	s1 := stack([]^Tensor(i32){a, b}, 1, context.temp_allocator)
+	testing.expect(t, slice.equal(s1.shape, []uint{2, 2, 3}))
+	// Should be [1,2,3,7,8,9,4,5,6,10,11,12]
+	testing.expect(t, slice.equal(s1.data, []i32{1, 2, 3, 7, 8, 9, 4, 5, 6, 10, 11, 12}))
+
+	// Stack on axis 2 - should give (2,3,2)
+	s2 := stack([]^Tensor(i32){a, b}, 2, context.temp_allocator)
+	testing.expect(t, slice.equal(s2.shape, []uint{2, 3, 2}))
+	testing.expect(t, slice.equal(s2.data, []i32{1, 7, 2, 8, 3, 9, 4, 10, 5, 11, 6, 12}))
+}

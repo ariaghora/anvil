@@ -77,27 +77,17 @@ main :: proc() {
 	neck_ln1 := nn.forward_channel_layer_norm(vit.neck_ln1, neck_conv1, talloc)
 	neck_conv2 := nn.forward_conv2d(vit.neck_conv2, neck_ln1, talloc)
 	neck_ln2 := nn.forward_channel_layer_norm(vit.neck_ln2, neck_conv2, talloc)
-	fmt.println("inference time:", time.since(t))
+	fmt.println("inference time phase 1:", time.since(t))
 
-	image_pe := tf.forward_position_embedding(
+	t = time.now()
+	pe_final := tf.forward_position_embedding(
 		sam.prompt_encoder.pe_layer,
 		uint(sam.prompt_encoder.image_embedding_size[0]),
 		uint(sam.prompt_encoder.image_embedding_size[1]),
 		talloc,
 	)
-	// pe coords
-	w, h := sam.prompt_encoder.input_image_size[0], sam.prompt_encoder.input_image_size[1]
-	x_embed_norm := tensor.arange(f32, uint(w), talloc)
-	for v, i in x_embed_norm.data do x_embed_norm.data[i] = (v + 0.5) / f32(w)
-	x_embed_reshaped := tensor.reshape(x_embed_norm, {1, uint(w)}, talloc)
-	x_embed_broadcast := tensor.broadcast_as(x_embed_reshaped, {uint(h), uint(w)}, talloc)
-	y_embed_norm := tensor.arange(f32, uint(h), talloc)
-	for v, i in y_embed_norm.data do y_embed_norm.data[i] = (v + 0.5) / f32(h)
-	y_embed_reshaped := tensor.reshape(y_embed_norm, []uint{uint(h), 1}, talloc)
-	y_embed_broadcast := tensor.broadcast_as(y_embed_reshaped, {uint(h), uint(w)}, talloc)
-	coords := tensor.stack([]^tensor.Tensor(f32){x_embed_broadcast, y_embed_broadcast}, 2, talloc)
-	// coords = tensor.permute(coords, {2, 0, 1}, talloc)
-	// pe encoding
+
+	fmt.println("inference time phase 2:", time.since(t))
 
 	output_tensors := make(map[string]^tensor.Tensor(f32), context.temp_allocator)
 	map_insert(&output_tensors, "1-input", input)
@@ -110,9 +100,7 @@ main :: proc() {
 	map_insert(&output_tensors, "8-neck_ln1", neck_ln1)
 	map_insert(&output_tensors, "9-neck_conv2", neck_conv2)
 	map_insert(&output_tensors, "10-neck_ln2", neck_ln2)
-	map_insert(&output_tensors, "pr_en_1-pe_x_embed", x_embed_broadcast)
-	map_insert(&output_tensors, "pr_en_2-pe_y_embed", y_embed_broadcast)
-	map_insert(&output_tensors, "pr_en_3-coords", coords)
+	map_insert(&output_tensors, "pr_en_7-pe_final", pe_final)
 
 	err_st_wr := st.write_tensors_to_file(
 		&st.Safe_Tensors(f32){tensors = output_tensors},
