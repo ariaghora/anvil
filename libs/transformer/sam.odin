@@ -45,11 +45,10 @@ new_tiny :: proc(
 }
 
 free_tiny :: proc(sam: ^Sam($T), allocator := context.allocator) {
-	free_prompt_encoder(sam.prompt_encoder, allocator)
-	free_image_encoder(sam.image_encoder, allocator)
 
 	// free image encoder
-	// TODO
+	free_image_encoder(sam.image_encoder, allocator)
+	free_prompt_encoder(sam.prompt_encoder, allocator)
 
 	// free mask decoder
 	// TODO

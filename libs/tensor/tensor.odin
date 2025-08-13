@@ -1090,3 +1090,96 @@ cat :: proc(
 
 	return result
 }
+
+arange :: proc($T: typeid, n: uint, allocator := context.allocator) -> ^Tensor(T) {
+	result := tensor_alloc(T, []uint{n}, true, allocator)
+	for i in 0 ..< n {
+		result.data[i] = T(i)
+	}
+	return result
+}
+
+stack :: proc(tensors: []^Tensor($T), axis: int, allocator := context.allocator) -> ^Tensor(T) {
+	if len(tensors) == 0 {
+		panic("Cannot stack empty tensor list")
+	}
+
+	first_shape := tensors[0].shape
+	for t in tensors[1:] {
+		if !slice.equal(t.shape, first_shape) {
+			panic("All tensors must have same shape for stack")
+		}
+	}
+
+	// Create new shape with extra dimension
+	new_shape := make([]uint, len(first_shape) + 1, allocator)
+	for i in 0 ..< axis {
+		new_shape[i] = first_shape[i]
+	}
+	new_shape[axis] = uint(len(tensors))
+	for i in axis ..< len(first_shape) {
+		new_shape[i + 1] = first_shape[i]
+	}
+
+	result := tensor_alloc(T, new_shape, true, allocator)
+
+	// Calculate sizes for proper striding
+	outer_size := uint(1)
+	for i in 0 ..< axis {
+		outer_size *= first_shape[i]
+	}
+
+	inner_size := uint(1)
+	for i in axis ..< len(first_shape) {
+		inner_size *= first_shape[i]
+	}
+
+	// Copy data with correct interleaving
+	result_offset := uint(0)
+	for outer in 0 ..< outer_size {
+		for tensor, tensor_idx in tensors {
+			t_data, _ := get_strided_data(tensor, allocator = context.temp_allocator)
+			src_offset := outer * inner_size
+			copy(
+				result.data[result_offset:result_offset + inner_size],
+				t_data[src_offset:src_offset + inner_size],
+			)
+			result_offset += inner_size
+		}
+	}
+
+	return result
+}
+
+broadcast_as :: proc(
+	tensor: ^Tensor($T),
+	target_shape: []uint,
+	allocator := context.allocator,
+) -> ^Tensor(T) {
+	// Check if shapes are broadcastable
+	_, broadcastable := shape_broadcastable(tensor.shape, target_shape, allocator)
+	if !broadcastable {
+		panic("Cannot broadcast to target shape")
+	}
+
+	// Create result with target shape
+	result := tensor_alloc(T, target_shape, true, allocator)
+
+	// Compute broadcast strides
+	broadcast_strides := broadcast_strides(
+		tensor.shape,
+		target_shape,
+		tensor.strides,
+		context.temp_allocator,
+	)
+	defer delete(broadcast_strides, context.temp_allocator)
+
+	// Fill result using broadcast indexing
+	total_elements := shape_to_size(target_shape)
+	for i in 0 ..< total_elements {
+		src_idx := compute_strided_index(target_shape, broadcast_strides, i)
+		result.data[i] = tensor.data[src_idx]
+	}
+
+	return result
+}

@@ -587,6 +587,8 @@ UnaryOp :: enum {
 	RELU, // ReLU: max(x, 0)
 	GELU, // GELU activation function
 	SQRT, // Square root: sqrt(x)
+	SIN,
+	COS,
 }
 
 // Individual operation implementations - forced inline for zero overhead
@@ -610,6 +612,16 @@ unary_gelu :: #force_inline proc($T: typeid, x: T) -> T where T == f32 || T == f
 @(private)
 unary_sqrt :: #force_inline proc($T: typeid, x: T) -> T where T == f32 || T == f64 || T == f16 {
 	return math.sqrt(x)
+}
+
+@(private)
+unary_sin :: #force_inline proc($T: typeid, x: T) -> T where T == f32 || T == f64 || T == f16 {
+	return math.sin(x)
+}
+
+@(private)
+unary_cos :: #force_inline proc($T: typeid, x: T) -> T where T == f32 || T == f64 || T == f16 {
+	return math.cos(x)
 }
 
 // Generic elementwise unary operation with compile-time specialization
@@ -639,6 +651,18 @@ elementwise_unary_op :: proc(
 			} else {
 				panic("SQRT only supports f16, f32, f64")
 			}
+		case .SIN:
+			when T == f32 || T == f64 || T == f16 {
+				result.data[i] = unary_sin(T, tensor.data[i])
+			} else {
+				panic("SIN only supports floating point types")
+			}
+		case .COS:
+			when T == f32 || T == f64 || T == f16 {
+				result.data[i] = unary_cos(T, tensor.data[i])
+			} else {
+				panic("COS only supports floating point types")
+			}
 		}
 	}
 
@@ -665,6 +689,23 @@ relu :: proc(
 	return elementwise_unary_op(tensor, .RELU, allocator, loc)
 }
 
+sin :: proc(
+	tensor: ^Tensor($T),
+	allocator := context.allocator,
+) -> ^Tensor(T) where T == f32 ||
+	T == f64 ||
+	T == f16 {
+	return elementwise_unary_op(tensor, .SIN, allocator)
+}
+
+cos :: proc(
+	tensor: ^Tensor($T),
+	allocator := context.allocator,
+) -> ^Tensor(T) where T == f32 ||
+	T == f64 ||
+	T == f16 {
+	return elementwise_unary_op(tensor, .COS, allocator)
+}
 
 // GELU activation function - only supports floating point types
 gelu :: proc(

@@ -272,12 +272,14 @@ draw_ui :: proc(app: ^App, ctx: ^nui.UI_Context, input: nui.UI_Input) {
 
 update_current_tensor_texture :: proc(pane: ^Pane) -> bool {
 	if t := pane.tensors.tensors[pane.selected_tensor_name]; t != nil {
-		if len(t.shape) >= 3 && len(t.shape) <= 4 {
+		if len(t.shape) >= 2 && len(t.shape) <= 4 {
 			b, c, h, w: uint
 			if len(t.shape) == 4 {
 				b, c, h, w = t.shape[0], t.shape[1], t.shape[2], t.shape[3]
 			} else if len(t.shape) == 3 {
-				b, c, h, w = t.shape[0], 1, t.shape[1], t.shape[2]
+				b, c, h, w = 1, t.shape[0], t.shape[1], t.shape[2]
+			} else if len(t.shape) == 2 {
+				b, c, h, w = 1, 1, t.shape[0], t.shape[1]
 			} else {
 				return false
 			}
