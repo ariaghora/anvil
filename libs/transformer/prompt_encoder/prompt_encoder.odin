@@ -240,11 +240,8 @@ prompt_encoder_embed_points :: proc(
 ) -> ^tensor.Tensor(T) {
 	talloc := context.temp_allocator
 
-	// Add 0.5 to points
 	points := tensor.clone(points, talloc)
-	for i in 0 ..< len(points.data) {
-		points.data[i] += T(0.5)
-	}
+	for i in 0 ..< len(points.data) do points.data[i] += T(0.5)
 
 	// Handle padding
 	labels := labels
@@ -326,6 +323,8 @@ forward_prompt_encoder :: proc(
 
 free_prompt_encoder :: proc(pe: ^Prompt_Encoder($T), allocator := context.allocator) {
 	tensor.free_tensor(pe.pe_layer.positional_encoding_gaussian_matrix, allocator)
+	free(pe.pe_layer, allocator)
+
 	nn.free_embedding(pe.not_a_point_embed, allocator)
 	nn.free_embedding(pe.no_mask_embed, allocator)
 	nn.free_conv2d(pe.mask_downscaling_conv1, allocator)

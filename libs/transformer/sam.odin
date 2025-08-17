@@ -2,6 +2,7 @@ package transformer
 
 import st "../safetensors"
 import "../tensor"
+import md "mask_decoder"
 import pe "prompt_encoder"
 import "vit"
 
@@ -12,7 +13,7 @@ PROMPT_EMBED_DIM :: 256
 Sam :: struct($T: typeid) {
 	image_encoder:         Image_Encoder(T),
 	prompt_encoder:        ^pe.Prompt_Encoder(T),
-	mask_decoder:          ^Mask_Decoder,
+	mask_decoder:          ^md.Mask_Decoder(T),
 	pixel_mean, pixel_std: ^tensor.Tensor(T),
 }
 
@@ -33,12 +34,13 @@ new_tiny :: proc(
 		16,
 		allocator,
 	)
+	mask_decoder := md.new_mask_decoder()
 
 	return new_clone(
 		Sam(T) {
 			prompt_encoder = promt_encoder,
 			image_encoder = image_encoder,
-			mask_decoder = nil,
+			mask_decoder = mask_decoder,
 			pixel_mean = nil,
 			pixel_std = nil,
 		},
