@@ -88,7 +88,7 @@ main :: proc() {
 		uint(sam.prompt_encoder.image_embedding_size[1]),
 		talloc,
 	)
-	points := []tf.Point(f32){{0.5, 0.55, true}}
+	points := []tf.Point(f32){{0.5, 0.55, true}, {0.4, 0.6, false}}
 	n_points := uint(len(points))
 
 	// Build flat array of scaled coordinates
@@ -105,18 +105,12 @@ main :: proc() {
 	labels_tensor := tensor.new_with_init(labels, []uint{1, n_points}, talloc)
 
 	// Prompt encoder forward
-	//// Embed points (se_points)
-	se_points := pe.prompt_encoder_embed_points(
+	se_points, dense_embeddings := pe.forward_prompt_encoder(
 		sam.prompt_encoder,
 		points_tensor,
 		labels_tensor,
-		true,
 		talloc,
 	)
-
-	//// Sparse embeddings (which is se_points since se_boxes is nil)
-
-	//// Dense embedding (should generate because masks is nil)
 
 	// Mask decoder forward
 
@@ -136,6 +130,7 @@ main :: proc() {
 	map_insert(&output_tensors, "10-neck_ln2", neck_ln2)
 	map_insert(&output_tensors, "pr_en_7-pe_final", pe_final)
 	map_insert(&output_tensors, "pr_en_se_points", se_points)
+	map_insert(&output_tensors, "pr_en_dense_embeddings", dense_embeddings)
 
 	err_st_wr := st.write_tensors_to_file(
 		&st.Safe_Tensors(f32){tensors = output_tensors},

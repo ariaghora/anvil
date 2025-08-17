@@ -294,6 +294,36 @@ prompt_encoder_embed_points :: proc(
 	return result
 }
 
+forward_prompt_encoder :: proc(
+	pe: ^Prompt_Encoder($T),
+	points, labels: ^tensor.Tensor(T),
+	allocator := context.allocator,
+) -> (
+	sparse_embeddings, dense_embeddings: ^tensor.Tensor(T),
+) {
+	// Prompt encoder forward
+	//// Embed points (se_points)
+	se_points := prompt_encoder_embed_points(pe, points, labels, true, allocator)
+
+	//// Sparse embeddings (which is se_points since se_boxes is nil)
+	sparse_embeddings = se_points
+
+	//// Dense embedding (should generate because masks is assumed to be nonexistent)
+	// Assuming no masks case:
+	emb := pe.no_mask_embed.weight
+	embed_dim := emb.shape[1] // assuming shape is [1, embed_dim]
+	reshaped := tensor.reshape(emb, []uint{1, embed_dim, 1, 1}, context.temp_allocator)
+	// Broadcast/expand to [1, embed_dim, H, W]
+	target_shape := []uint {
+		1,
+		embed_dim,
+		uint(pe.image_embedding_size[0]),
+		uint(pe.image_embedding_size[1]),
+	}
+	dense_embeddings = tensor.broadcast_as(reshaped, target_shape, allocator)
+	return
+}
+
 free_prompt_encoder :: proc(pe: ^Prompt_Encoder($T), allocator := context.allocator) {
 	tensor.free_tensor(pe.pe_layer.positional_encoding_gaussian_matrix, allocator)
 	nn.free_embedding(pe.not_a_point_embed, allocator)
