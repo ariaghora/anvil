@@ -23,13 +23,7 @@ col2im :: proc(
 	h_in := (h_out + 2 * padding - dilation * (h_k - 1) - 1) / stride + 1
 	w_in := (w_out + 2 * padding - dilation * (w_k - 1) - 1) / stride + 1
 
-	// Allocate output tensor and zero-initialize
 	output := tensor.tensor_alloc(T, []uint{b, c_out, h_out, w_out}, true, allocator, loc)
-
-	// Zero out the data (important for accumulation)
-	for i in 0 ..< len(output.data) {
-		output.data[i] = 0
-	}
 
 	col_data := col.data
 	if !col.contiguous {
@@ -96,14 +90,7 @@ col2im_fast :: proc(
 	w_in := w_out - w_k + 1
 
 	output := tensor.tensor_alloc(T, []uint{b, c_out, h_out, w_out}, true, allocator, loc)
-
-	// Zero initialization
-	for i in 0 ..< len(output.data) {
-		output.data[i] = 0
-	}
-
 	col_data := col.data
-
 	#no_bounds_check {
 		for b_idx in 0 ..< b {
 			col_b := col_data[b_idx * hw_in * c_out * h_k * w_k:]
@@ -216,7 +203,6 @@ conv_transpose_2d_grouped :: proc(
 	
 	b, c_in, h_in, w_in := input.shape[0], input.shape[1], input.shape[2], input.shape[3]
 	_, c_out_per_group, k_h, k_w := kernel.shape[0], kernel.shape[1], kernel.shape[2], kernel.shape[3]
-	//     ^^^^^^^^^^^^^^^^ This is ALREADY per group!
 	
 	assert(c_in % groups == 0, "Input channels must be divisible by groups")
 	c_in_per_group := c_in / groups
@@ -228,11 +214,6 @@ conv_transpose_2d_grouped :: proc(
 	
 	// Allocate output
 	output := tensor.tensor_alloc(T, []uint{b, c_out, h_out, w_out}, true, allocator, loc)
-	
-	// Zero out
-	for i in 0 ..< len(output.data) {
-		output.data[i] = 0
-	}
 	
     pool: thread.Pool
     thread.pool_init(&pool, context.allocator, int(min(groups, 8)))  // Cap at 8 threads
