@@ -1,6 +1,7 @@
 package nn
 
 import "../tensor"
+import "core:thread"
 
 get_transpose_hw :: proc(h_in, w_in, h_k, w_k, stride, dilation, padding: uint) -> (uint, uint) {
 	// For transposed convolution, output size calculation is different
@@ -199,8 +200,8 @@ conv_transpose_2d :: proc(
 
 // Grouped transposed convolution
 conv_transpose_2d_grouped :: proc(
-	input: ^tensor.Tensor($T), // (B, C_in, H_in, W_in)
-	kernel: ^tensor.Tensor(T), // (C_in, C_out, K_h, K_w)
+	input: ^tensor.Tensor($T),   // (B, C_in, H_in, W_in)
+	kernel: ^tensor.Tensor(T),   // (C_in, C_out, K_h, K_w)
 	stride: uint = 1,
 	dilation: uint = 1,
 	padding: uint = 0,
@@ -210,68 +211,93 @@ conv_transpose_2d_grouped :: proc(
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
 	if groups == 1 {
-		return conv_transpose_2d(
-			input,
-			kernel,
-			stride,
-			dilation,
-			padding,
-			output_padding,
-			allocator,
-			loc,
-		)
+		return conv_transpose_2d(input, kernel, stride, dilation, padding, output_padding, allocator, loc)
 	}
-
+	
 	b, c_in, h_in, w_in := input.shape[0], input.shape[1], input.shape[2], input.shape[3]
-	_, c_out, k_h, k_w := kernel.shape[0], kernel.shape[1], kernel.shape[2], kernel.shape[3]
-
+	_, c_out_per_group, k_h, k_w := kernel.shape[0], kernel.shape[1], kernel.shape[2], kernel.shape[3]
+	//     ^^^^^^^^^^^^^^^^ This is ALREADY per group!
+	
 	assert(c_in % groups == 0, "Input channels must be divisible by groups")
-	assert(c_out % groups == 0, "Output channels must be divisible by groups")
-
 	c_in_per_group := c_in / groups
-	c_out_per_group := c_out / groups
-
+	c_out := c_out_per_group * groups  // Calculate total output channels
+	
 	h_out, w_out := get_transpose_hw(h_in, w_in, k_h, k_w, stride, dilation, padding)
 	h_out += output_padding
 	w_out += output_padding
-
+	
 	// Allocate output
 	output := tensor.tensor_alloc(T, []uint{b, c_out, h_out, w_out}, true, allocator, loc)
-
+	
 	// Zero out
 	for i in 0 ..< len(output.data) {
 		output.data[i] = 0
 	}
-
-	// Process each group
-	for g in 0 ..< groups {
-		// Extract group from input
-		input_group := slice_channel_group(input, g, c_in_per_group, context.temp_allocator)
-
-		// Extract group from kernel  
-		kernel_group := slice_kernel_group(
-			kernel,
-			g,
-			c_in_per_group,
-			c_out_per_group,
-			context.temp_allocator,
-		)
-
-		// Perform grouped transposed convolution
-		group_result := conv_transpose_2d(
-			input_group,
-			kernel_group,
-			stride,
-			dilation,
-			padding,
-			0, // output_padding handled at parent level
-			context.temp_allocator,
-		)
-
-		// Copy result to output
-		copy_group_to_output(output, group_result, g, c_out_per_group)
-	}
-
+	
+    pool: thread.Pool
+    thread.pool_init(&pool, context.allocator, int(min(groups, 8)))  // Cap at 8 threads
+    defer thread.pool_destroy(&pool)
+    
+    Group_Work :: struct($T:typeid) {
+        input: ^tensor.Tensor(T),
+        kernel: ^tensor.Tensor(T), 
+        output: ^tensor.Tensor(T),
+        group_idx: uint,
+        c_in_per_group: uint,
+        c_out_per_group: uint,
+        stride, dilation, padding: uint,
+    }
+    
+    work_items := make([]Group_Work(T), groups, context.temp_allocator)
+    
+    // Setup work items
+    for g in 0 ..< groups {
+        work_items[g] = Group_Work(T){
+            input = input,
+            kernel = kernel,
+            output = output,
+            group_idx = g,
+            c_in_per_group = c_in_per_group,
+            c_out_per_group = c_out_per_group,
+            stride = stride,
+            dilation = dilation,
+            padding = padding,
+        }
+    }
+    
+    // Process groups in parallel
+    process_group :: proc(t: thread.Task) {
+        work := cast(^Group_Work(T))t.data
+        
+        // Extract group from input
+        input_group := slice_channel_group(work.input, work.group_idx, work.c_in_per_group, context.temp_allocator)
+        
+        // Extract group from kernel
+        kernel_group := slice_kernel_group(work.kernel, work.group_idx, work.c_in_per_group, work.c_out_per_group, context.temp_allocator)
+        
+        // Perform grouped transposed convolution
+        group_result := conv_transpose_2d(
+            input_group,
+            kernel_group,
+            work.stride,
+            work.dilation,
+            work.padding,
+            0,  // output_padding handled at parent level
+            context.temp_allocator,
+        )
+        
+        // Copy result to output (thread-safe as each group writes to different channels)
+        copy_group_to_output(work.output, group_result, work.group_idx, work.c_out_per_group)
+    }
+    
+    // Add all tasks to pool
+    for g in 0 ..< groups {
+        thread.pool_add_task(&pool, context.allocator, process_group, &work_items[g])
+    }
+    
+    // Wait for all groups to complete
+    thread.pool_start(&pool)
+    thread.pool_finish(&pool)
 	return output
 }
 
@@ -313,9 +339,12 @@ slice_kernel_group :: proc(
 	out_channels_per_group: uint,
 	allocator := context.allocator,
 ) -> ^tensor.Tensor(T) {
-	_, _, k_h, k_w := kernel.shape[0], kernel.shape[1], kernel.shape[2], kernel.shape[3]
+	c_in, c_out_per_group, k_h, k_w :=
+		kernel.shape[0], kernel.shape[1], kernel.shape[2], kernel.shape[3]
+
+	// For grouped conv_transpose, kernel is (in_channels, out_channels/groups, k_h, k_w)
+	// Extract the slice for this group
 	start_in := group_idx * in_channels_per_group
-	start_out := group_idx * out_channels_per_group
 
 	result := tensor.tensor_alloc(
 		T,
@@ -325,17 +354,16 @@ slice_kernel_group :: proc(
 	)
 
 	kw_size := k_h * k_w
+	out_kw_size := c_out_per_group * kw_size
+
 	#no_bounds_check {
 		for in_c in 0 ..< in_channels_per_group {
-			for out_c in 0 ..< out_channels_per_group {
-				src_offset :=
-					(start_in + in_c) * kernel.shape[1] * kw_size + (start_out + out_c) * kw_size
-				dst_offset := in_c * out_channels_per_group * kw_size + out_c * kw_size
+			src_offset := (start_in + in_c) * out_kw_size
+			dst_offset := in_c * out_kw_size
 
-				// Copy kernel weights
-				for i in 0 ..< kw_size {
-					result.data[dst_offset + i] = kernel.data[src_offset + i]
-				}
+			// Copy the entire (out_channels_per_group * k_h * k_w) data for this input channel
+			for i in 0 ..< out_kw_size {
+				result.data[dst_offset + i] = kernel.data[src_offset + i]
 			}
 		}
 	}
@@ -457,6 +485,7 @@ test_conv_transpose_2d_stride :: proc(t: ^testing.T) {
 	testing.expect(t, result.data[24] == 4, "Bottom-right corner should be 4")
 }
 
+import "core:math"
 @(test)
 test_conv_transpose_2d_grouped :: proc(t: ^testing.T) {
 	// Test grouped transposed convolution
@@ -467,19 +496,18 @@ test_conv_transpose_2d_grouped :: proc(t: ^testing.T) {
 	}
 	input := tensor.new_with_init(input_data, []uint{1, 4, 2, 2}, context.temp_allocator)
 
-	// Kernel: 4x4x2x2 with groups=2
+	// Kernel: 4x2x2x2 with groups=2 (in_channels, out_channels/groups, k_h, k_w)
 	// This means 2 input channels map to 2 output channels per group
-	kernel_data := make([]f32, 64, context.temp_allocator)
+	kernel_data := make([]f32, 32, context.temp_allocator) // 4*2*2*2 = 32
 	// Initialize with simple pattern
-	for i in 0 ..< 64 {
+	for i in 0 ..< 32 {
 		kernel_data[i] = f32(i % 4 == 0 ? 1 : 0) // Simple diagonal-like pattern
 	}
-	kernel := tensor.new_with_init(kernel_data, []uint{4, 4, 2, 2}, context.temp_allocator)
+	kernel := tensor.new_with_init(kernel_data, []uint{4, 2, 2, 2}, context.temp_allocator)
 
 	// Perform grouped transposed convolution
 	result := conv_transpose_2d_grouped(input, kernel, 1, 1, 0, 0, 2, context.temp_allocator)
 
-	// Output shape should be (1, 4, 3, 3)
 	expected_shape := []uint{1, 4, 3, 3}
 	testing.expect(
 		t,
@@ -491,13 +519,24 @@ test_conv_transpose_2d_grouped :: proc(t: ^testing.T) {
 		),
 	)
 
-	// Verify that result has reasonable values (non-zero, properly computed)
-	has_nonzero := false
-	for i in 0 ..< len(result.data) {
-		if result.data[i] != 0 {
-			has_nonzero = true
-			break
-		}
+    expected_values := []f32{
+        6.0, 8.0, 0.0, 10.0, 12.0, 0.0, 0.0, 0.0, 0.0,
+        6.0, 8.0, 0.0, 10.0, 12.0, 0.0, 0.0, 0.0, 0.0,
+        22.0, 24.0, 0.0, 26.0, 28.0, 0.0, 0.0, 0.0, 0.0,
+        22.0, 24.0, 0.0, 26.0, 28.0, 0.0, 0.0, 0.0, 0.0,
+    }
+
+	// Verify values match PyTorch
+	for i in 0 ..< len(expected_values) {
+		testing.expect(
+			t,
+			abs(result.data[i] - expected_values[i]) < 0.001,
+			fmt.tprintf(
+				"Grouped conv_transpose value at index %d incorrect: got %f, expected %f",
+				i,
+				result.data[i],
+				expected_values[i],
+			),
+		)
 	}
-	testing.expect(t, has_nonzero, "Grouped conv_transpose should produce non-zero output")
 }
