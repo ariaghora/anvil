@@ -1,4 +1,4 @@
-package transformer
+package vit
 
 import "../nn"
 import "../tensor"

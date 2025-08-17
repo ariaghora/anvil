@@ -2,6 +2,8 @@ package transformer
 
 import st "../safetensors"
 import "../tensor"
+import pe "prompt_encoder"
+import "vit"
 
 VIT_PATCH_SIZE :: 16
 IMAGE_SIZE :: 1024
@@ -9,7 +11,7 @@ PROMPT_EMBED_DIM :: 256
 
 Sam :: struct($T: typeid) {
 	image_encoder:         Image_Encoder(T),
-	prompt_encoder:        ^Prompt_Encoder(T),
+	prompt_encoder:        ^pe.Prompt_Encoder(T),
 	mask_decoder:          ^Mask_Decoder,
 	pixel_mean, pixel_std: ^tensor.Tensor(T),
 }
@@ -21,8 +23,8 @@ new_tiny :: proc(
 	allocator := context.allocator,
 ) -> ^Sam(T) {
 	image_embedding_size := u64(IMAGE_SIZE / VIT_PATCH_SIZE)
-	image_encoder := new_tiny_vit_5m(T, safetensors, IMAGE_SIZE, false, allocator)
-	promt_encoder := new_prompt_encoder(
+	image_encoder := vit.new_tiny_vit_5m(T, safetensors, IMAGE_SIZE, false, allocator)
+	promt_encoder := pe.new_prompt_encoder(
 		T,
 		safetensors,
 		PROMPT_EMBED_DIM,
@@ -44,11 +46,26 @@ new_tiny :: proc(
 	)
 }
 
+Point :: struct($T: typeid) {
+	x, y:        T,
+	is_positive: bool,
+}
+
+forward_sam_for_embedding :: proc(
+	sam: ^Sam($T),
+	img_embeddings: ^tensor.Tensor(T),
+	original_h, original_w: uint,
+	points: []Point(T),
+	allocator := context.allocator,
+) {
+	image_pe := forward_position_embedding(sam.prompt_encoder.pe_layer, allocator)
+}
+
 free_tiny :: proc(sam: ^Sam($T), allocator := context.allocator) {
 
 	// free image encoder
 	free_image_encoder(sam.image_encoder, allocator)
-	free_prompt_encoder(sam.prompt_encoder, allocator)
+	pe.free_prompt_encoder(sam.prompt_encoder, allocator)
 
 	// free mask decoder
 	// TODO

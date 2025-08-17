@@ -1,8 +1,9 @@
-package transformer
+package prompt_encoder
 
-import "../nn"
-import st "../safetensors"
-import "../tensor"
+import "../../nn"
+import st "../../safetensors"
+import "../../tensor"
+import vb "../var_builder"
 import "core:fmt"
 import "core:math"
 
@@ -13,7 +14,6 @@ Position_Embedding_Random :: struct($T: typeid) {
 }
 
 
-@(private = "file")
 pe_encoding :: proc(
 	pe: ^Position_Embedding_Random($T),
 	coords: ^tensor.Tensor(T),
@@ -83,6 +83,22 @@ forward_position_embedding :: proc(
 	return result
 }
 
+forward_position_embedding_with_coords :: proc(
+	pe: ^Position_Embedding_Random($T),
+	coords_input: ^tensor.Tensor(T),
+	image_w, image_h: uint,
+	allocator := context.allocator,
+) -> ^tensor.Tensor(T) {
+	coords0 := tensor.slice(coords_input, {{}, {}, {0, 1, 1}}, context.temp_allocator)
+	for v, i in coords0.data do coords0.data[i] /= T(image_h)
+	coords1 := tensor.slice(coords_input, {{}, {}, {1, 2, 1}}, context.temp_allocator)
+	for v, i in coords1.data do coords1.data[i] /= T(image_w)
+	c := len(coords_input.shape) - 1
+	coords := tensor.cat([]^tensor.Tensor(T){coords0, coords1}, uint(c))
+	result := pe_encoding(pe, coords, allocator)
+	return result
+}
+
 Prompt_Encoder :: struct($T: typeid) {
 	pe_layer:               ^Position_Embedding_Random(T),
 	point_embeddings:       [dynamic]^nn.Embedding(T),
@@ -107,9 +123,9 @@ new_prompt_encoder :: proc(
 	mask_in_chans: u64,
 	allocator := context.allocator,
 ) -> ^Prompt_Encoder(T) {
-	vb_prompt_encoder := Var_Builder(T){"prompt_encoder", safetensors, nil}
+	vb_prompt_encoder := vb.Var_Builder(T){"prompt_encoder", safetensors, nil}
 
-	vb_pe_layer := vb_make(T, "pe_layer", &vb_prompt_encoder)
+	vb_pe_layer := vb.vb_make(T, "pe_layer", &vb_prompt_encoder)
 	pe_layer := new_clone(
 		Position_Embedding_Random(T) {
 			positional_encoding_gaussian_matrix = tensor.zeros(
@@ -120,17 +136,17 @@ new_prompt_encoder :: proc(
 		},
 		allocator,
 	)
-	vb_assignt_to_tensor(
+	vb.assign_to_tensor(
 		&vb_pe_layer,
 		"positional_encoding_gaussian_matrix",
 		pe_layer.positional_encoding_gaussian_matrix,
 	)
 
 	not_a_point_embed := nn.new_embedding(T, 1, uint(embed_dim), true, allocator)
-	vb_assignt_to_tensor(&vb_prompt_encoder, "not_a_point_embed.weight", not_a_point_embed.weight)
+	vb.assign_to_tensor(&vb_prompt_encoder, "not_a_point_embed.weight", not_a_point_embed.weight)
 
 	no_mask_embed := nn.new_embedding(T, 1, uint(embed_dim), true, allocator)
-	vb_assignt_to_tensor(&vb_prompt_encoder, "no_mask_embed.weight", not_a_point_embed.weight)
+	vb.assign_to_tensor(&vb_prompt_encoder, "no_mask_embed.weight", no_mask_embed.weight)
 
 	mask_downscaling_conv1 := nn.new_conv2d(
 		T,
@@ -145,8 +161,8 @@ new_prompt_encoder :: proc(
 		init = false,
 		allocator = allocator,
 	)
-	vb_assignt_to_tensor(&vb_prompt_encoder, "mask_downscaling.0.weight", mask_downscaling_conv1.w)
-	vb_assignt_to_tensor(&vb_prompt_encoder, "mask_downscaling.0.bias", mask_downscaling_conv1.b.?)
+	vb.assign_to_tensor(&vb_prompt_encoder, "mask_downscaling.0.weight", mask_downscaling_conv1.w)
+	vb.assign_to_tensor(&vb_prompt_encoder, "mask_downscaling.0.bias", mask_downscaling_conv1.b.?)
 
 	mask_downscaling_conv2 := nn.new_conv2d(
 		T,
@@ -157,8 +173,8 @@ new_prompt_encoder :: proc(
 		init = false,
 		allocator = allocator,
 	)
-	vb_assignt_to_tensor(&vb_prompt_encoder, "mask_downscaling.3.weight", mask_downscaling_conv2.w)
-	vb_assignt_to_tensor(&vb_prompt_encoder, "mask_downscaling.3.bias", mask_downscaling_conv2.b.?)
+	vb.assign_to_tensor(&vb_prompt_encoder, "mask_downscaling.3.weight", mask_downscaling_conv2.w)
+	vb.assign_to_tensor(&vb_prompt_encoder, "mask_downscaling.3.bias", mask_downscaling_conv2.b.?)
 
 	mask_downscaling_conv3 := nn.new_conv2d(
 		T,
@@ -168,18 +184,18 @@ new_prompt_encoder :: proc(
 		init = false,
 		allocator = allocator,
 	)
-	vb_assignt_to_tensor(&vb_prompt_encoder, "mask_downscaling.6.weight", mask_downscaling_conv3.w)
-	vb_assignt_to_tensor(&vb_prompt_encoder, "mask_downscaling.6.bias", mask_downscaling_conv3.b.?)
+	vb.assign_to_tensor(&vb_prompt_encoder, "mask_downscaling.6.weight", mask_downscaling_conv3.w)
+	vb.assign_to_tensor(&vb_prompt_encoder, "mask_downscaling.6.bias", mask_downscaling_conv3.b.?)
 
 	mask_downscaling_ln1 := nn.new_channel_layer_norm(T, uint(mask_in_chans / 4), 1e-6, allocator)
-	vb_assignt_to_tensor(
+	vb.assign_to_tensor(
 		&vb_prompt_encoder,
 		"mask_downscaling.1.weight",
 		mask_downscaling_ln1.weight,
 	)
 
 	mask_downscaling_ln2 := nn.new_channel_layer_norm(T, uint(mask_in_chans), 1e-6, allocator)
-	vb_assignt_to_tensor(
+	vb.assign_to_tensor(
 		&vb_prompt_encoder,
 		"mask_downscaling.4.weight",
 		mask_downscaling_ln2.weight,
@@ -188,7 +204,7 @@ new_prompt_encoder :: proc(
 	point_embeddings: [dynamic]^nn.Embedding(T)
 	for i in 0 ..< NUM_POINTS_EMBEDDINGS {
 		emb := nn.new_embedding(T, 1, uint(embed_dim), true, allocator)
-		vb_assignt_to_tensor(
+		vb.assign_to_tensor(
 			&vb_prompt_encoder,
 			fmt.tprintf("point_embeddings.%d.weight", i),
 			emb.weight,
@@ -214,6 +230,68 @@ new_prompt_encoder :: proc(
 		allocator,
 	)
 	return pe
+}
+
+prompt_encoder_embed_points :: proc(
+	pe: ^Prompt_Encoder($T),
+	points, labels: ^tensor.Tensor(T),
+	pad: bool,
+	allocator := context.allocator,
+) -> ^tensor.Tensor(T) {
+	talloc := context.temp_allocator
+
+	// Add 0.5 to points
+	points := tensor.clone(points, talloc)
+	for i in 0 ..< len(points.data) {
+		points.data[i] += T(0.5)
+	}
+
+	// Handle padding
+	labels := labels
+	if pad {
+		points_padded := tensor.zeros(T, {points.shape[0], 1, 2}, talloc)
+		labels_padded := tensor.new_with_init([]T{-1}, {labels.shape[0], 1}, talloc)
+		points = tensor.cat([]^tensor.Tensor(T){points, points_padded}, 1, talloc)
+		labels = tensor.cat([]^tensor.Tensor(T){labels, labels_padded}, 1, talloc)
+	} else {
+		labels = tensor.clone(labels, talloc)
+	}
+
+	// Get point embeddings
+	point_embedding := forward_position_embedding_with_coords(
+		pe.pe_layer,
+		points,
+		uint(pe.input_image_size.x),
+		uint(pe.input_image_size.y),
+		talloc,
+	)
+
+	n_points := points.shape[1]
+	embed_dim := pe.point_embeddings[0].embedding_dim
+	result := tensor.clone(point_embedding, allocator)
+	for i in 0 ..< n_points {
+		label := labels.data[i]
+		base_idx := i * embed_dim
+
+		// If label < 0, replace with not_a_point_embed
+		if label < 0 {
+			for d in 0 ..< embed_dim {
+				result.data[base_idx + d] = pe.not_a_point_embed.weight.data[d]
+			}
+		} else if label == 0 {
+			// If label == 0, ADD negative embedding
+			for d in 0 ..< embed_dim {
+				result.data[base_idx + d] += pe.point_embeddings[0].weight.data[d]
+			}
+		} else if label == 1 {
+			// If label == 1, ADD positive embedding
+			for d in 0 ..< embed_dim {
+				result.data[base_idx + d] += pe.point_embeddings[1].weight.data[d]
+			}
+		}
+	}
+
+	return result
 }
 
 free_prompt_encoder :: proc(pe: ^Prompt_Encoder($T), allocator := context.allocator) {

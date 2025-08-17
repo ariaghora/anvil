@@ -1,7 +1,7 @@
-package transformer
+package var_builder
 
-import st "../safetensors"
-import "../tensor"
+import st "../../safetensors"
+import "../../tensor"
 import "core:fmt"
 import "core:strings"
 
@@ -27,7 +27,7 @@ vb_resolve_preceding_path :: proc(vb: ^Var_Builder($T), allocator := context.all
 	return prec
 }
 
-vb_assignt_to_tensor :: proc(
+assign_to_tensor :: proc(
 	vb: ^Var_Builder($T),
 	leaf_name: string,
 	target: ^tensor.Tensor(T),
