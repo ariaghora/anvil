@@ -34,7 +34,7 @@ new_tiny :: proc(
 		16,
 		allocator,
 	)
-	mask_decoder := md.new_mask_decoder()
+	mask_decoder := md.new_mask_decoder(T, safetensors, PROMPT_EMBED_DIM, 3, 3, 256)
 
 	return new_clone(
 		Sam(T) {
@@ -70,7 +70,7 @@ free_tiny :: proc(sam: ^Sam($T), allocator := context.allocator) {
 	pe.free_prompt_encoder(sam.prompt_encoder, allocator)
 
 	// free mask decoder
-	// TODO
+	md.free_mask_decoder(sam.mask_decoder, allocator)
 
 	// free tensors
 	// TODO tensor.tensor_free(sam.pixel_mean, sam.pixel_std)
