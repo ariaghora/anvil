@@ -1333,3 +1333,126 @@ slice :: proc(input: ^Tensor($T), ranges: []Range, allocator := context.allocato
 
 	return output
 }
+
+repeat_interleave :: proc(
+	tensor: ^Tensor($T),
+	repeats: uint,
+	dim: uint,
+	allocator := context.allocator,
+) -> ^Tensor(T) {
+	if !tensor.contiguous {
+		panic("repeat_interleave requires contiguous tensor")
+	}
+	if dim >= uint(len(tensor.shape)) {
+		panic("Dimension out of bounds")
+	}
+
+	// Calculate new shape
+	new_shape := make([]uint, len(tensor.shape), allocator)
+	copy(new_shape, tensor.shape)
+	new_shape[dim] *= repeats
+
+	result := tensor_alloc(T, new_shape, true, allocator)
+
+	// Calculate sizes for iteration
+	size_before := uint(1) // Product of dimensions before 'dim'
+	size_at := tensor.shape[dim] // Size of dimension to repeat
+	size_after := uint(1) // Product of dimensions after 'dim'
+
+	for i in 0 ..< dim {
+		size_before *= tensor.shape[i]
+	}
+	for i in dim + 1 ..< uint(len(tensor.shape)) {
+		size_after *= tensor.shape[i]
+	}
+
+	// Process all data
+	dst_idx := uint(0)
+
+	// Iterate over all positions before the repeat dimension
+	for before in 0 ..< size_before {
+		// For each element at the repeat dimension
+		for at in 0 ..< size_at {
+			src_offset := (before * size_at + at) * size_after
+
+			// Repeat 'repeats' times
+			for r in 0 ..< repeats {
+				// Copy the chunk after the dimension
+				if size_after == 1 {
+					// Scalar case - direct assignment
+					result.data[dst_idx] = tensor.data[src_offset]
+					dst_idx += 1
+				} else if size_after <= 16 {
+					// Small chunk - unrolled copy for better performance
+					#no_bounds_check for i in 0 ..< size_after {
+						result.data[dst_idx + i] = tensor.data[src_offset + i]
+					}
+					dst_idx += size_after
+				} else {
+					// Large chunk - use memcpy
+					copy(
+						result.data[dst_idx:dst_idx + size_after],
+						tensor.data[src_offset:src_offset + size_after],
+					)
+					dst_idx += size_after
+				}
+			}
+		}
+	}
+
+	return result
+}
+
+// Even faster version for dim=0 (batch dimension) - most common case
+repeat_interleave_batch :: proc(
+	tensor: ^Tensor($T),
+	repeats: uint,
+	allocator := context.allocator,
+) -> ^Tensor(T) {
+	if !tensor.contiguous {
+		panic("repeat_interleave requires contiguous tensor")
+	}
+
+	batch_size := tensor.shape[0]
+	elements_per_batch := len(tensor.data) / int(batch_size)
+
+	new_shape := make([]uint, len(tensor.shape), allocator)
+	copy(new_shape, tensor.shape)
+	new_shape[0] *= repeats
+
+	result := tensor.tensor_alloc(T, new_shape, true, allocator)
+
+	// Optimized for cache-friendly access pattern
+	dst_offset := uint(0)
+	for b in 0 ..< batch_size {
+		src_start := b * uint(elements_per_batch)
+		src_end := src_start + uint(elements_per_batch)
+
+		for r in 0 ..< repeats {
+			copy(
+				result.data[dst_offset:dst_offset + uint(elements_per_batch)],
+				tensor.data[src_start:src_end],
+			)
+			dst_offset += uint(elements_per_batch)
+		}
+	}
+
+	return result
+}
+
+unsqueeze :: proc(tensor: ^Tensor($T), dim: uint, allocator := context.allocator) -> ^Tensor(T) {
+	if dim > uint(len(tensor.shape)) {
+		panic("Dimension out of bounds for unsqueeze")
+	}
+
+	new_shape := make([]uint, len(tensor.shape) + 1, context.temp_allocator)
+	for i in 0 ..< dim do new_shape[i] = tensor.shape[i]
+
+	new_shape[dim] = 1
+	for i in dim ..< uint(len(tensor.shape)) do new_shape[i + 1] = tensor.shape[i]
+
+	result := tensor_alloc(T, new_shape, false, allocator)
+	result.data = tensor.data
+
+	return result
+}

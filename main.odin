@@ -113,6 +113,23 @@ main :: proc() {
 	)
 
 	// Mask decoder forward
+	//// Predict masks
+	output_tokens := tensor.cat(
+		[]^tensor.Tensor(f32) {
+			sam.mask_decoder.iou_token.weight,
+			sam.mask_decoder.mask_tokens.weight,
+		},
+		0,
+		talloc,
+	)
+	d1, d2 := output_tokens.shape[0], output_tokens.shape[1]
+	output_tokens = tensor.unsqueeze(output_tokens, 0, talloc) // [1, d1, d2]
+	batch_size := se_points.shape[0]
+	output_tokens = tensor.broadcast_as(output_tokens, []uint{batch_size, d1, d2}, talloc)
+	tokens := tensor.cat([]^tensor.Tensor(f32){output_tokens, se_points}, 1, talloc)
+
+	src := tensor.repeat_interleave(neck_ln2, tokens.shape[0], 0, talloc)
+	src = tensor.add(src, dense_embeddings, talloc)
 
 
 	fmt.println("inference time phase 2:", time.since(t))
@@ -131,6 +148,8 @@ main :: proc() {
 	map_insert(&output_tensors, "pr_en_7-pe_final", pe_final)
 	map_insert(&output_tensors, "pr_en_se_points", se_points)
 	map_insert(&output_tensors, "pr_en_dense_embeddings", dense_embeddings)
+	map_insert(&output_tensors, "md_tokens", tokens)
+	map_insert(&output_tensors, "md_src", src)
 
 	err_st_wr := st.write_tensors_to_file(
 		&st.Safe_Tensors(f32){tensors = output_tensors},

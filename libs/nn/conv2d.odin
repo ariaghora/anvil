@@ -4,8 +4,8 @@ import "../tensor"
 import "../trace"
 
 Conv_2d :: struct($T: typeid) {
-	w:            ^tensor.Tensor(T), // (out_channels, in_channels, kernel_h, kernel_w)
-	b:            Maybe(^tensor.Tensor(T)), // (out_channels,)
+	w:            ^tensor.Tensor(T),
+	b:            Maybe(^tensor.Tensor(T)),
 	in_channels:  uint,
 	out_channels: uint,
 	kernel_size:  [2]uint, // [height, width]
@@ -28,7 +28,6 @@ new_conv2d :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Conv_2d(T) {
-	// Validate parameters
 	if in_channels % groups != 0 {
 		panic("in_channels must be divisible by groups")
 	}
@@ -41,9 +40,7 @@ new_conv2d :: proc(
 
 	w: ^tensor.Tensor(T)
 	if init {
-		// Create weight tensor: (out_channels, in_channels/groups, kernel_h, kernel_w)
-
-		// Initialize weights with Xavier/Glorot normal initialization
+		// Xavier/Glorot normal
 		fan_in := T(in_channels_per_group * kernel_size[0] * kernel_size[1])
 		fan_out := T(out_channels * kernel_size[0] * kernel_size[1])
 		std := T(2.0 / (fan_in + fan_out))
