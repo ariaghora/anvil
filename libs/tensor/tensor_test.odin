@@ -73,7 +73,9 @@ test_get_strided_data :: proc(t: ^testing.T) {
 	transposed := transpose(original, 0, 1, allocator = context.temp_allocator)
 
 	// Extract data with strided access
-	strided_data, allocated := get_strided_data(transposed, allocator = context.temp_allocator)
+	strided_data: []f32
+	allocated: bool
+	strided_data, allocated = get_strided_data(transposed, allocator = context.temp_allocator)
 
 	// Expected: [1, 3, 2, 4] (transpose of [[1,2],[3,4]] is [[1,3],[2,4]])
 	expected := []f32{1, 3, 2, 4}
@@ -644,4 +646,15 @@ test_stack :: proc(t: ^testing.T) {
 	s2 := stack([]^Tensor(i32){a, b}, 2, context.temp_allocator)
 	testing.expect(t, slice.equal(s2.shape, []uint{2, 3, 2}))
 	testing.expect(t, slice.equal(s2.data, []i32{1, 7, 2, 8, 3, 9, 4, 10, 5, 11, 6, 12}))
+}
+
+@(test)
+test_flatten :: proc(t: ^testing.T) {
+	x := new_with_init([]i32{1, 2, 3, 4, 5, 6}, {3, 2}, context.temp_allocator)
+	res := flatten(x, 0, context.temp_allocator)
+	testing.expect(t, slice.equal(res.shape, []uint{6}))
+
+	x = new_with_init([]i32{1, 2, 3, 4, 5, 6, 7, 8}, {2, 2, 2}, context.temp_allocator)
+	res = flatten(x, 1, context.temp_allocator)
+	testing.expect(t, slice.equal(res.shape, []uint{2, 4}))
 }
