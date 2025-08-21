@@ -130,6 +130,7 @@ main :: proc() {
 
 	src := tensor.repeat_interleave(neck_ln2, tokens.shape[0], 0, talloc)
 	src = tensor.add(src, dense_embeddings, talloc)
+	pos_src := tensor.repeat_interleave(pe_final, tokens.shape[0], 0, talloc)
 
 
 	fmt.println("inference time phase 2:", time.since(t))
@@ -150,6 +151,7 @@ main :: proc() {
 	map_insert(&output_tensors, "pr_en_dense_embeddings", dense_embeddings)
 	map_insert(&output_tensors, "md_tokens", tokens)
 	map_insert(&output_tensors, "md_src", src)
+	map_insert(&output_tensors, "md_pos_src", pos_src)
 
 	err_st_wr := st.write_tensors_to_file(
 		&st.Safe_Tensors(f32){tensors = output_tensors},

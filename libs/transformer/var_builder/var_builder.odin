@@ -27,7 +27,7 @@ vb_resolve_preceding_path :: proc(vb: ^Var_Builder($T), allocator := context.all
 	return prec
 }
 
-assign_to_tensor :: proc(
+assign :: proc(
 	vb: ^Var_Builder($T),
 	leaf_name: string,
 	target: ^tensor.Tensor(T),

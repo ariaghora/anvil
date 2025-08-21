@@ -136,17 +136,17 @@ new_prompt_encoder :: proc(
 		},
 		allocator,
 	)
-	vb.assign_to_tensor(
+	vb.assign(
 		&vb_pe_layer,
 		"positional_encoding_gaussian_matrix",
 		pe_layer.positional_encoding_gaussian_matrix,
 	)
 
 	not_a_point_embed := nn.new_embedding(T, 1, uint(embed_dim), true, allocator)
-	vb.assign_to_tensor(&vb_prompt_encoder, "not_a_point_embed.weight", not_a_point_embed.weight)
+	vb.assign(&vb_prompt_encoder, "not_a_point_embed.weight", not_a_point_embed.weight)
 
 	no_mask_embed := nn.new_embedding(T, 1, uint(embed_dim), true, allocator)
-	vb.assign_to_tensor(&vb_prompt_encoder, "no_mask_embed.weight", no_mask_embed.weight)
+	vb.assign(&vb_prompt_encoder, "no_mask_embed.weight", no_mask_embed.weight)
 
 	mask_downscaling_conv1 := nn.new_conv2d(
 		T,
@@ -161,8 +161,8 @@ new_prompt_encoder :: proc(
 		init = false,
 		allocator = allocator,
 	)
-	vb.assign_to_tensor(&vb_prompt_encoder, "mask_downscaling.0.weight", mask_downscaling_conv1.w)
-	vb.assign_to_tensor(&vb_prompt_encoder, "mask_downscaling.0.bias", mask_downscaling_conv1.b.?)
+	vb.assign(&vb_prompt_encoder, "mask_downscaling.0.weight", mask_downscaling_conv1.w)
+	vb.assign(&vb_prompt_encoder, "mask_downscaling.0.bias", mask_downscaling_conv1.b.?)
 
 	mask_downscaling_conv2 := nn.new_conv2d(
 		T,
@@ -173,8 +173,8 @@ new_prompt_encoder :: proc(
 		init = false,
 		allocator = allocator,
 	)
-	vb.assign_to_tensor(&vb_prompt_encoder, "mask_downscaling.3.weight", mask_downscaling_conv2.w)
-	vb.assign_to_tensor(&vb_prompt_encoder, "mask_downscaling.3.bias", mask_downscaling_conv2.b.?)
+	vb.assign(&vb_prompt_encoder, "mask_downscaling.3.weight", mask_downscaling_conv2.w)
+	vb.assign(&vb_prompt_encoder, "mask_downscaling.3.bias", mask_downscaling_conv2.b.?)
 
 	mask_downscaling_conv3 := nn.new_conv2d(
 		T,
@@ -184,31 +184,19 @@ new_prompt_encoder :: proc(
 		init = false,
 		allocator = allocator,
 	)
-	vb.assign_to_tensor(&vb_prompt_encoder, "mask_downscaling.6.weight", mask_downscaling_conv3.w)
-	vb.assign_to_tensor(&vb_prompt_encoder, "mask_downscaling.6.bias", mask_downscaling_conv3.b.?)
+	vb.assign(&vb_prompt_encoder, "mask_downscaling.6.weight", mask_downscaling_conv3.w)
+	vb.assign(&vb_prompt_encoder, "mask_downscaling.6.bias", mask_downscaling_conv3.b.?)
 
 	mask_downscaling_ln1 := nn.new_channel_layer_norm(T, uint(mask_in_chans / 4), 1e-6, allocator)
-	vb.assign_to_tensor(
-		&vb_prompt_encoder,
-		"mask_downscaling.1.weight",
-		mask_downscaling_ln1.weight,
-	)
+	vb.assign(&vb_prompt_encoder, "mask_downscaling.1.weight", mask_downscaling_ln1.weight)
 
 	mask_downscaling_ln2 := nn.new_channel_layer_norm(T, uint(mask_in_chans), 1e-6, allocator)
-	vb.assign_to_tensor(
-		&vb_prompt_encoder,
-		"mask_downscaling.4.weight",
-		mask_downscaling_ln2.weight,
-	)
+	vb.assign(&vb_prompt_encoder, "mask_downscaling.4.weight", mask_downscaling_ln2.weight)
 
 	point_embeddings: [dynamic]^nn.Embedding(T)
 	for i in 0 ..< NUM_POINTS_EMBEDDINGS {
 		emb := nn.new_embedding(T, 1, uint(embed_dim), true, allocator)
-		vb.assign_to_tensor(
-			&vb_prompt_encoder,
-			fmt.tprintf("point_embeddings.%d.weight", i),
-			emb.weight,
-		)
+		vb.assign(&vb_prompt_encoder, fmt.tprintf("point_embeddings.%d.weight", i), emb.weight)
 		append(&point_embeddings, emb)
 	}
 

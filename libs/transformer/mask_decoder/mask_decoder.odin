@@ -66,10 +66,10 @@ new_mask_decoder :: proc(
 	)
 
 	iou_token := nn.new_embedding(T, 1, transformer_dim, true, allocator)
-	vb.assign_to_tensor(&vb_mask_decoder, "iou_token.weight", iou_token.weight)
+	vb.assign(&vb_mask_decoder, "iou_token.weight", iou_token.weight)
 
 	mask_tokens := nn.new_embedding(T, num_mask_tokens, transformer_dim, true, allocator)
-	vb.assign_to_tensor(&vb_mask_decoder, "mask_tokens.weight", mask_tokens.weight)
+	vb.assign(&vb_mask_decoder, "mask_tokens.weight", mask_tokens.weight)
 
 	output_upscaling_conv1 := nn.new_conv_transpose_2d(
 		T,
@@ -79,12 +79,12 @@ new_mask_decoder :: proc(
 		stride = 2,
 		allocator = allocator,
 	)
-	vb.assign_to_tensor(&vb_mask_decoder, "output_upscaling.0.weight", output_upscaling_conv1.w)
-	vb.assign_to_tensor(&vb_mask_decoder, "output_upscaling.0.bias", output_upscaling_conv1.b.?)
+	vb.assign(&vb_mask_decoder, "output_upscaling.0.weight", output_upscaling_conv1.w)
+	vb.assign(&vb_mask_decoder, "output_upscaling.0.bias", output_upscaling_conv1.b.?)
 
 	output_upscaling_ln := nn.new_channel_layer_norm(T, transformer_dim / 4, 1e-6, allocator)
-	vb.assign_to_tensor(&vb_mask_decoder, "output_upscaling.1.weight", output_upscaling_ln.weight)
-	vb.assign_to_tensor(&vb_mask_decoder, "output_upscaling.1.bias", output_upscaling_ln.bias)
+	vb.assign(&vb_mask_decoder, "output_upscaling.1.weight", output_upscaling_ln.weight)
+	vb.assign(&vb_mask_decoder, "output_upscaling.1.bias", output_upscaling_ln.bias)
 
 	output_upscaling_conv2 := nn.new_conv_transpose_2d(
 		T,
@@ -94,8 +94,8 @@ new_mask_decoder :: proc(
 		stride = 2,
 		allocator = allocator,
 	)
-	vb.assign_to_tensor(&vb_mask_decoder, "output_upscaling.3.weight", output_upscaling_conv2.w)
-	vb.assign_to_tensor(&vb_mask_decoder, "output_upscaling.3.bias", output_upscaling_conv2.b.?)
+	vb.assign(&vb_mask_decoder, "output_upscaling.3.weight", output_upscaling_conv2.w)
+	vb.assign(&vb_mask_decoder, "output_upscaling.3.bias", output_upscaling_conv2.b.?)
 
 	return new_clone(
 		Mask_Decoder(T) {

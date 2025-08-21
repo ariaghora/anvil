@@ -144,13 +144,13 @@ new_conv_2d_bn :: proc(
 		init = init,
 		allocator = allocator,
 	)
-	vb.assign_to_tensor(vb_root, "c.weight", conv.w)
+	vb.assign(vb_root, "c.weight", conv.w)
 
 	bn := nn.new_batch_norm_2d(T, out_channels, allocator)
-	vb.assign_to_tensor(vb_root, "bn.weight", bn.weight)
-	vb.assign_to_tensor(vb_root, "bn.bias", bn.bias)
-	vb.assign_to_tensor(vb_root, "bn.running_mean", bn.running_mean)
-	vb.assign_to_tensor(vb_root, "bn.running_var", bn.running_var)
+	vb.assign(vb_root, "bn.weight", bn.weight)
+	vb.assign(vb_root, "bn.bias", bn.bias)
+	vb.assign(vb_root, "bn.running_mean", bn.running_mean)
+	vb.assign(vb_root, "bn.running_var", bn.running_var)
 
 	return new_clone(Conv_2d_BN(T){conv = conv, bn = bn}, allocator)
 }
@@ -492,16 +492,16 @@ new_attention :: proc(
 	h := dh + nh_kd * 2 // query + key + value
 
 	norm := nn.new_layer_norm_1d(T, dim, 1e-5, allocator)
-	vb.assign_to_tensor(vb_root, "norm.weight", norm.weight)
-	vb.assign_to_tensor(vb_root, "norm.bias", norm.bias)
+	vb.assign(vb_root, "norm.weight", norm.weight)
+	vb.assign(vb_root, "norm.bias", norm.bias)
 
 	qkv := nn.new_linear(T, dim, h, true, init, allocator)
-	vb.assign_to_tensor(vb_root, "qkv.weight", qkv.w, true)
-	vb.assign_to_tensor(vb_root, "qkv.bias", qkv.b.?)
+	vb.assign(vb_root, "qkv.weight", qkv.w, true)
+	vb.assign(vb_root, "qkv.bias", qkv.b.?)
 
 	proj := nn.new_linear(T, dh, dim, true, init, allocator)
-	vb.assign_to_tensor(vb_root, "proj.weight", proj.w, true)
-	vb.assign_to_tensor(vb_root, "proj.bias", proj.b.?)
+	vb.assign(vb_root, "proj.weight", proj.w, true)
+	vb.assign(vb_root, "proj.bias", proj.b.?)
 
 	// Build relative position bias indices
 	num_points := resolution[0] * resolution[1]
@@ -537,7 +537,7 @@ new_attention :: proc(
 	num_unique_offsets := uint(len(offset_map))
 	attention_biases := tensor.zeros(T, []uint{num_heads, num_unique_offsets})
 	defer tensor.free_tensor(attention_biases)
-	vb.assign_to_tensor(vb_root, "attention_biases", attention_biases)
+	vb.assign(vb_root, "attention_biases", attention_biases)
 
 
 	ab := tensor.zeros(T, []uint{num_heads, num_points, num_points}, allocator)
@@ -854,16 +854,16 @@ new_mlp :: proc(
 	allocator := context.allocator,
 ) -> ^Mlp(T) {
 	norm := nn.new_layer_norm_1d(T, in_features, 1e-5, allocator)
-	vb.assign_to_tensor(vb_root, "norm.weight", norm.weight)
-	vb.assign_to_tensor(vb_root, "norm.bias", norm.bias)
+	vb.assign(vb_root, "norm.weight", norm.weight)
+	vb.assign(vb_root, "norm.bias", norm.bias)
 
 	fc1 := nn.new_linear(T, in_features, hidden_features, true, init, allocator)
 	fc2 := nn.new_linear(T, hidden_features, in_features, true, init, allocator)
 	// Should transpose since pytorch's way of fc is tranposed matmul  
-	vb.assign_to_tensor(vb_root, "fc1.weight", fc1.w, should_transpose = true)
-	vb.assign_to_tensor(vb_root, "fc2.weight", fc2.w, should_transpose = true)
-	vb.assign_to_tensor(vb_root, "fc1.bias", fc1.b.?)
-	vb.assign_to_tensor(vb_root, "fc2.bias", fc2.b.?)
+	vb.assign(vb_root, "fc1.weight", fc1.w, should_transpose = true)
+	vb.assign(vb_root, "fc2.weight", fc2.w, should_transpose = true)
+	vb.assign(vb_root, "fc1.bias", fc1.b.?)
+	vb.assign(vb_root, "fc2.bias", fc2.b.?)
 
 	return new_clone(Mlp(T){norm = norm, fc1 = fc1, fc2 = fc2}, allocator)
 }
@@ -1312,14 +1312,14 @@ new_tiny_vit_5m :: proc(
 		init = init,
 		allocator = allocator,
 	)
-	vb.assign_to_tensor(&vb_root, "neck.0.weight", neck_conv1.w)
+	vb.assign(&vb_root, "neck.0.weight", neck_conv1.w)
 
 	// LayerNorm2d expects spatial dimensions based on final output
 	// Final spatial dimension after all downsampling: input_size / 4 / (1 << min(3,2)) = input_size / 16
 	final_spatial_dim := uint(input_size / 16)
 	neck_ln1 := nn.new_channel_layer_norm(T, 256, 1e-5, allocator)
-	vb.assign_to_tensor(&vb_root, "neck.1.weight", neck_ln1.weight)
-	vb.assign_to_tensor(&vb_root, "neck.1.bias", neck_ln1.bias)
+	vb.assign(&vb_root, "neck.1.weight", neck_ln1.weight)
+	vb.assign(&vb_root, "neck.1.bias", neck_ln1.bias)
 
 	neck_conv2 := nn.new_conv2d(
 		T,
@@ -1334,11 +1334,11 @@ new_tiny_vit_5m :: proc(
 		init,
 		allocator,
 	)
-	vb.assign_to_tensor(&vb_root, "neck.2.weight", neck_conv2.w)
+	vb.assign(&vb_root, "neck.2.weight", neck_conv2.w)
 
 	neck_ln2 := nn.new_channel_layer_norm(T, 256, 1e-5, allocator)
-	vb.assign_to_tensor(&vb_root, "neck.3.weight", neck_ln2.weight)
-	vb.assign_to_tensor(&vb_root, "neck.3.bias", neck_ln2.bias)
+	vb.assign(&vb_root, "neck.3.weight", neck_ln2.weight)
+	vb.assign(&vb_root, "neck.3.bias", neck_ln2.bias)
 
 	return new_clone(
 		Tiny_ViT_5m(T) {
