@@ -1457,7 +1457,12 @@ unsqueeze :: proc(tensor: ^Tensor($T), dim: uint, allocator := context.allocator
 	return result
 }
 
-flatten :: proc(t: ^Tensor($T), from: uint, allocator := context.allocator) -> ^Tensor(T) {
+flatten :: proc(
+	t: ^Tensor($T),
+	from: uint,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
 	assert(from < len(t.shape) - 1, "flatten dimension out of bound")
 	new_ndim := from + 1
 	new_shape := make([dynamic]uint, context.temp_allocator)

@@ -10,6 +10,7 @@ import st "libs/safetensors"
 import "libs/tensor"
 import "libs/trace"
 import tf "libs/transformer"
+import md "libs/transformer/mask_decoder"
 import pe "libs/transformer/prompt_encoder"
 import "libs/transformer/vit"
 
@@ -81,6 +82,8 @@ main :: proc() {
 	neck_ln2 := nn.forward_channel_layer_norm(image_encoder.neck_ln2, neck_conv2, talloc)
 	fmt.println("inference time phase 1:", time.since(t))
 
+	image_embedding := neck_ln2
+
 	t = time.now()
 	pe_final := pe.forward_position_embedding(
 		sam.prompt_encoder.pe_layer,
@@ -88,6 +91,8 @@ main :: proc() {
 		uint(sam.prompt_encoder.image_embedding_size[1]),
 		talloc,
 	)
+	pe_final = tensor.unsqueeze(pe_final, 0, talloc)
+
 	points := []tf.Point(f32){{0.5, 0.55, true}, {0.4, 0.6, false}}
 	n_points := uint(len(points))
 
@@ -128,10 +133,17 @@ main :: proc() {
 	output_tokens = tensor.broadcast_as(output_tokens, []uint{batch_size, d1, d2}, talloc)
 	tokens := tensor.cat([]^tensor.Tensor(f32){output_tokens, se_points}, 1, talloc)
 
-	src := tensor.repeat_interleave(neck_ln2, tokens.shape[0], 0, talloc)
+	src := tensor.repeat_interleave(image_embedding, tokens.shape[0], 0, talloc)
 	src = tensor.add(src, dense_embeddings, talloc)
 	pos_src := tensor.repeat_interleave(pe_final, tokens.shape[0], 0, talloc)
 
+	image_embedding = tensor.permute(tensor.flatten(src, 2, talloc), {0, 2, 1}, talloc)
+	image_pe := tensor.permute(tensor.flatten(pos_src, 2, talloc), {0, 2, 1}, talloc)
+
+	queries, keys := tokens, image_embedding
+	for layer in sam.mask_decoder.transformer.layers {
+		queries, keys = md.forward_two_way_attention_block(layer)
+	}
 
 	fmt.println("inference time phase 2:", time.since(t))
 
@@ -152,6 +164,8 @@ main :: proc() {
 	map_insert(&output_tensors, "md_tokens", tokens)
 	map_insert(&output_tensors, "md_src", src)
 	map_insert(&output_tensors, "md_pos_src", pos_src)
+	map_insert(&output_tensors, "md_image_embedding", image_embedding)
+	map_insert(&output_tensors, "md_image_pe", image_pe)
 
 	err_st_wr := st.write_tensors_to_file(
 		&st.Safe_Tensors(f32){tensors = output_tensors},
