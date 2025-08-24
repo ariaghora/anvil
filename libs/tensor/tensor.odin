@@ -2,11 +2,13 @@ package tensor
 
 
 import "../matmul"
+import "../trace"
 import "base:intrinsics"
 import "core:fmt"
 import "core:math"
 import "core:math/rand"
 import "core:mem"
+import "core:simd"
 import "core:slice"
 import "core:strings"
 
@@ -743,12 +745,20 @@ reshape :: proc(
 	arr: ^Tensor($T),
 	new_shape: []uint,
 	allocator := context.allocator,
+	loc := #caller_location,
 ) -> ^Tensor(T) {
 	// Check if total size matches
 	old_size := shape_to_size(arr.shape)
 	new_size := shape_to_size(new_shape)
 	if old_size != new_size {
-		panic(fmt.tprintf("Cannot reshape tensor of size %v to shape %v", old_size, new_shape))
+		panic(
+			fmt.tprintf(
+				"Cannot reshape tensor of size %v to shape %v (%c)",
+				old_size,
+				new_shape,
+				loc,
+			),
+		)
 	}
 
 	res := tensor_alloc(T, new_shape, true, allocator)
@@ -1477,5 +1487,119 @@ flatten :: proc(
 	append(&new_shape, uint(rest_size))
 	result := tensor_alloc(T, new_shape[:], false, allocator)
 	result.data = t.data
+	return result
+}
+
+// Applies softmax along the last dimension of a tensor
+// For a tensor of shape [..., N], applies softmax to each [...] slice over N elements
+softmax_inplace :: proc(t: ^Tensor($T)) {
+	softmax_trace := trace.TRACE_FUNCTION("softmax_inplace")
+	defer trace.end_scoped_trace(softmax_trace)
+
+	// Calculate the number of softmax operations needed
+	// This is the product of all dimensions except the last
+	num_rows := uint(1)
+	for i in 0 ..< len(t.shape) - 1 {
+		num_rows *= t.shape[i]
+	}
+
+	last_dim := t.shape[len(t.shape) - 1]
+
+	#no_bounds_check for row_idx in 0 ..< num_rows {
+		row_offset := row_idx * last_dim
+		row_data := t.data[row_offset:][:last_dim]
+
+		when T == f32 {
+			col := uint(0)
+			max_vec := #simd[4]f32 {
+				math.inf_f32(-1),
+				math.inf_f32(-1),
+				math.inf_f32(-1),
+				math.inf_f32(-1),
+			}
+
+			for ; col + 4 <= last_dim; col += 4 {
+				vals := (^#simd[4]f32)(&row_data[col])^
+				max_vec = simd.max(max_vec, vals)
+			}
+
+			max_val := max(
+				max(simd.extract(max_vec, 0), simd.extract(max_vec, 1)),
+				max(simd.extract(max_vec, 2), simd.extract(max_vec, 3)),
+			)
+
+			for ; col < last_dim; col += 1 {
+				max_val = max(max_val, row_data[col])
+			}
+
+			sum := f32(0)
+			col = 0
+			sum_vec := #simd[4]f32{0, 0, 0, 0}
+
+			for ; col + 4 <= last_dim; col += 4 {
+				vals := (^#simd[4]f32)(&row_data[col])^
+
+				exp_vals: #simd[4]f32
+				exp_vals = simd.replace(exp_vals, 0, math.exp(simd.extract(vals, 0) - max_val))
+				exp_vals = simd.replace(exp_vals, 1, math.exp(simd.extract(vals, 1) - max_val))
+				exp_vals = simd.replace(exp_vals, 2, math.exp(simd.extract(vals, 2) - max_val))
+				exp_vals = simd.replace(exp_vals, 3, math.exp(simd.extract(vals, 3) - max_val))
+
+				(^#simd[4]f32)(&row_data[col])^ = exp_vals
+				sum_vec = simd.add(sum_vec, exp_vals)
+			}
+
+			sum =
+				simd.extract(sum_vec, 0) +
+				simd.extract(sum_vec, 1) +
+				simd.extract(sum_vec, 2) +
+				simd.extract(sum_vec, 3)
+
+			for ; col < last_dim; col += 1 {
+				val := math.exp(row_data[col] - max_val)
+				row_data[col] = val
+				sum += val
+			}
+
+			inv_sum := f32(1) / sum
+			inv_sum_vec := #simd[4]f32{inv_sum, inv_sum, inv_sum, inv_sum}
+
+			col = 0
+			for ; col + 4 <= last_dim; col += 4 {
+				vals := (^#simd[4]f32)(&row_data[col])^
+				vals = simd.mul(vals, inv_sum_vec)
+				(^#simd[4]f32)(&row_data[col])^ = vals
+			}
+
+			for ; col < last_dim; col += 1 {
+				row_data[col] *= inv_sum
+			}
+
+		} else {
+			max_val := row_data[0]
+			for col in 1 ..< last_dim {
+				if row_data[col] > max_val {
+					max_val = row_data[col]
+				}
+			}
+
+			sum := T(0)
+			for col in 0 ..< last_dim {
+				val := math.exp(row_data[col] - max_val)
+				row_data[col] = val
+				sum += val
+			}
+
+			inv_sum := T(1) / sum
+			for col in 0 ..< last_dim {
+				row_data[col] *= inv_sum
+			}
+		}
+	}
+}
+
+softmax :: proc(t: ^Tensor($T), allocator := context.allocator) -> ^Tensor(T) {
+	result := clone(t, allocator)
+	softmax_inplace(result)
 	return result
 }

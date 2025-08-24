@@ -142,8 +142,30 @@ main :: proc() {
 
 	queries, keys := tokens, image_embedding
 	for layer in sam.mask_decoder.transformer.layers {
-		queries, keys = md.forward_two_way_attention_block(layer)
+		queries, keys = md.forward_two_way_attention_block(
+			layer,
+			queries,
+			keys,
+			tokens,
+			image_pe,
+			talloc,
+		)
 	}
+	q := tensor.add(queries, tokens, talloc)
+	k := tensor.add(keys, image_pe, talloc)
+	attn_out := md.forward_attention(
+		sam.mask_decoder.transformer.final_attn_token_to_image,
+		q,
+		k,
+		keys,
+		talloc,
+	)
+
+	queries = nn.forward_layer_norm_1d(
+		sam.mask_decoder.transformer.norm_final_attn,
+		tensor.add(queries, attn_out, talloc),
+		talloc,
+	)
 
 	fmt.println("inference time phase 2:", time.since(t))
 
@@ -166,6 +188,9 @@ main :: proc() {
 	map_insert(&output_tensors, "md_pos_src", pos_src)
 	map_insert(&output_tensors, "md_image_embedding", image_embedding)
 	map_insert(&output_tensors, "md_image_pe", image_pe)
+	map_insert(&output_tensors, "md_queries", queries)
+	map_insert(&output_tensors, "md_keys", keys)
+	map_insert(&output_tensors, "md_attn_out", attn_out)
 
 	err_st_wr := st.write_tensors_to_file(
 		&st.Safe_Tensors(f32){tensors = output_tensors},

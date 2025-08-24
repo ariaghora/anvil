@@ -5,6 +5,7 @@ import st "../../safetensors"
 import "../../tensor"
 import vb "../var_builder"
 import "core:fmt"
+import "core:math"
 import "core:terminal"
 
 MLP_Mask_Decoder :: struct($T: typeid) {
@@ -49,9 +50,65 @@ new_attention :: proc(
 			k_proj = k_proj,
 			v_proj = v_proj,
 			out_proj = out_proj,
+			num_heads = num_heads,
 		},
 		allocator,
 	)
+}
+
+@(private = "file")
+separate_heads :: proc(
+	x: ^tensor.Tensor($T),
+	num_heads: uint,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> (
+	out: ^tensor.Tensor(T),
+) {
+	b, n, c := x.shape[0], x.shape[1], x.shape[2]
+	out = tensor.reshape(x, {b, n, num_heads, c / num_heads}, allocator, loc)
+	out = tensor.transpose(out, 1, 2, allocator)
+	return
+}
+
+@(private = "file")
+recombine_heads :: proc(
+	x: ^tensor.Tensor($T),
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^tensor.Tensor(T) {
+	b, n_heads, n_tokens, c_per_head := x.shape[0], x.shape[1], x.shape[2], x.shape[3]
+	return tensor.reshape(
+		tensor.transpose(x, 1, 2, context.temp_allocator, loc),
+		{b, n_tokens, n_heads * c_per_head},
+		allocator,
+	)
+}
+
+forward_attention :: proc(
+	attn: ^Attention_Mask_Decoder($T),
+	q, k, v: ^tensor.Tensor(T),
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^tensor.Tensor(T) {
+	talloc := context.temp_allocator
+	q := nn.forward_linear(attn.q_proj, q, talloc)
+	k := nn.forward_linear(attn.k_proj, k, talloc)
+	v := nn.forward_linear(attn.v_proj, v, talloc)
+
+	q = separate_heads(q, attn.num_heads, talloc)
+	k = separate_heads(k, attn.num_heads, talloc)
+	v = separate_heads(v, attn.num_heads, talloc)
+
+	c_per_head := q.shape[3]
+	kt := tensor.transpose(k, 2, 3, talloc)
+	numerator := tensor.matmul(q, kt, talloc)
+	for v, i in numerator.data do numerator.data[i] /= math.sqrt(T(c_per_head))
+	attn_t := tensor.softmax(numerator, talloc)
+	out := tensor.matmul(attn_t, v, talloc)
+
+	out = nn.forward_linear(attn.out_proj, recombine_heads(out, talloc), allocator)
+	return out
 }
 
 free_attention :: proc(attn: ^Attention_Mask_Decoder($T)) {
@@ -82,9 +139,15 @@ MLP_Block :: struct($T: typeid) {
 
 forward_mlp_block :: proc(
 	mlp: ^MLP_Block($T),
+	x: ^tensor.Tensor(T),
 	allocator := context.allocator,
-) -> ^tensor.Tensor(T) {
-	return nil
+) -> (
+	out: ^tensor.Tensor(T),
+) {
+	out = nn.forward_linear(mlp.lin1, x, context.temp_allocator)
+	out = tensor.relu(out, context.temp_allocator)
+	out = nn.forward_linear(mlp.lin2, out, allocator)
+	return
 }
 
 free_mlp_block :: proc(mlp: ^MLP_Block($T)) -> ^tensor.Tensor(T) {
@@ -127,7 +190,6 @@ new_two_way_attention_block :: proc(
 	vb.assign(vb_parent, "norm4.weight", norm4.weight)
 	vb.assign(vb_parent, "norm4.bias", norm4.bias)
 
-	// let self_attn = Attention::new(embedding_dim, num_heads, 1, vb.pp("self_attn"))?;
 	vb_self_attn := vb.vb_make(T, "self_attn", vb_parent)
 	self_attn := new_attention(
 		T,
@@ -148,7 +210,7 @@ new_two_way_attention_block :: proc(
 		allocator = allocator,
 	)
 
-	vb_cross_attn_image_to_token := vb.vb_make(T, "cross_attn_token_to_image", vb_parent)
+	vb_cross_attn_image_to_token := vb.vb_make(T, "cross_attn_image_to_token", vb_parent)
 	cross_attn_image_to_token := new_attention(
 		T,
 		&vb_cross_attn_image_to_token,
@@ -165,6 +227,10 @@ new_two_way_attention_block :: proc(
 		},
 		allocator,
 	)
+	vb.assign(vb_parent, "mlp.lin1.weight", mlp.lin1.w, true)
+	vb.assign(vb_parent, "mlp.lin1.bias", mlp.lin1.b.?)
+	vb.assign(vb_parent, "mlp.lin2.weight", mlp.lin2.w, true)
+	vb.assign(vb_parent, "mlp.lin2.bias", mlp.lin2.b.?)
 
 	return new_clone(
 		Two_Way_Attention_Block(T) {
@@ -184,11 +250,47 @@ new_two_way_attention_block :: proc(
 
 forward_two_way_attention_block :: proc(
 	tt: ^Two_Way_Attention_Block($T),
+	queries: ^tensor.Tensor(T),
+	keys: ^tensor.Tensor(T),
+	query_pe: ^tensor.Tensor(T),
+	key_pe: ^tensor.Tensor(T),
+	allocator := context.allocator,
+	loc := #caller_location,
 ) -> (
 	^tensor.Tensor(T),
 	^tensor.Tensor(T),
 ) {
-	return nil, nil
+	talloc := context.temp_allocator
+	queries := queries
+	if tt.skip_first_layer_pe {
+		queries = forward_attention(tt.self_attn, queries, queries, queries, talloc)
+	} else {
+		q := tensor.add(queries, query_pe, allocator)
+		attn_out := forward_attention(tt.self_attn, q, q, queries, talloc)
+		queries = tensor.add(queries, attn_out, talloc)
+	}
+	queries = nn.forward_layer_norm_1d(tt.norm1, queries, talloc)
+
+	// Cross attention block, tokens attending to image embedding
+	q := tensor.add(queries, query_pe, talloc)
+	k := tensor.add(keys, key_pe, talloc)
+	attn_out := forward_attention(tt.cross_attn_token_to_image, q, k, keys, talloc)
+	queries = tensor.add(queries, attn_out, talloc)
+	queries = nn.forward_layer_norm_1d(tt.norm2, queries, talloc)
+
+	// MLP block
+	mlp_out := forward_mlp_block(tt.mlp, queries, talloc)
+	queries = tensor.add(queries, mlp_out, talloc)
+	queries = nn.forward_layer_norm_1d(tt.norm3, queries, allocator)
+
+	// Cross attention block, image embedding attending to tokens
+	q = tensor.add(queries, query_pe, talloc)
+	k = tensor.add(keys, key_pe, talloc)
+	attn_out = forward_attention(tt.cross_attn_image_to_token, k, q, queries, talloc)
+	keys := tensor.add(keys, attn_out, talloc)
+	keys = nn.forward_layer_norm_1d(tt.norm4, keys, allocator)
+
+	return queries, keys
 }
 
 free_two_way_attention_block :: proc(
@@ -214,14 +316,14 @@ Two_Way_Transformer :: struct($T: typeid) {
 
 new_two_way_transformer :: proc(
 	$T: typeid,
-	vb_root: ^vb.Var_Builder(T),
+	vb_parent: ^vb.Var_Builder(T),
 	depth: uint,
 	embedding_dim: uint,
 	num_heads: uint,
 	mlp_dim: uint,
 	allocator := context.allocator,
 ) -> ^Two_Way_Transformer(T) {
-	vb_layers := vb.vb_make(T, "layers", vb_root)
+	vb_layers := vb.vb_make(T, "layers", vb_parent)
 	layers := make([dynamic]^Two_Way_Attention_Block(T), allocator)
 	for i in 0 ..< depth {
 		vb_layer_i := vb.vb_make(T, fmt.tprintf("%d", i), &vb_layers)
@@ -237,8 +339,26 @@ new_two_way_transformer :: proc(
 		append(&layers, l)
 	}
 
+	vb_final_attn_token_to_image := vb.vb_make(T, "final_attn_token_to_image", vb_parent)
+	final_attn_token_to_image := new_attention(
+		T,
+		&vb_final_attn_token_to_image,
+		embedding_dim,
+		num_heads,
+		2,
+		allocator,
+	)
+
+	norm_final_attn := nn.new_layer_norm_1d(T, embedding_dim, T(1e-5), allocator)
+	vb.assign(vb_parent, "norm_final_attn.weight", norm_final_attn.weight)
+	vb.assign(vb_parent, "norm_final_attn.bias", norm_final_attn.bias)
+
 	return new_clone(
-		Two_Way_Transformer(T){layers = layers, final_attn_token_to_image = nil},
+		Two_Way_Transformer(T) {
+			layers = layers,
+			final_attn_token_to_image = final_attn_token_to_image,
+			norm_final_attn = norm_final_attn,
+		},
 		allocator,
 	)
 }

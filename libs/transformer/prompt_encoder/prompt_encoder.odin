@@ -189,9 +189,11 @@ new_prompt_encoder :: proc(
 
 	mask_downscaling_ln1 := nn.new_channel_layer_norm(T, uint(mask_in_chans / 4), 1e-6, allocator)
 	vb.assign(&vb_prompt_encoder, "mask_downscaling.1.weight", mask_downscaling_ln1.weight)
+	vb.assign(&vb_prompt_encoder, "mask_downscaling.1.bias", mask_downscaling_ln1.bias)
 
 	mask_downscaling_ln2 := nn.new_channel_layer_norm(T, uint(mask_in_chans), 1e-6, allocator)
 	vb.assign(&vb_prompt_encoder, "mask_downscaling.4.weight", mask_downscaling_ln2.weight)
+	vb.assign(&vb_prompt_encoder, "mask_downscaling.4.bias", mask_downscaling_ln2.bias)
 
 	point_embeddings: [dynamic]^nn.Embedding(T)
 	for i in 0 ..< NUM_POINTS_EMBEDDINGS {

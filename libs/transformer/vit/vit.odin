@@ -657,162 +657,7 @@ forward_attention :: proc(
 	// Softmax - do it in-place to avoid allocation
 	// Process each (batch, head) separately
 	attention_softmax_trace := trace.TRACE_FUNCTION("attention_softmax")
-	#no_bounds_check for bh in 0 ..< b * h {
-		for row in 0 ..< n {
-			row_offset := bh * n * n + row * n
-			row_data := attn_scores.data[row_offset:][:n]
-
-			when T == f32 {
-				// Find max using SIMD
-				col := uint(0)
-				max_vec := #simd[4]f32 {
-					math.inf_f32(-1),
-					math.inf_f32(-1),
-					math.inf_f32(-1),
-					math.inf_f32(-1),
-				}
-
-				for ; col + 4 <= n; col += 4 {
-					vals := (^#simd[4]f32)(&row_data[col])^
-					max_vec = simd.max(max_vec, vals)
-				}
-
-				// Reduce max_vec to scalar
-				max_val := max(
-					max(simd.extract(max_vec, 0), simd.extract(max_vec, 1)),
-					max(simd.extract(max_vec, 2), simd.extract(max_vec, 3)),
-				)
-
-				// Handle remainder
-				for ; col < n; col += 1 {
-					max_val = max(max_val, row_data[col])
-				}
-
-				sum := f32(0)
-				col = 0
-				sum_vec := #simd[4]f32{0, 0, 0, 0}
-
-				for ; col + 4 <= n; col += 4 {
-					vals := (^#simd[4]f32)(&row_data[col])^
-
-					// Have to extract for exp :(
-					exp_vals: #simd[4]f32
-					exp_vals = simd.replace(exp_vals, 0, math.exp(simd.extract(vals, 0) - max_val))
-					exp_vals = simd.replace(exp_vals, 1, math.exp(simd.extract(vals, 1) - max_val))
-					exp_vals = simd.replace(exp_vals, 2, math.exp(simd.extract(vals, 2) - max_val))
-					exp_vals = simd.replace(exp_vals, 3, math.exp(simd.extract(vals, 3) - max_val))
-
-
-					(^#simd[4]f32)(&row_data[col])^ = exp_vals
-					sum_vec = simd.add(sum_vec, exp_vals)
-				}
-
-				// Sum the vector elements
-				sum =
-					simd.extract(sum_vec, 0) +
-					simd.extract(sum_vec, 1) +
-					simd.extract(sum_vec, 2) +
-					simd.extract(sum_vec, 3)
-
-				// Handle remainder
-				for ; col < n; col += 1 {
-					val := math.exp(row_data[col] - max_val)
-					row_data[col] = val
-					sum += val
-				}
-
-				// Normalize with SIMD - this part is fully SIMD
-				inv_sum := f32(1) / sum
-				inv_sum_vec := #simd[4]f32{inv_sum, inv_sum, inv_sum, inv_sum}
-
-				col = 0
-				for ; col + 4 <= n; col += 4 {
-					vals := (^#simd[4]f32)(&row_data[col])^
-					vals = simd.mul(vals, inv_sum_vec)
-					(^#simd[4]f32)(&row_data[col])^ = vals
-				}
-
-				// Handle remainder
-				for ; col < n; col += 1 {
-					row_data[col] *= inv_sum
-				}
-
-			} else when T == f64 {
-				// Similar with 2-wide SIMD
-				col := uint(0)
-				max_vec := #simd[2]f64{math.inf_f64(-1), math.inf_f64(-1)}
-
-				for ; col + 2 <= n; col += 2 {
-					vals := (^#simd[2]f64)(&row_data[col])^
-					max_vec = simd.max(max_vec, vals)
-				}
-
-				max_val := max(simd.extract(max_vec, 0), simd.extract(max_vec, 1))
-
-				for ; col < n; col += 1 {
-					max_val = max(max_val, row_data[col])
-				}
-
-				sum := f64(0)
-				col = 0
-				sum_vec := #simd[2]f64{0, 0}
-
-				for ; col + 2 <= n; col += 2 {
-					vals := (^#simd[2]f64)(&row_data[col])^
-
-					exp_vals: #simd[2]f64
-					exp_vals = simd.replace(exp_vals, 0, math.exp(simd.extract(vals, 0) - max_val))
-					exp_vals = simd.replace(exp_vals, 1, math.exp(simd.extract(vals, 1) - max_val))
-
-
-					(^#simd[2]f64)(&row_data[col])^ = exp_vals
-					sum_vec = simd.add(sum_vec, exp_vals)
-				}
-
-				sum = simd.extract(sum_vec, 0) + simd.extract(sum_vec, 1)
-
-				for ; col < n; col += 1 {
-					val := math.exp(row_data[col] - max_val)
-					row_data[col] = val
-					sum += val
-				}
-
-				inv_sum := f64(1) / sum
-				inv_sum_vec := #simd[2]f64{inv_sum, inv_sum}
-
-				col = 0
-				for ; col + 2 <= n; col += 2 {
-					vals := (^#simd[2]f64)(&row_data[col])^
-					vals = simd.mul(vals, inv_sum_vec)
-					(^#simd[2]f64)(&row_data[col])^ = vals
-				}
-
-				for ; col < n; col += 1 {
-					row_data[col] *= inv_sum
-				}
-			} else {
-				// Original scalar code
-				max_val := row_data[0]
-				for col in 1 ..< n {
-					if row_data[col] > max_val {
-						max_val = row_data[col]
-					}
-				}
-
-				sum := T(0)
-				for col in 0 ..< n {
-					val := math.exp(row_data[col] - max_val)
-					row_data[col] = val
-					sum += val
-				}
-
-				inv_sum := T(1) / sum
-				for col in 0 ..< n {
-					row_data[col] *= inv_sum
-				}
-			}
-		}
-	}
+	tensor.softmax_inplace(attn_scores)
 	trace.end_scoped_trace(attention_softmax_trace)
 
 	// Apply attention to values - USE BLAS!
@@ -978,8 +823,10 @@ forward_tiny_vit_block :: proc(
 		actual_spatial_dim := uint(math.sqrt_f64(f64(actual_l)))
 		actual_h, actual_w := actual_spatial_dim, actual_spatial_dim
 
-		xs_4d := tensor.reshape(xs, []uint{b, actual_h, actual_w, c}, context.temp_allocator)
-		xs_conv := tensor.permute(xs_4d, []uint{0, 3, 1, 2}, context.temp_allocator)
+		// xs_4d := tensor.reshape(xs, []uint{b, actual_h, actual_w, c}, context.temp_allocator)
+		// xs_conv := tensor.permute(xs_4d, []uint{0, 3, 1, 2}, context.temp_allocator)
+		xs_transposed := tensor.transpose(xs, 1, 2, context.temp_allocator) // [b, l, c] → [b, c, l]
+		xs_conv := tensor.reshape(xs_transposed, []uint{b, c, h, w}, context.temp_allocator) // [b, c, l] → [b, c, h, w]
 		conv_out := forward_conv_2d_bn(block.local_conv, xs_conv, context.temp_allocator)
 		conv_flat := tensor.reshape(conv_out, []uint{b, c, actual_l}, context.temp_allocator)
 		conv_final := tensor.transpose(conv_flat, 1, 2, context.temp_allocator)
