@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:math"
 import "core:math/rand"
 import vmem "core:mem/virtual"
+import "core:testing"
 import "core:time"
 import "libs/nn"
 import st "libs/safetensors"
@@ -118,7 +119,9 @@ main :: proc() {
 	)
 
 	// Mask decoder forward
-	//// Predict masks
+
+	// Predict masks
+	/// Concat output tokens
 	output_tokens := tensor.cat(
 		[]^tensor.Tensor(f32) {
 			sam.mask_decoder.iou_token.weight,
@@ -137,35 +140,47 @@ main :: proc() {
 	src = tensor.add(src, dense_embeddings, talloc)
 	pos_src := tensor.repeat_interleave(pe_final, tokens.shape[0], 0, talloc)
 
-	image_embedding = tensor.permute(tensor.flatten(src, 2, talloc), {0, 2, 1}, talloc)
-	image_pe := tensor.permute(tensor.flatten(pos_src, 2, talloc), {0, 2, 1}, talloc)
+	h, w: uint
+	b, c, h, w = src.shape[0], src.shape[1], src.shape[2], src.shape[3]
 
-	queries, keys := tokens, image_embedding
-	for layer in sam.mask_decoder.transformer.layers {
-		queries, keys = md.forward_two_way_attention_block(
-			layer,
-			queries,
-			keys,
-			tokens,
-			image_pe,
-			talloc,
-		)
+	//// Run the transformer
+	hs: ^tensor.Tensor(f32)
+	hs, src = md.forward_two_way_transformer(
+		sam.mask_decoder.transformer,
+		src,
+		pos_src,
+		tokens,
+		talloc,
+	)
+
+	iou_token_out := tensor.flatten(tensor.slice(hs, {{}, {0, 1, 1}, {}}, talloc), 1, talloc)
+	mask_tokens_out := tensor.slice(
+		hs,
+		{{}, {1, 1 + int(sam.mask_decoder.num_mask_tokens), 1}, {}},
+		talloc,
+	)
+
+	//// Upscale mask embeddings
+	src = tensor.reshape(tensor.transpose(src, 1, 2, talloc), {b, c, h, w}, talloc)
+
+	out := nn.forward_conv_transpose_2d(sam.mask_decoder.output_upscaling_conv1, src, talloc)
+	out = nn.forward_channel_layer_norm(sam.mask_decoder.output_upscaling_ln, out, talloc)
+	out = vit.gelu_fast(out, talloc)
+	out = nn.forward_conv_transpose_2d(sam.mask_decoder.output_upscaling_conv2, out, talloc)
+	upscaled_embedding := vit.gelu_fast(out, talloc)
+
+
+	h_list := make([dynamic]^tensor.Tensor(f32), talloc)
+	hyper_in_list := make([dynamic]^tensor.Tensor(f32), talloc)
+	for mlp, i in sam.mask_decoder.output_hypernetworks_mlps {
+		h := tensor.slice(mask_tokens_out, {{}, {i, i + 1, 1}, {}}, talloc)
+		h = tensor.flatten(h, 1, talloc)
+		append(&h_list, h)
+		h = md.forward_mlp_mask_decoder(mlp, h, talloc)
+		append(&hyper_in_list, h)
 	}
-	q := tensor.add(queries, tokens, talloc)
-	k := tensor.add(keys, image_pe, talloc)
-	attn_out := md.forward_attention(
-		sam.mask_decoder.transformer.final_attn_token_to_image,
-		q,
-		k,
-		keys,
-		talloc,
-	)
+	hyper_in := tensor.stack(hyper_in_list[:], 1, talloc)
 
-	queries = nn.forward_layer_norm_1d(
-		sam.mask_decoder.transformer.norm_final_attn,
-		tensor.add(queries, attn_out, talloc),
-		talloc,
-	)
 
 	fmt.println("inference time phase 2:", time.since(t))
 
@@ -187,10 +202,14 @@ main :: proc() {
 	map_insert(&output_tensors, "md_src", src)
 	map_insert(&output_tensors, "md_pos_src", pos_src)
 	map_insert(&output_tensors, "md_image_embedding", image_embedding)
-	map_insert(&output_tensors, "md_image_pe", image_pe)
-	map_insert(&output_tensors, "md_queries", queries)
-	map_insert(&output_tensors, "md_keys", keys)
-	map_insert(&output_tensors, "md_attn_out", attn_out)
+	map_insert(&output_tensors, "md_hs", hs)
+	map_insert(&output_tensors, "md_iou_token_out", iou_token_out)
+	map_insert(&output_tensors, "md_mask_tokens_out", mask_tokens_out)
+	map_insert(&output_tensors, "md_upscaled_embedding", upscaled_embedding)
+	map_insert(&output_tensors, "md_hyper_h0", h_list[0])
+	map_insert(&output_tensors, "md_hyper_h2", h_list[2])
+	map_insert(&output_tensors, "md_hyper_in0", hyper_in_list[0])
+	map_insert(&output_tensors, "md_hyper_in", hyper_in)
 
 	err_st_wr := st.write_tensors_to_file(
 		&st.Safe_Tensors(f32){tensors = output_tensors},

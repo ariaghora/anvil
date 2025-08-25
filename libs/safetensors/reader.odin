@@ -7,7 +7,9 @@ import "core:mem"
 import "core:os"
 import "core:slice"
 
-Assignment_Incompatible_Shape :: struct {}
+Assignment_Incompatible_Shape :: struct {
+	source_shape, target_shape: []uint,
+}
 Tensor_Not_Found :: struct {
 	key: string,
 }
@@ -112,13 +114,17 @@ tensor_assign_from_safe_tensors_one :: proc(
 	tensor_name: string,
 	safe_tensors: ^Safe_Tensors(T),
 	should_transpose := false,
+	loc := #caller_location,
 ) -> Safe_Tensors_Error {
 	t_from, ok := safe_tensors.tensors[tensor_name]
 	if !ok do return Tensor_Not_Found{tensor_name}
 
 	if should_transpose do t_from = tensor.transpose(t_from, 0, 1)
 
-	if !slice.equal(t.shape, t_from.shape) do return Assignment_Incompatible_Shape{}
+	if !slice.equal(t.shape, t_from.shape) {
+		fmt.println(loc)
+		return Assignment_Incompatible_Shape{source_shape = t_from.shape, target_shape = t.shape}
+	}
 	if !t.contiguous do return Tensors_Names_Length_Mismatch{}
 
 

@@ -651,8 +651,18 @@ forward_attention :: proc(
 		attn_scores.data[i] *= scale
 	}
 
-	// NOTE(Claude): Skip the bias tensor allocation
-	// NOTE(Aria): Fuck it, implement after this
+	// Add attention biases - broadcast across batch dimension
+	#no_bounds_check for batch in 0 ..< b {
+		for head in 0 ..< h {
+			for i in 0 ..< n {
+				for j in 0 ..< n {
+					scores_idx := batch * h * n * n + head * n * n + i * n + j
+					bias_idx := head * n * n + i * n + j
+					attn_scores.data[scores_idx] += attn.ab.data[bias_idx]
+				}
+			}
+		}
+	}
 
 	// Softmax - do it in-place to avoid allocation
 	// Process each (batch, head) separately
@@ -660,7 +670,7 @@ forward_attention :: proc(
 	tensor.softmax_inplace(attn_scores)
 	trace.end_scoped_trace(attention_softmax_trace)
 
-	// Apply attention to values - USE BLAS!
+	// Apply attention to values 
 	attn_output := tensor.matmul(attn_scores, v_transposed, context.temp_allocator)
 
 	// Reshape back: (B, H, N, D) -> (B, N, H*D)

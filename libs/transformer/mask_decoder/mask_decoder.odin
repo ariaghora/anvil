@@ -8,11 +8,6 @@ import "core:fmt"
 import "core:math"
 import "core:terminal"
 
-MLP_Mask_Decoder :: struct($T: typeid) {
-	layers:         [dynamic]^nn.Linear(T),
-	sigmoid_output: bool,
-}
-
 Attention_Mask_Decoder :: struct($T: typeid) {
 	q_proj:    ^nn.Linear(T),
 	k_proj:    ^nn.Linear(T),
@@ -119,6 +114,11 @@ free_attention :: proc(attn: ^Attention_Mask_Decoder($T)) {
 	free(attn)
 }
 
+MLP_Mask_Decoder :: struct($T: typeid) {
+	layers:         [dynamic]^nn.Linear(T),
+	sigmoid_output: bool,
+}
+
 
 new_mlp_mask_decoder :: proc(
 	$T: typeid,
@@ -128,8 +128,45 @@ new_mlp_mask_decoder :: proc(
 	output_dim: uint,
 	num_layers: uint,
 	sigmoid_output: bool,
-) -> MLP_Mask_Decoder(T) {
-	return {sigmoid_output = sigmoid_output}
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^MLP_Mask_Decoder(T) {
+	layers := make([dynamic]^nn.Linear(T), allocator)
+	for i in 0 ..< num_layers {
+		_in_dim := i == 0 ? input_dim : hidden_dim
+		_out_dim := i + 1 == num_layers ? output_dim : hidden_dim
+		layer := nn.new_linear(T, _in_dim, _out_dim, true, false, allocator)
+		vb.assign(vb_parent, fmt.tprintf("layers.%d.weight", i), layer.w, true, loc)
+		vb.assign(vb_parent, fmt.tprintf("layers.%d.bias", i), layer.b.?, false, loc)
+		append(&layers, layer)
+	}
+	return new_clone(
+		MLP_Mask_Decoder(T){layers = layers, sigmoid_output = sigmoid_output},
+		allocator,
+	)
+}
+
+forward_mlp_mask_decoder :: proc(
+	mlp: ^MLP_Mask_Decoder($T),
+	xs: ^tensor.Tensor(T),
+	allocator := context.allocator,
+) -> ^tensor.Tensor(T) {
+	xs := xs
+	for l, i in mlp.layers {
+		xs = nn.forward_linear(l, xs, allocator)
+		if i + 1 < len(mlp.layers) do xs = tensor.relu(xs, allocator)
+	}
+	if mlp.sigmoid_output {
+		fmt.panicf("sigmoid is not implemented yet")
+	}
+	return xs
+}
+
+free_mlp_mask_decoder :: proc(mlp: ^MLP_Mask_Decoder($T), allocator := context.allocator) {
+	for l in mlp.layers {
+		nn.free_linear(l, allocator)
+	}
+	delete(mlp.layers)
 }
 
 MLP_Block :: struct($T: typeid) {
@@ -363,7 +400,46 @@ new_two_way_transformer :: proc(
 	)
 }
 
-forward_two_way_transformer :: proc(tt: ^Two_Way_Transformer($T)) {
+forward_two_way_transformer :: proc(
+	tt: ^Two_Way_Transformer($T),
+	image_embedding: ^tensor.Tensor(T),
+	image_pe: ^tensor.Tensor(T),
+	point_embedding: ^tensor.Tensor(T),
+	allocator := context.allocator,
+) -> (
+	^tensor.Tensor(T),
+	^tensor.Tensor(T),
+) {
+	talloc := context.temp_allocator
+	image_embedding := tensor.permute(
+		tensor.flatten(image_embedding, 2, talloc),
+		{0, 2, 1},
+		talloc,
+	)
+	image_pe := tensor.permute(tensor.flatten(image_pe, 2, talloc), {0, 2, 1}, talloc)
+
+	queries, keys := point_embedding, image_embedding
+	for layer in tt.layers {
+		queries, keys = forward_two_way_attention_block(
+			layer,
+			queries,
+			keys,
+			point_embedding,
+			image_pe,
+			talloc,
+		)
+	}
+
+	q := tensor.add(queries, point_embedding, talloc)
+	k := tensor.add(keys, image_pe, talloc)
+
+	attn_out := forward_attention(tt.final_attn_token_to_image, q, k, keys, talloc)
+	queries = nn.forward_layer_norm_1d(
+		tt.norm_final_attn,
+		tensor.add(queries, attn_out, talloc),
+		talloc,
+	)
+	return queries, keys
 }
 
 free_two_way_transformer :: proc(tt: ^Two_Way_Transformer($T)) {
@@ -376,12 +452,12 @@ free_two_way_transformer :: proc(tt: ^Two_Way_Transformer($T)) {
 Mask_Decoder :: struct($T: typeid) {
 	iou_token:                 ^nn.Embedding(T),
 	mask_tokens:               ^nn.Embedding(T),
-	iou_prediction_head:       MLP_Mask_Decoder(T),
+	iou_prediction_head:       ^MLP_Mask_Decoder(T),
 	output_upscaling_conv1:    ^nn.Conv_Transpose_2d(T),
 	output_upscaling_ln:       ^nn.Channel_Layer_Norm(T),
 	output_upscaling_conv2:    ^nn.Conv_Transpose_2d(T),
 	num_mask_tokens:           uint,
-	output_hypernetworks_mlps: [dynamic]MLP_Mask_Decoder(T),
+	output_hypernetworks_mlps: [dynamic]^MLP_Mask_Decoder(T),
 	transformer:               ^Two_Way_Transformer(T),
 }
 
@@ -403,14 +479,16 @@ new_mask_decoder :: proc(
 		safetensors = safetensors,
 	}
 
+	vb_iou_prediction_head := vb.vb_make(T, "iou_prediction_head", &vb_mask_decoder)
 	iou_prediction_head := new_mlp_mask_decoder(
 		T,
-		&vb_mask_decoder,
+		&vb_iou_prediction_head,
 		transformer_dim,
 		iou_head_hidden_dim,
 		num_mask_tokens,
 		iou_head_depth,
 		false,
+		allocator,
 	)
 
 	iou_token := nn.new_embedding(T, 1, transformer_dim, true, allocator)
@@ -456,6 +534,23 @@ new_mask_decoder :: proc(
 		allocator = allocator,
 	)
 
+	output_hypernetworks_mlps := make([dynamic]^MLP_Mask_Decoder(T), allocator)
+	vb_hypernets := vb.vb_make(T, "output_hypernetworks_mlps", &vb_mask_decoder)
+	for i in 0 ..< num_mask_tokens {
+		vb_i := vb.vb_make(T, fmt.tprintf("%d", i), &vb_hypernets)
+		mlp := new_mlp_mask_decoder(
+			T,
+			&vb_i,
+			transformer_dim,
+			transformer_dim,
+			transformer_dim / 8,
+			3,
+			false,
+			allocator,
+		)
+		append(&output_hypernetworks_mlps, mlp)
+	}
+
 	return new_clone(
 		Mask_Decoder(T) {
 			iou_token = iou_token,
@@ -466,6 +561,7 @@ new_mask_decoder :: proc(
 			output_upscaling_conv2 = output_upscaling_conv2,
 			output_upscaling_ln = output_upscaling_ln,
 			transformer = transformer,
+			output_hypernetworks_mlps = output_hypernetworks_mlps,
 		},
 		allocator,
 	)
@@ -481,5 +577,10 @@ free_mask_decoder :: proc(md: ^Mask_Decoder($T), allocator := context.allocator)
 	nn.free_channel_layer_norm(md.output_upscaling_ln, allocator)
 	nn.free_conv_transpose_2d(md.output_upscaling_conv1, allocator)
 	nn.free_conv_transpose_2d(md.output_upscaling_conv2, allocator)
+	free_mlp_mask_decoder(md.iou_prediction_head, allocator)
+
+	for l in md.output_hypernetworks_mlps do free_mlp_mask_decoder(l, allocator)
+	delete(md.output_hypernetworks_mlps)
+
 	free(md)
 }

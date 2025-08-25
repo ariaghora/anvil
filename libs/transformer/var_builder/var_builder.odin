@@ -32,11 +32,12 @@ assign :: proc(
 	leaf_name: string,
 	target: ^tensor.Tensor(T),
 	should_transpose := false,
+	loc := #caller_location,
 ) {
 	path := strings.concatenate(
 		{vb_resolve_preceding_path(vb, context.temp_allocator), ".", leaf_name},
 	)
-	err := st.tensor_assign_from_safe_tensors(target, path, vb.safetensors, should_transpose)
+	err := st.tensor_assign_from_safe_tensors(target, path, vb.safetensors, should_transpose, loc)
 	if err != nil {
 		fmt.panicf("Error assigning %s to target tensor: %v", path, err)
 	}

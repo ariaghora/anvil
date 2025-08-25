@@ -76,6 +76,8 @@ new_conv_transpose_2d :: proc(
 forward_conv_transpose_2d :: proc(
 	conv: ^Conv_Transpose_2d($T),
 	x: ^tensor.Tensor(T),
+	allocator := context.allocator,
+	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
 	return conv_transpose_2d_grouped(
 		x,
