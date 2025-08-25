@@ -645,8 +645,32 @@ predict_mask :: proc(
 	return masks, iou_pred
 }
 
-forward_mask_decoder :: proc(md: ^Mask_Decoder($T)) -> ^tensor.Tensor(T) {
-	return nil
+forward_mask_decoder :: proc(
+	md: ^Mask_Decoder($T),
+	image_embeddings: ^tensor.Tensor(T),
+	image_pe: ^tensor.Tensor(T),
+	sparse_prompt_embeddings: ^tensor.Tensor(T),
+	dense_prompt_embeddings: ^tensor.Tensor(T),
+	// multimask_output: bool, // TODO(Aria): allow this
+	allocator := context.allocator,
+) -> (
+	^tensor.Tensor(T),
+	^tensor.Tensor(T),
+) {
+	masks, iou_pred := predict_mask(
+		md,
+		image_embeddings,
+		image_pe,
+		sparse_prompt_embeddings,
+		dense_prompt_embeddings,
+		context.temp_allocator,
+	)
+
+	// When multimask is false, just take the first channel from masks and iou_pred
+	// TODO(Aria): implement multimask output
+	masks = tensor.slice(masks, {{}, {0, 1, 1}, {}, {}}, allocator)
+	iou_pred = tensor.slice(iou_pred, {{}, {0, 1, 1}}, allocator)
+	return masks, iou_pred
 }
 
 free_mask_decoder :: proc(md: ^Mask_Decoder($T), allocator := context.allocator) {

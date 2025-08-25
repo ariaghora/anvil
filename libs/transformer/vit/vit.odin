@@ -1211,24 +1211,19 @@ new_tiny_vit_5m :: proc(
 	)
 }
 
-Tiny_Vit_Result :: struct($T: typeid) {
-	patch_embedding: ^tensor.Tensor(T),
-	output_final:    ^tensor.Tensor(T),
-}
 
 // Argument return_intermediary_tensors has no effect for arena allocators
 forward_tiny_vit_5m :: proc(
 	model: ^Tiny_ViT_5m($T),
 	x: ^tensor.Tensor(T),
-	return_intermediary_tensors: bool = false,
 	allocator := context.allocator,
 	loc := #caller_location,
-) -> Tiny_Vit_Result(T) {
+) -> ^tensor.Tensor(T) {
 	tiny_vit_trace := trace.TRACE_FUNCTION("tiny_vit_5m_forward")
 	defer trace.end_scoped_trace(tiny_vit_trace)
 
 	// Patch embedding
-	patch_embedding := forward_patch_embed(model.patch_embed, x, allocator)
+	patch_embedding := forward_patch_embed(model.patch_embed, x, context.temp_allocator)
 
 	// Layer 0
 	layer0_trace := trace.TRACE_SECTION("layer0_conv")
@@ -1257,18 +1252,14 @@ forward_tiny_vit_5m :: proc(
 
 	// Apply neck convolutions with layer norms
 	conv1_out := nn.forward_conv2d(model.neck_conv1, xs_conv, context.temp_allocator)
-	ln1_out := nn.forward_layer_norm_2d(model.neck_ln1, conv1_out, context.temp_allocator)
+	ln1_out := nn.forward_channel_layer_norm(model.neck_ln1, conv1_out, context.temp_allocator)
 
 	conv2_out := nn.forward_conv2d(model.neck_conv2, ln1_out, context.temp_allocator)
 
-	result := nn.forward_layer_norm_2d(model.neck_ln2, conv2_out, allocator, loc)
+	result := nn.forward_channel_layer_norm(model.neck_ln2, conv2_out, allocator, loc)
 	trace.end_scoped_trace(neck_trace)
 
-	if !return_intermediary_tensors {
-		tensor.free_tensor(patch_embedding, allocator)
-	}
-
-	return {patch_embedding = patch_embedding, output_final = result}
+	return result
 }
 
 free_tiny_vit_5m :: proc(model: ^Tiny_ViT_5m($T), allocator := context.allocator) {

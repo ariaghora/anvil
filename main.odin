@@ -8,6 +8,7 @@ import "core:math/rand"
 import vmem "core:mem/virtual"
 import "core:os"
 import "core:os/os2"
+import "core:slice"
 import "core:testing"
 import "core:time"
 import "libs/nn"
@@ -18,11 +19,76 @@ import tf "libs/transformer"
 import md "libs/transformer/mask_decoder"
 import pe "libs/transformer/prompt_encoder"
 import "libs/transformer/vit"
-import "vendor:stb/image"
+import rl "vendor:raylib"
+// import "vendor:stb/image"
 
 IMAGE_SIZE :: uint(1024)
 
+preprocess :: proc(
+	$T: typeid,
+	image: ^rl.Image,
+	target_size: uint,
+	allocator := context.allocator,
+) -> ^tensor.Tensor(T) {
+	width := uint(image.width)
+	height := uint(image.height)
+
+	means := []f32{123.675, 116.28, 103.53}
+	std := []f32{58.395, 57.12, 57.375}
+
+	w_out, h_out: uint
+	if width > height {
+		w_out = target_size
+		h_out = uint(f32(target_size * height) / f32(width))
+	} else {
+		h_out = target_size
+		w_out = uint(f32(target_size * width) / f32(height))
+	}
+
+	image_resized := rl.ImageCopy(image^)
+	defer rl.UnloadImage(image_resized)
+	rl.ImageResize(&image_resized, i32(w_out), i32(h_out))
+
+	image_data := cast([^]byte)image_resized.data
+
+	image_chw := make([]f32, 3 * w_out * h_out, context.temp_allocator)
+	for row in 0 ..< h_out {
+		for col in 0 ..< w_out {
+			src_idx := (row * w_out + col) * 4
+
+			r_idx := 0 * h_out * w_out + row * w_out + col
+			g_idx := 1 * h_out * w_out + row * w_out + col
+			b_idx := 2 * h_out * w_out + row * w_out + col
+
+			image_chw[r_idx] = (f32(image_data[src_idx + 0]) - means[0]) / std[0]
+			image_chw[g_idx] = (f32(image_data[src_idx + 1]) - means[1]) / std[1]
+			image_chw[b_idx] = (f32(image_data[src_idx + 2]) - means[2]) / std[2]
+		}
+	}
+
+	image_chw_padded := make([]f32, 3 * target_size * target_size, context.temp_allocator)
+
+	for c in 0 ..< 3 {
+		for row in 0 ..< h_out {
+			for col in 0 ..< w_out {
+				src_idx := uint(c) * h_out * w_out + row * w_out + col
+				dst_idx := uint(c) * target_size * target_size + row * target_size + col
+				image_chw_padded[dst_idx] = image_chw[src_idx]
+			}
+		}
+	}
+
+	image_out := tensor.new_with_init(
+		image_chw_padded,
+		{1, 3, target_size, target_size},
+		allocator,
+	)
+
+	return image_out
+}
+
 main :: proc() {
+	rl.InitWindow(1024, 1024, "Segment Anything")
 
 
 	arena: vmem.Arena
@@ -34,157 +100,63 @@ main :: proc() {
 	trace.init_trace()
 	defer trace.finish_trace()
 
+
 	main_trace := trace.TRACE_FUNCTION("main")
 	defer trace.end_scoped_trace(main_trace)
 
-	x, y, chan: i32
-	f := libc.fopen("../candle-tinyvit-comp/car.jpg", "rb")
-	assert(f != nil)
-	img := image.load_from_file(f, &x, &y, &chan, 0)
-	assert(img != nil)
-	image_chw := make([]f32, 3 * y * x, context.temp_allocator)
-	for row in 0 ..< y {
-		for col in 0 ..< x {
-			// Source pixel index in HWC format
-			src_idx := (row * x + col) * chan
+	// Inputs
+	image := rl.LoadImage("../candle-tinyvit-comp/car.jpg")
+	defer rl.UnloadImage(image)
+	x := image.width
+	y := image.height
+	chan := i32(4)
 
-			// Destination indices for each channel in CHW format
-			r_idx := 0 * y * x + row * x + col
-			g_idx := 1 * y * x + row * x + col
-			b_idx := 2 * y * x + row * x + col
+	// Convert to RGB if needed (SAM expects RGB, not RGBA)
+	rl.ImageFormat(&image, rl.PixelFormat.UNCOMPRESSED_R8G8B8)
 
-			// Convert bytes (0-255) to float (0-1) and place in CHW layout
-			image_chw[r_idx] = f32(img[src_idx + 0]) / 255.0
-			image_chw[g_idx] = f32(img[src_idx + 1]) / 255.0
-			image_chw[b_idx] = f32(img[src_idx + 2]) / 255.0
-		}
-	}
-	image_car := tensor.new_with_init(image_chw, {1, 3, uint(y), uint(x)}, context.temp_allocator)
+	//// Image as tensor
+	input := preprocess(f32, &image, 1024, arena_alloc)
 
+	//// mouse clicks
+	points := []tf.Point(f32){{0.5, 0.85, true}, {0.4, 0.2, false}}
+	n_points := uint(len(points))
+
+	// Model loading
+	model_init_trace := trace.TRACE_SECTION("model_initialization")
 	model_file := "models/mobile_sam-tiny-vitt.safetensors"
 	safetensors, err_st_load := st.read_from_file(f32, model_file, arena_alloc)
 	assert(err_st_load == nil)
-
-	model_init_trace := trace.TRACE_SECTION("model_initialization")
 	sam := tf.new_tiny(f32, safetensors, arena_alloc)
 	defer tf.free_tiny(sam, arena_alloc)
 	image_encoder := sam.image_encoder.(^vit.Tiny_ViT_5m(f32))
 	trace.end_scoped_trace(model_init_trace)
 
-	input_st, err_in_st := st.read_from_file(
-		f32,
-		"models/image.safetensors",
-		context.temp_allocator,
-	)
-	if err_in_st != nil {
-		fmt.panicf("cannot set tensors: %v\n", err_in_st)
-	}
-	input := input_st.tensors["image"]
-
-	// Patch embedding
+	// 1) Get image embedding
 	t := time.now()
-	talloc := context.temp_allocator
-	patch_embedding_conv1 := vit.forward_conv_2d_bn(image_encoder.patch_embed.conv1, input, talloc)
-	patch_embedding_conv1_gelu := vit.gelu_fast(patch_embedding_conv1, talloc)
-	patch_embedding_conv2 := vit.forward_conv_2d_bn(
-		image_encoder.patch_embed.conv2,
-		patch_embedding_conv1_gelu,
-		talloc,
-	)
 
-	// layer0
-	layer0 := vit.forward_conv_layer(image_encoder.layer0, patch_embedding_conv2, talloc)
-	// layer1 to n
-	layers := layer0
-	for i in 0 ..< len(image_encoder.layers) {
-		layer := image_encoder.layers[i]
-		layers = vit.forward_basic_layer(layer, layers, talloc)
-	}
-
-	// neck_conv1
-	b := layers.shape[0]
-	c := layers.shape[2]
-	sequence_length := layers.shape[1]
-	spatial_dim := uint(math.sqrt(f64(sequence_length)))
-	layers_4d := tensor.reshape(layers, []uint{b, spatial_dim, spatial_dim, c}, talloc)
-	layers_conv := tensor.permute(layers_4d, []uint{0, 3, 1, 2}, talloc)
-	neck_conv1 := nn.forward_conv2d(image_encoder.neck_conv1, layers_conv, talloc)
-	neck_ln1 := nn.forward_channel_layer_norm(image_encoder.neck_ln1, neck_conv1, talloc)
-	neck_conv2 := nn.forward_conv2d(image_encoder.neck_conv2, neck_ln1, talloc)
-	neck_ln2 := nn.forward_channel_layer_norm(image_encoder.neck_ln2, neck_conv2, talloc)
+	image_embedding := vit.forward_tiny_vit_5m(image_encoder, input, arena_alloc)
 	fmt.println("inference time phase 1:", time.since(t))
 
-	image_embedding := neck_ln2
+	// 2) Do mask decoding (LOOP, nest the allocator)
+	masks, masks_bin, iou_pred: ^tensor.Tensor(f32)
+	for !rl.WindowShouldClose() {
+		t = time.now()
+		masks, iou_pred = tf.forward_sam_for_embedding(
+			sam,
+			image_embedding,
+			input.shape[2],
+			input.shape[3],
+			points,
+			context.temp_allocator,
+		)
+		fmt.println("inference time phase 2:", time.since(t))
 
-	t = time.now()
-	pe_final := pe.forward_position_embedding(
-		sam.prompt_encoder.pe_layer,
-		uint(sam.prompt_encoder.image_embedding_size[0]),
-		uint(sam.prompt_encoder.image_embedding_size[1]),
-		talloc,
-	)
-	pe_final = tensor.unsqueeze(pe_final, 0, talloc)
+		// Postprocessing
+		//// Low-res binary mask
+		masks_bin = tensor.clone(masks, context.temp_allocator)
+		for v, i in masks_bin.data do masks_bin.data[i] = v > 0 ? 1.0 : 0.0
 
-	points := []tf.Point(f32){{0.5, 0.55, true}, {0.4, 0.6, false}}
-	n_points := uint(len(points))
-
-	// Build flat array of scaled coordinates
-	xys := make([]f32, n_points * 2, context.temp_allocator)
-	labels := make([]f32, n_points, context.temp_allocator)
-
-	original_w, original_h := input.shape[2], input.shape[3]
-	for point, i in points {
-		xys[i * 2] = f32(point.x) * f32(original_w)
-		xys[i * 2 + 1] = f32(point.y) * f32(original_h)
-		labels[i] = point.is_positive ? 1.0 : 0.0
+		free_all(context.temp_allocator)
 	}
-	points_tensor := tensor.new_with_init(xys, []uint{1, n_points, 2}, talloc)
-	labels_tensor := tensor.new_with_init(labels, []uint{1, n_points}, talloc)
-
-	// Prompt encoder forward
-	se_points, dense_embeddings := pe.forward_prompt_encoder(
-		sam.prompt_encoder,
-		points_tensor,
-		labels_tensor,
-		talloc,
-	)
-
-	// Mask decoder forward
-	masks, iou_pred := md.predict_mask(
-		sam.mask_decoder,
-		image_embedding,
-		pe_final,
-		se_points,
-		dense_embeddings,
-		talloc,
-	)
-
-
-	fmt.println("inference time phase 2:", time.since(t))
-
-	output_tensors := make(map[string]^tensor.Tensor(f32), context.temp_allocator)
-	map_insert(&output_tensors, "0-car", image_car)
-	map_insert(&output_tensors, "1-input", input)
-	map_insert(&output_tensors, "2-patch_embedding_conv1", patch_embedding_conv1)
-	map_insert(&output_tensors, "3-patch_embedding_conv1_gelu", patch_embedding_conv1_gelu)
-	map_insert(&output_tensors, "4-patch_embedding_conv2", patch_embedding_conv2)
-	map_insert(&output_tensors, "5-layer0", layer0)
-	map_insert(&output_tensors, "6-layers", layers)
-	map_insert(&output_tensors, "7-neck_conv1", neck_conv1)
-	map_insert(&output_tensors, "8-neck_ln1", neck_ln1)
-	map_insert(&output_tensors, "9-neck_conv2", neck_conv2)
-	map_insert(&output_tensors, "10-neck_ln2", neck_ln2)
-	map_insert(&output_tensors, "pr_en_7-pe_final", pe_final)
-	map_insert(&output_tensors, "pr_en_se_points", se_points)
-	map_insert(&output_tensors, "pr_en_dense_embeddings", dense_embeddings)
-	map_insert(&output_tensors, "md_masks", masks)
-	map_insert(&output_tensors, "md_iou_pred", iou_pred)
-
-
-	err_st_wr := st.write_tensors_to_file(
-		&st.Safe_Tensors(f32){tensors = output_tensors},
-		"models/patch_embedding_odin.safetensors",
-	)
-	assert(err_st_wr == nil)
 
 }

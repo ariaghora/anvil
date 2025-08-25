@@ -59,8 +59,48 @@ forward_sam_for_embedding :: proc(
 	original_h, original_w: uint,
 	points: []Point(T),
 	allocator := context.allocator,
+) -> (
+	^tensor.Tensor(T),
+	^tensor.Tensor(T),
 ) {
-	image_pe := forward_position_embedding(sam.prompt_encoder.pe_layer, allocator)
+	talloc := context.temp_allocator
+	image_pe := pe.forward_position_embedding(
+		sam.prompt_encoder.pe_layer,
+		uint(sam.prompt_encoder.image_embedding_size[0]),
+		uint(sam.prompt_encoder.image_embedding_size[1]),
+		talloc,
+	)
+	image_pe = tensor.unsqueeze(image_pe, 0, talloc)
+
+	// Build flat array of scaled coordinates
+	n_points: uint = len(points)
+	xys := make([]f32, n_points * 2, context.temp_allocator)
+	labels := make([]f32, n_points, context.temp_allocator)
+	// original_w, original_h := input.shape[2], input.shape[3]
+	for point, i in points {
+		xys[i * 2] = f32(point.x) * f32(original_w)
+		xys[i * 2 + 1] = f32(point.y) * f32(original_h)
+		labels[i] = point.is_positive ? 1.0 : 0.0
+	}
+	points_tensor := tensor.new_with_init(xys, []uint{1, n_points, 2}, talloc)
+	labels_tensor := tensor.new_with_init(labels, []uint{1, n_points}, talloc)
+
+	// Prompt encoder forward
+	sparse_prompt_embeddings, dense_prompt_embeddings := pe.forward_prompt_encoder(
+		sam.prompt_encoder,
+		points_tensor,
+		labels_tensor,
+		talloc,
+	)
+
+	return md.forward_mask_decoder(
+		sam.mask_decoder,
+		img_embeddings,
+		image_pe,
+		sparse_prompt_embeddings,
+		dense_prompt_embeddings,
+		allocator,
+	)
 }
 
 free_tiny :: proc(sam: ^Sam($T), allocator := context.allocator) {
