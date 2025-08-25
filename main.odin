@@ -1,9 +1,13 @@
 package main
 
+import "core:c"
+import "core:c/libc"
 import "core:fmt"
 import "core:math"
 import "core:math/rand"
 import vmem "core:mem/virtual"
+import "core:os"
+import "core:os/os2"
 import "core:testing"
 import "core:time"
 import "libs/nn"
@@ -14,10 +18,13 @@ import tf "libs/transformer"
 import md "libs/transformer/mask_decoder"
 import pe "libs/transformer/prompt_encoder"
 import "libs/transformer/vit"
+import "vendor:stb/image"
 
 IMAGE_SIZE :: uint(1024)
 
 main :: proc() {
+
+
 	arena: vmem.Arena
 	arena_err := vmem.arena_init_growing(&arena)
 	ensure(arena_err == nil)
@@ -29,6 +36,30 @@ main :: proc() {
 
 	main_trace := trace.TRACE_FUNCTION("main")
 	defer trace.end_scoped_trace(main_trace)
+
+	x, y, chan: i32
+	f := libc.fopen("../candle-tinyvit-comp/car.jpg", "rb")
+	assert(f != nil)
+	img := image.load_from_file(f, &x, &y, &chan, 0)
+	assert(img != nil)
+	image_chw := make([]f32, 3 * y * x, context.temp_allocator)
+	for row in 0 ..< y {
+		for col in 0 ..< x {
+			// Source pixel index in HWC format
+			src_idx := (row * x + col) * chan
+
+			// Destination indices for each channel in CHW format
+			r_idx := 0 * y * x + row * x + col
+			g_idx := 1 * y * x + row * x + col
+			b_idx := 2 * y * x + row * x + col
+
+			// Convert bytes (0-255) to float (0-1) and place in CHW layout
+			image_chw[r_idx] = f32(img[src_idx + 0]) / 255.0
+			image_chw[g_idx] = f32(img[src_idx + 1]) / 255.0
+			image_chw[b_idx] = f32(img[src_idx + 2]) / 255.0
+		}
+	}
+	image_car := tensor.new_with_init(image_chw, {1, 3, uint(y), uint(x)}, context.temp_allocator)
 
 	model_file := "models/mobile_sam-tiny-vitt.safetensors"
 	safetensors, err_st_load := st.read_from_file(f32, model_file, arena_alloc)
@@ -119,72 +150,20 @@ main :: proc() {
 	)
 
 	// Mask decoder forward
-
-	// Predict masks
-	/// Concat output tokens
-	output_tokens := tensor.cat(
-		[]^tensor.Tensor(f32) {
-			sam.mask_decoder.iou_token.weight,
-			sam.mask_decoder.mask_tokens.weight,
-		},
-		0,
+	masks, iou_pred := md.predict_mask(
+		sam.mask_decoder,
+		image_embedding,
+		pe_final,
+		se_points,
+		dense_embeddings,
 		talloc,
 	)
-	d1, d2 := output_tokens.shape[0], output_tokens.shape[1]
-	output_tokens = tensor.unsqueeze(output_tokens, 0, talloc) // [1, d1, d2]
-	batch_size := se_points.shape[0]
-	output_tokens = tensor.broadcast_as(output_tokens, []uint{batch_size, d1, d2}, talloc)
-	tokens := tensor.cat([]^tensor.Tensor(f32){output_tokens, se_points}, 1, talloc)
-
-	src := tensor.repeat_interleave(image_embedding, tokens.shape[0], 0, talloc)
-	src = tensor.add(src, dense_embeddings, talloc)
-	pos_src := tensor.repeat_interleave(pe_final, tokens.shape[0], 0, talloc)
-
-	h, w: uint
-	b, c, h, w = src.shape[0], src.shape[1], src.shape[2], src.shape[3]
-
-	//// Run the transformer
-	hs: ^tensor.Tensor(f32)
-	hs, src = md.forward_two_way_transformer(
-		sam.mask_decoder.transformer,
-		src,
-		pos_src,
-		tokens,
-		talloc,
-	)
-
-	iou_token_out := tensor.flatten(tensor.slice(hs, {{}, {0, 1, 1}, {}}, talloc), 1, talloc)
-	mask_tokens_out := tensor.slice(
-		hs,
-		{{}, {1, 1 + int(sam.mask_decoder.num_mask_tokens), 1}, {}},
-		talloc,
-	)
-
-	//// Upscale mask embeddings
-	src = tensor.reshape(tensor.transpose(src, 1, 2, talloc), {b, c, h, w}, talloc)
-
-	out := nn.forward_conv_transpose_2d(sam.mask_decoder.output_upscaling_conv1, src, talloc)
-	out = nn.forward_channel_layer_norm(sam.mask_decoder.output_upscaling_ln, out, talloc)
-	out = vit.gelu_fast(out, talloc)
-	out = nn.forward_conv_transpose_2d(sam.mask_decoder.output_upscaling_conv2, out, talloc)
-	upscaled_embedding := vit.gelu_fast(out, talloc)
-
-
-	h_list := make([dynamic]^tensor.Tensor(f32), talloc)
-	hyper_in_list := make([dynamic]^tensor.Tensor(f32), talloc)
-	for mlp, i in sam.mask_decoder.output_hypernetworks_mlps {
-		h := tensor.slice(mask_tokens_out, {{}, {i, i + 1, 1}, {}}, talloc)
-		h = tensor.flatten(h, 1, talloc)
-		append(&h_list, h)
-		h = md.forward_mlp_mask_decoder(mlp, h, talloc)
-		append(&hyper_in_list, h)
-	}
-	hyper_in := tensor.stack(hyper_in_list[:], 1, talloc)
 
 
 	fmt.println("inference time phase 2:", time.since(t))
 
 	output_tensors := make(map[string]^tensor.Tensor(f32), context.temp_allocator)
+	map_insert(&output_tensors, "0-car", image_car)
 	map_insert(&output_tensors, "1-input", input)
 	map_insert(&output_tensors, "2-patch_embedding_conv1", patch_embedding_conv1)
 	map_insert(&output_tensors, "3-patch_embedding_conv1_gelu", patch_embedding_conv1_gelu)
@@ -198,18 +177,9 @@ main :: proc() {
 	map_insert(&output_tensors, "pr_en_7-pe_final", pe_final)
 	map_insert(&output_tensors, "pr_en_se_points", se_points)
 	map_insert(&output_tensors, "pr_en_dense_embeddings", dense_embeddings)
-	map_insert(&output_tensors, "md_tokens", tokens)
-	map_insert(&output_tensors, "md_src", src)
-	map_insert(&output_tensors, "md_pos_src", pos_src)
-	map_insert(&output_tensors, "md_image_embedding", image_embedding)
-	map_insert(&output_tensors, "md_hs", hs)
-	map_insert(&output_tensors, "md_iou_token_out", iou_token_out)
-	map_insert(&output_tensors, "md_mask_tokens_out", mask_tokens_out)
-	map_insert(&output_tensors, "md_upscaled_embedding", upscaled_embedding)
-	map_insert(&output_tensors, "md_hyper_h0", h_list[0])
-	map_insert(&output_tensors, "md_hyper_h2", h_list[2])
-	map_insert(&output_tensors, "md_hyper_in0", hyper_in_list[0])
-	map_insert(&output_tensors, "md_hyper_in", hyper_in)
+	map_insert(&output_tensors, "md_masks", masks)
+	map_insert(&output_tensors, "md_iou_pred", iou_pred)
+
 
 	err_st_wr := st.write_tensors_to_file(
 		&st.Safe_Tensors(f32){tensors = output_tensors},

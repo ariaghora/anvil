@@ -567,6 +567,84 @@ new_mask_decoder :: proc(
 	)
 }
 
+import "../vit"
+
+// @(private = "file")
+predict_mask :: proc(
+	md: ^Mask_Decoder($T),
+	image_embeddings: ^tensor.Tensor(T),
+	image_pe: ^tensor.Tensor(T),
+	sparse_prompt_embeddings: ^tensor.Tensor(T),
+	dense_prompt_embeddings: ^tensor.Tensor(T),
+	allocator := context.temp_allocator,
+) -> (
+	^tensor.Tensor(T),
+	^tensor.Tensor(T),
+) {
+	talloc := context.temp_allocator
+
+	// Concatenate output tokens...
+	output_tokens := tensor.cat(
+		[]^tensor.Tensor(T){md.iou_token.weight, md.mask_tokens.weight},
+		0,
+		talloc,
+	)
+	d1, d2 := output_tokens.shape[0], output_tokens.shape[1]
+	output_tokens = tensor.unsqueeze(output_tokens, 0, talloc) // [1, d1, d2]
+	batch_size := sparse_prompt_embeddings.shape[0]
+	output_tokens = tensor.broadcast_as(output_tokens, []uint{batch_size, d1, d2}, talloc)
+	tokens := tensor.cat([]^tensor.Tensor(T){output_tokens, sparse_prompt_embeddings}, 1, talloc)
+	src := tensor.repeat_interleave(image_embeddings, tokens.shape[0], 0, talloc)
+	src = tensor.add(src, dense_prompt_embeddings, talloc)
+	pos_src := tensor.repeat_interleave(image_pe, tokens.shape[0], 0, talloc)
+
+	// Run the transformer
+	b, c, h, w := src.shape[0], src.shape[1], src.shape[2], src.shape[3]
+	hs: ^tensor.Tensor(T)
+	hs, src = forward_two_way_transformer(md.transformer, src, pos_src, tokens, talloc)
+	iou_token_out := tensor.flatten(tensor.slice(hs, {{}, {0, 1, 1}, {}}, talloc), 1, talloc)
+	mask_tokens_out := tensor.slice(hs, {{}, {1, 1 + int(md.num_mask_tokens), 1}, {}}, talloc)
+
+	// Upscale mask embeddings
+	src = tensor.reshape(tensor.transpose(src, 1, 2, talloc), {b, c, h, w}, talloc)
+	out := nn.forward_conv_transpose_2d(md.output_upscaling_conv1, src, talloc)
+	out = nn.forward_channel_layer_norm(md.output_upscaling_ln, out, talloc)
+	out = vit.gelu_fast(out, talloc)
+	out = nn.forward_conv_transpose_2d(md.output_upscaling_conv2, out, talloc)
+	upscaled_embedding := vit.gelu_fast(out, talloc)
+
+	h_list := make([dynamic]^tensor.Tensor(T), talloc)
+	hyper_in_list := make([dynamic]^tensor.Tensor(T), talloc)
+	for mlp, i in md.output_hypernetworks_mlps {
+		h := tensor.slice(mask_tokens_out, {{}, {i, i + 1, 1}, {}}, talloc)
+		h = tensor.flatten(h, 1, talloc)
+		append(&h_list, h)
+		h = forward_mlp_mask_decoder(mlp, h, talloc)
+		append(&hyper_in_list, h)
+	}
+	hyper_in := tensor.stack(hyper_in_list[:], 1, talloc)
+	b, c, h, w =
+		upscaled_embedding.shape[0],
+		upscaled_embedding.shape[1],
+		upscaled_embedding.shape[2],
+		upscaled_embedding.shape[3]
+	masks := tensor.matmul(
+		hyper_in,
+		tensor.reshape(upscaled_embedding, {b, c, h * w}, talloc),
+		talloc,
+	)
+
+	// Now output channel is something different, thus, gotta recalc according to
+	// current length and divided by product of the original b, h, and w
+	c_out := tensor.shape_to_size(masks.shape) / (b * h * w)
+
+	// These last two should be promoted to caller's allocator!
+	masks = tensor.reshape(masks, {b, c_out, h, w}, allocator)
+	iou_pred := forward_mlp_mask_decoder(md.iou_prediction_head, iou_token_out, allocator)
+
+	return masks, iou_pred
+}
+
 forward_mask_decoder :: proc(md: ^Mask_Decoder($T)) -> ^tensor.Tensor(T) {
 	return nil
 }
