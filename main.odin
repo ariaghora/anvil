@@ -149,7 +149,7 @@ main :: proc() {
 	main_trace := trace.TRACE_FUNCTION("main")
 	defer trace.end_scoped_trace(main_trace)
 
-	image := rl.LoadImage("../candle-tinyvit-comp/car.jpg")
+	image := rl.LoadImage("/Users/lpc_0047/Downloads/tokyo.jpeg")
 	defer rl.UnloadImage(image)
 
 	input := preprocess(f32, &image, 1024, arena_alloc)
@@ -203,9 +203,9 @@ main :: proc() {
 				pixel_idx := mask_idx * 4
 				if mask_value > 0 {
 					// Blue overlay for positive mask
-					mask_pixels[pixel_idx + 0] = 30 // R
-					mask_pixels[pixel_idx + 1] = 144 // G
-					mask_pixels[pixel_idx + 2] = 255 // B
+					mask_pixels[pixel_idx + 0] = 255 // R
+					mask_pixels[pixel_idx + 1] = 20 // G
+					mask_pixels[pixel_idx + 2] = 20 // B
 					mask_pixels[pixel_idx + 3] = 128 // Alpha (semi-transparent)
 				} else {
 					// Transparent for negative mask
