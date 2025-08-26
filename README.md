@@ -10,6 +10,8 @@
 ## Models
 ### Segment Anything Model (TinyViT-5M Backbone)
 
+Download the safetensors file [here](https://huggingface.co/lmz/candle-sam/tree/main). Currently only `mobile_sam-tiny-vitt.safetensors` is supported. Put the file inside `weights` directory and run this.
+
 ```bash
 $ odin run examples/sam_raylib -o:speed -debug
 ```
