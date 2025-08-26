@@ -145,9 +145,24 @@ main :: proc() {
 	}
 
 	rl.SetTraceLogLevel(.ERROR)
-	rl.InitWindow(1024, 1024, "Segment Anything")
-	defer rl.CloseWindow()
+	image := rl.LoadImage(image_path_c)
+	defer rl.UnloadImage(image)
 
+	window_w, window_h: i32
+	if image.width > image.height {
+		window_w = min(image.width, 1024)
+		window_h = i32(f32(window_w) * f32(image.height) / f32(image.width))
+	} else {
+		window_h = min(image.height, 1024)
+		window_w = i32(f32(window_h) * f32(image.width) / f32(image.height))
+	}
+
+	window_title := strings.clone_to_cstring(
+		fmt.tprintf("Segment Anything (%s)", args[1]),
+		context.temp_allocator,
+	)
+	rl.InitWindow(window_w, window_h, window_title)
+	defer rl.CloseWindow()
 	rl.SetTargetFPS(60)
 
 	arena: vmem.Arena
@@ -161,11 +176,10 @@ main :: proc() {
 	main_trace := trace.TRACE_FUNCTION("main")
 	defer trace.end_scoped_trace(main_trace)
 
-	image := rl.LoadImage(image_path_c)
-	defer rl.UnloadImage(image)
 
 	input := preprocess(f32, &image, 1024, arena_alloc)
 
+	t := time.now()
 	model_init_trace := trace.TRACE_SECTION("model_initialization")
 	model_file := "models/mobile_sam-tiny-vitt.safetensors"
 	safetensors, err_st_load := st.read_from_file(f32, model_file, arena_alloc)
@@ -174,20 +188,34 @@ main :: proc() {
 	defer tf.free_tiny(sam, arena_alloc)
 	image_encoder := sam.image_encoder.(^vit.Tiny_ViT_5m(f32))
 	trace.end_scoped_trace(model_init_trace)
+	fmt.println("Model loading time:", time.since(t))
 
-	t := time.now()
+	t = time.now()
 	image_embedding := vit.forward_tiny_vit_5m(image_encoder, input, arena_alloc)
 	fmt.println("Image embedding inference time:", time.since(t))
 
-	display_image := tensor_to_image(input, arena_alloc)
-	texture := rl.LoadTextureFromImage(display_image)
+	// display_image := tensor_to_image(input, arena_alloc)
+	texture := rl.LoadTextureFromImage(image)
 	defer rl.UnloadTexture(texture)
 
 	masks, masks_bin, iou_pred: ^tensor.Tensor(f32)
 	for !rl.WindowShouldClose() {
-		// Get normalized mouse position (0-1)
-		mouse_x := f32(rl.GetMouseX()) / 1024.0
-		mouse_y := f32(rl.GetMouseY()) / 1024.0
+		// Get mouse position relative to window
+		mouse_window_x := f32(rl.GetMouseX()) / f32(window_w)
+		mouse_window_y := f32(rl.GetMouseY()) / f32(window_h)
+
+		// Convert to coordinates in the 1024x1024 padded space
+		// The image occupies only part of this space
+		mouse_x, mouse_y: f32
+		if image.width > image.height {
+			// Image fills width, has padding on bottom
+			mouse_x = mouse_window_x
+			mouse_y = mouse_window_y * (f32(image.height) / f32(image.width))
+		} else {
+			// Image fills height, has padding on right
+			mouse_x = mouse_window_x * (f32(image.width) / f32(image.height))
+			mouse_y = mouse_window_y
+		}
 
 		// Single positive point at mouse position
 		points := []tf.Point(f32){{mouse_x, mouse_y, true}}
@@ -245,12 +273,12 @@ main :: proc() {
 		rl.DrawTexture(texture, 0, 0, rl.WHITE)
 
 		// Draw the mask overlay, scaled up to 1024x1024
-		scale := 1024.0 / f32(mask_w)
+		scale := f32(window_w) / f32(mask_w)
 		rl.DrawTextureEx(mask_texture, {0, 0}, 0, scale, rl.WHITE)
 
 		// Draw the point indicator
-		screen_x := i32(mouse_x * 1024)
-		screen_y := i32(mouse_y * 1024)
+		screen_x := i32(mouse_window_x * f32(window_w))
+		screen_y := i32(mouse_window_y * f32(window_h))
 		rl.DrawCircle(screen_x, screen_y, 5, rl.GREEN)
 		rl.DrawCircleLines(screen_x, screen_y, 5, rl.WHITE)
 
