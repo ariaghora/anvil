@@ -1,7 +1,7 @@
 package var_builder
 
-import st "../../safetensors"
-import "../../tensor"
+import st "../../../safetensors"
+import "../../../tensor"
 import "core:fmt"
 import "core:strings"
 

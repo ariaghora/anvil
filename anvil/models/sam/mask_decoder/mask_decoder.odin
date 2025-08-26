@@ -1,8 +1,8 @@
 package mask_decoder
 
-import "../../nn"
-import st "../../safetensors"
-import "../../tensor"
+import "../../../nn"
+import st "../../../safetensors"
+import "../../../tensor"
 import vb "../var_builder"
 import "core:fmt"
 import "core:math"
@@ -99,7 +99,7 @@ forward_attention :: proc(
 	kt := tensor.transpose(k, 2, 3, talloc)
 	numerator := tensor.matmul(q, kt, talloc)
 	for v, i in numerator.data do numerator.data[i] /= math.sqrt(T(c_per_head))
-	attn_t := tensor.softmax(numerator, talloc)
+	attn_t := tensor.softmax_last_dim(numerator, talloc)
 	out := tensor.matmul(attn_t, v, talloc)
 
 	out = nn.forward_linear(attn.out_proj, recombine_heads(out, talloc), allocator)

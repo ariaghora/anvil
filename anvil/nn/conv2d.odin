@@ -160,31 +160,6 @@ forward_conv2d :: proc(
 					}
 				}
 			}
-		} else when T == f64 {
-			for b in 0 ..< batch_size {
-				for c in 0 ..< out_channels {
-					base_idx := (b * out_channels + c) * spatial_size
-					bias_val := bias.data[c]
-
-					bias_vec2 := #simd[2]f64{bias_val, bias_val}
-					bias_vec4 := #simd[4]f64{bias_val, bias_val, bias_val, bias_val}
-
-					i := uint(0)
-					for ; i + 4 <= spatial_size; i += 4 {
-						ptr0 := (^#simd[2]f64)(&out.data[base_idx + i])
-						ptr1 := (^#simd[2]f64)(&out.data[base_idx + i + 2])
-						ptr0^ += bias_vec2
-						ptr1^ += bias_vec2
-					}
-					for ; i + 2 <= spatial_size; i += 2 {
-						ptr := (^#simd[2]f64)(&out.data[base_idx + i])
-						ptr^ += bias_vec2
-					}
-					for ; i < spatial_size; i += 1 {
-						out.data[base_idx + i] += bias_val
-					}
-				}
-			}
 		} else {
 			// Scalar fallback
 			for b in 0 ..< batch_size {

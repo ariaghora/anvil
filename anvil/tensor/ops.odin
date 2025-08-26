@@ -6,7 +6,7 @@ import "core:math"
 import "core:mem"
 import "core:slice"
 
-// Binary operation types for compile-time dispatch
+// Binary operations
 Binary_Op :: enum {
 	ADD,
 	MULTIPLY,
@@ -14,7 +14,7 @@ Binary_Op :: enum {
 	DIVIDE,
 }
 
-// Reduction operation types for compile-time dispatch
+// Reduction operations
 Reduce_Op :: enum {
 	SUM,
 	MEAN,
@@ -83,7 +83,6 @@ broadcast_strides :: proc(
 
 	result_strides := make([]uint, target_rank, allocator, loc)
 
-	// Process from right to left
 	for i in 0 ..< target_rank {
 		target_dim := target_shape[target_rank - 1 - i]
 

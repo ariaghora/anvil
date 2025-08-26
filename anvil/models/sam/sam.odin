@@ -1,7 +1,7 @@
-package transformer
+package sam
 
-import st "../safetensors"
-import "../tensor"
+import st "../../safetensors"
+import "../../tensor"
 import md "mask_decoder"
 import pe "prompt_encoder"
 import "vit"

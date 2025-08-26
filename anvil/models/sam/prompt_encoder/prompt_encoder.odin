@@ -1,8 +1,8 @@
 package prompt_encoder
 
-import "../../nn"
-import st "../../safetensors"
-import "../../tensor"
+import "../../../nn"
+import st "../../../safetensors"
+import "../../../tensor"
 import vb "../var_builder"
 import "core:fmt"
 import "core:math"

@@ -70,23 +70,6 @@ forward_linear :: proc(
 						out.data[base_idx + j] += bias.data[j]
 					}
 				}
-
-			} else when T == f64 {
-				for i in 0 ..< batch_elements {
-					base_idx := i * out_features
-					j := uint(0)
-
-					for ; j + 2 <= out_features; j += 2 {
-						b := (^#simd[2]f64)(&bias.data[j])^
-						o := (^#simd[2]f64)(&out.data[base_idx + j])^
-						(^#simd[2]f64)(&out.data[base_idx + j])^ = o + b
-					}
-
-					for ; j < out_features; j += 1 {
-						out.data[base_idx + j] += bias.data[j]
-					}
-				}
-
 			} else {
 				// Scalar fallback
 				for i in 0 ..< batch_elements {

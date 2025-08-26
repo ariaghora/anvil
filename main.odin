@@ -1,5 +1,13 @@
 package main
 
+import tf "anvil/models/sam"
+import md "anvil/models/sam/mask_decoder"
+import pe "anvil/models/sam/prompt_encoder"
+import "anvil/models/sam/vit"
+import "anvil/nn"
+import st "anvil/safetensors"
+import "anvil/tensor"
+import "anvil/trace"
 import "core:c"
 import "core:c/libc"
 import "core:fmt"
@@ -12,14 +20,6 @@ import "core:slice"
 import "core:strings"
 import "core:testing"
 import "core:time"
-import "libs/nn"
-import st "libs/safetensors"
-import "libs/tensor"
-import "libs/trace"
-import tf "libs/transformer"
-import md "libs/transformer/mask_decoder"
-import pe "libs/transformer/prompt_encoder"
-import "libs/transformer/vit"
 import rl "vendor:raylib"
 
 IMAGE_SIZE :: uint(1024)

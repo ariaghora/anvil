@@ -174,50 +174,6 @@ im2col_fast_1x1 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
 						dst_b[dst_offset + c_idx] = src_b[c_idx * hw + hw_idx]
 					}
 				}
-			} else when T == f64 {
-				// Process 2x2 blocks for f64
-				hw_idx := uint(0)
-
-				for ; hw_idx + 2 <= hw; hw_idx += 2 {
-					dst_base := hw_idx * c
-
-					c_idx := uint(0)
-					for ; c_idx + 2 <= c; c_idx += 2 {
-						row0 := #simd[2]f64 {
-							src_b[c_idx * hw + hw_idx],
-							src_b[(c_idx + 1) * hw + hw_idx],
-						}
-						row1 := #simd[2]f64 {
-							src_b[c_idx * hw + hw_idx + 1],
-							src_b[(c_idx + 1) * hw + hw_idx + 1],
-						}
-
-						(^#simd[2]f64)(&dst_b[dst_base + c_idx])^ = row0
-						(^#simd[2]f64)(&dst_b[dst_base + c + c_idx])^ = row1
-					}
-
-					for ; c_idx < c; c_idx += 1 {
-						dst_b[dst_base + c_idx] = src_b[c_idx * hw + hw_idx]
-						dst_b[dst_base + c + c_idx] = src_b[c_idx * hw + hw_idx + 1]
-					}
-				}
-
-				for ; hw_idx < hw; hw_idx += 1 {
-					dst_offset := hw_idx * c
-
-					c_idx := uint(0)
-					for ; c_idx + 2 <= c; c_idx += 2 {
-						vals := #simd[2]f64 {
-							src_b[c_idx * hw + hw_idx],
-							src_b[(c_idx + 1) * hw + hw_idx],
-						}
-						(^#simd[2]f64)(&dst_b[dst_offset + c_idx])^ = vals
-					}
-
-					for ; c_idx < c; c_idx += 1 {
-						dst_b[dst_offset + c_idx] = src_b[c_idx * hw + hw_idx]
-					}
-				}
 			} else {
 				// Original tiled implementation for other types
 				for hw_tile := uint(0); hw_tile < hw; hw_tile += TILE_SIZE * TILE_SIZE {
@@ -450,7 +406,6 @@ conv2d_grouped :: proc(
 
 		// Allocate work items
 		work_items := make([]Group_Work_Data, groups, context.temp_allocator)
-		// defer delete(work_items)
 
 		// Process group function
 		process_group_task :: proc(t: thread.Task) {
@@ -530,7 +485,6 @@ conv2d_grouped :: proc(
 
 		// Wait for all tasks to complete
 		thread.pool_finish(&pool)
-
 	} else {
 		// Sequential path for small workloads
 		grouped_conv_trace := trace.TRACE_SECTION("grouped_conv_sequential")
@@ -615,30 +569,6 @@ copy_group_output_parallel :: proc(
 					for ; i + 4 <= hw_out; i += 4 {
 						vals := (^#simd[4]f32)(&src.data[src_offset + i])^
 						(^#simd[4]f32)(&dst.data[dst_offset + i])^ = vals
-					}
-
-					for ; i < hw_out; i += 1 {
-						dst.data[dst_offset + i] = src.data[src_offset + i]
-					}
-				}
-			}
-		} else when T == f64 {
-			for b in 0 ..< batch {
-				for c in 0 ..< channels_per_group {
-					src_offset := (b * channels_per_group + c) * hw_out
-					dst_offset := (b * dst_channels_total + channel_offset + c) * hw_out
-
-					i := uint(0)
-					for ; i + 4 <= hw_out; i += 4 {
-						vals1 := (^#simd[2]f64)(&src.data[src_offset + i])^
-						vals2 := (^#simd[2]f64)(&src.data[src_offset + i + 2])^
-						(^#simd[2]f64)(&dst.data[dst_offset + i])^ = vals1
-						(^#simd[2]f64)(&dst.data[dst_offset + i + 2])^ = vals2
-					}
-
-					for ; i + 2 <= hw_out; i += 2 {
-						vals := (^#simd[2]f64)(&src.data[src_offset + i])^
-						(^#simd[2]f64)(&dst.data[dst_offset + i])^ = vals
 					}
 
 					for ; i < hw_out; i += 1 {
@@ -775,55 +705,6 @@ reshape_bhwc_to_bchw :: proc(
 						dst_batch[(c + 1) * hw + hw_idx] = simd.extract(vals, 1)
 						dst_batch[(c + 2) * hw + hw_idx] = simd.extract(vals, 2)
 						dst_batch[(c + 3) * hw + hw_idx] = simd.extract(vals, 3)
-					}
-
-					for ; c < channels; c += 1 {
-						dst_batch[c * hw + hw_idx] = src_batch[src_offset + c]
-					}
-				}
-			}
-		} else when T == f64 {
-			for b in 0 ..< batch {
-				src_batch := src[b * hw * channels:]
-				dst_batch := dst[b * channels * hw:]
-
-				hw_idx := uint(0)
-				for ; hw_idx + 2 <= hw; hw_idx += 2 {
-					src_base := hw_idx * channels
-
-					c := uint(0)
-					for ; c + 2 <= channels; c += 2 {
-						row0 := #simd[2]f64{src_batch[src_base + c], src_batch[src_base + c + 1]}
-						row1 := #simd[2]f64 {
-							src_batch[src_base + channels + c],
-							src_batch[src_base + channels + c + 1],
-						}
-
-						dst_c0 := #simd[2]f64{simd.extract(row0, 0), simd.extract(row1, 0)}
-						dst_c1 := #simd[2]f64{simd.extract(row0, 1), simd.extract(row1, 1)}
-
-						(^#simd[2]f64)(&dst_batch[c * hw + hw_idx])^ = dst_c0
-						(^#simd[2]f64)(&dst_batch[(c + 1) * hw + hw_idx])^ = dst_c1
-					}
-
-					for ; c < channels; c += 1 {
-						vals := #simd[2]f64 {
-							src_batch[src_base + c],
-							src_batch[src_base + channels + c],
-						}
-						(^#simd[2]f64)(&dst_batch[c * hw + hw_idx])^ = vals
-					}
-				}
-
-				for ; hw_idx < hw; hw_idx += 1 {
-					src_offset := hw_idx * channels
-
-					c := uint(0)
-					for ; c + 2 <= channels; c += 2 {
-						vals := (^#simd[2]f64)(&src_batch[src_offset + c])^
-
-						dst_batch[c * hw + hw_idx] = simd.extract(vals, 0)
-						dst_batch[(c + 1) * hw + hw_idx] = simd.extract(vals, 1)
 					}
 
 					for ; c < channels; c += 1 {

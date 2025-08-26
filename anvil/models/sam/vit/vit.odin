@@ -1,9 +1,9 @@
 package vit
 
-import "../../nn"
-import st "../../safetensors"
-import "../../tensor"
-import "../../trace"
+import "../../../nn"
+import st "../../../safetensors"
+import "../../../tensor"
+import "../../../trace"
 import "../var_builder"
 import vb "../var_builder"
 import "base:runtime"
@@ -667,7 +667,7 @@ forward_attention :: proc(
 	// Softmax - do it in-place to avoid allocation
 	// Process each (batch, head) separately
 	attention_softmax_trace := trace.TRACE_FUNCTION("attention_softmax")
-	tensor.softmax_inplace(attn_scores)
+	tensor.softmax_last_dim_inplace(attn_scores)
 	trace.end_scoped_trace(attention_softmax_trace)
 
 	// Apply attention to values 

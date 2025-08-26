@@ -228,40 +228,6 @@ copy_strided_2d :: proc(dst, src: []$T, shape, strides: []uint) {
 				}
 			}
 		}
-	} else when T == f64 {
-		if s1 == 1 {
-			for i in 0 ..< d0 {
-				src_row_start := i * s0
-
-				j := uint(0)
-				for ; j + 4 <= d1; j += 4 {
-					vals1 := (^#simd[2]f64)(&src[src_row_start + j])^
-					vals2 := (^#simd[2]f64)(&src[src_row_start + j + 2])^
-					(^#simd[2]f64)(&dst[dst_idx])^ = vals1
-					(^#simd[2]f64)(&dst[dst_idx + 2])^ = vals2
-					dst_idx += 4
-				}
-
-				for ; j + 2 <= d1; j += 2 {
-					(^#simd[2]f64)(&dst[dst_idx])^ = (^#simd[2]f64)(&src[src_row_start + j])^
-					dst_idx += 2
-				}
-
-				for ; j < d1; j += 1 {
-					dst[dst_idx] = src[src_row_start + j]
-					dst_idx += 1
-				}
-			}
-		} else {
-			// General strided case
-			for i in 0 ..< d0 {
-				src_row := i * s0
-				for j in 0 ..< d1 {
-					dst[dst_idx] = src[src_row + j * s1]
-					dst_idx += 1
-				}
-			}
-		}
 	} else {
 		// Original scalar code
 		for i in 0 ..< d0 {
@@ -322,7 +288,6 @@ copy_strided_3d :: proc(dst, src: []$T, shape, strides: []uint) {
 			}
 		}
 	} else {
-		// Original scalar code for non-f32
 		for i in 0 ..< d0 {
 			src_plane := i * s0
 			for j in 0 ..< d1 {
@@ -433,53 +398,6 @@ copy_strided_4d :: proc(dst, src: []$T, shape, strides: []uint) {
 						}
 
 						for ; l < d3; l += 1 {
-							dst[dst_idx] = src[src_row + l * s3]
-							dst_idx += 1
-						}
-					}
-				}
-			}
-		}
-	} else when T == f64 {
-		// Similar optimizations for f64 with #simd[2]f64
-		if s3 == 1 {
-			for i in 0 ..< d0 {
-				src_batch := i * s0
-				for j in 0 ..< d1 {
-					src_plane := src_batch + j * s1
-					for k in 0 ..< d2 {
-						src_row_start := src_plane + k * s2
-
-						l := uint(0)
-						for ; l + 8 <= d3; l += 8 {
-							vals0 := (^#simd[2]f64)(&src[src_row_start + l])^
-							vals1 := (^#simd[2]f64)(&src[src_row_start + l + 2])^
-							vals2 := (^#simd[2]f64)(&src[src_row_start + l + 4])^
-							vals3 := (^#simd[2]f64)(&src[src_row_start + l + 6])^
-
-							(^#simd[2]f64)(&dst[dst_idx])^ = vals0
-							(^#simd[2]f64)(&dst[dst_idx + 2])^ = vals1
-							(^#simd[2]f64)(&dst[dst_idx + 4])^ = vals2
-							(^#simd[2]f64)(&dst[dst_idx + 6])^ = vals3
-							dst_idx += 8
-						}
-
-						for ; l < d3; l += 1 {
-							dst[dst_idx] = src[src_row_start + l]
-							dst_idx += 1
-						}
-					}
-				}
-			}
-		} else {
-			// General case
-			for i in 0 ..< d0 {
-				src_batch := i * s0
-				for j in 0 ..< d1 {
-					src_plane := src_batch + j * s1
-					for k in 0 ..< d2 {
-						src_row := src_plane + k * s2
-						for l in 0 ..< d3 {
 							dst[dst_idx] = src[src_row + l * s3]
 							dst_idx += 1
 						}
@@ -1413,7 +1331,7 @@ repeat_interleave :: proc(
 	return result
 }
 
-// Even faster version for dim=0 (batch dimension) - most common case
+// Special case for dim=0 (batch dimension) - most common case
 repeat_interleave_batch :: proc(
 	tensor: ^Tensor($T),
 	repeats: uint,
@@ -1492,7 +1410,7 @@ flatten :: proc(
 
 // Applies softmax along the last dimension of a tensor
 // For a tensor of shape [..., N], applies softmax to each [...] slice over N elements
-softmax_inplace :: proc(t: ^Tensor($T)) {
+softmax_last_dim_inplace :: proc(t: ^Tensor($T)) {
 	softmax_trace := trace.TRACE_FUNCTION("softmax_inplace")
 	defer trace.end_scoped_trace(softmax_trace)
 
@@ -1598,8 +1516,8 @@ softmax_inplace :: proc(t: ^Tensor($T)) {
 	}
 }
 
-softmax :: proc(t: ^Tensor($T), allocator := context.allocator) -> ^Tensor(T) {
+softmax_last_dim :: proc(t: ^Tensor($T), allocator := context.allocator) -> ^Tensor(T) {
 	result := clone(t, allocator)
-	softmax_inplace(result)
+	softmax_last_dim_inplace(result)
 	return result
 }
