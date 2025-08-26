@@ -9,6 +9,7 @@ import vmem "core:mem/virtual"
 import "core:os"
 import "core:os/os2"
 import "core:slice"
+import "core:strings"
 import "core:testing"
 import "core:time"
 import "libs/nn"
@@ -132,6 +133,18 @@ tensor_to_image :: proc(tensor: ^tensor.Tensor(f32), allocator := context.alloca
 }
 
 main :: proc() {
+	args := os.args
+	if len(args) != 2 {
+		fmt.println("Image path as the first argument is required")
+		os.exit(1)
+	}
+	image_path_c, err_cstr := strings.clone_to_cstring(args[1], context.temp_allocator)
+	if err_cstr != nil {
+		fmt.printfln("cannot open file %s", args[1])
+		os.exit(1)
+	}
+
+	rl.SetTraceLogLevel(.ERROR)
 	rl.InitWindow(1024, 1024, "Segment Anything")
 	defer rl.CloseWindow()
 
@@ -139,7 +152,6 @@ main :: proc() {
 
 	arena: vmem.Arena
 	arena_err := vmem.arena_init_growing(&arena)
-	ensure(arena_err == nil)
 	arena_alloc := vmem.arena_allocator(&arena)
 	defer vmem.arena_destroy(&arena)
 
@@ -149,7 +161,7 @@ main :: proc() {
 	main_trace := trace.TRACE_FUNCTION("main")
 	defer trace.end_scoped_trace(main_trace)
 
-	image := rl.LoadImage("/Users/lpc_0047/Downloads/tokyo.jpeg")
+	image := rl.LoadImage(image_path_c)
 	defer rl.UnloadImage(image)
 
 	input := preprocess(f32, &image, 1024, arena_alloc)
@@ -165,7 +177,7 @@ main :: proc() {
 
 	t := time.now()
 	image_embedding := vit.forward_tiny_vit_5m(image_encoder, input, arena_alloc)
-	fmt.println("inference time phase 1:", time.since(t))
+	fmt.println("Image embedding inference time:", time.since(t))
 
 	display_image := tensor_to_image(input, arena_alloc)
 	texture := rl.LoadTextureFromImage(display_image)
@@ -202,11 +214,11 @@ main :: proc() {
 
 				pixel_idx := mask_idx * 4
 				if mask_value > 0 {
-					// Blue overlay for positive mask
+					// Red overlay for positive mask
 					mask_pixels[pixel_idx + 0] = 255 // R
 					mask_pixels[pixel_idx + 1] = 20 // G
 					mask_pixels[pixel_idx + 2] = 20 // B
-					mask_pixels[pixel_idx + 3] = 128 // Alpha (semi-transparent)
+					mask_pixels[pixel_idx + 3] = 128 // A
 				} else {
 					// Transparent for negative mask
 					mask_pixels[pixel_idx + 0] = 0
@@ -230,10 +242,9 @@ main :: proc() {
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.BLACK)
 
-		// Draw the image
 		rl.DrawTexture(texture, 0, 0, rl.WHITE)
 
-		// Draw the mask overlay (scaled up to 1024x1024)
+		// Draw the mask overlay, scaled up to 1024x1024
 		scale := 1024.0 / f32(mask_w)
 		rl.DrawTextureEx(mask_texture, {0, 0}, 0, scale, rl.WHITE)
 
@@ -245,7 +256,7 @@ main :: proc() {
 
 		// Show FPS and IoU score
 		rl.DrawFPS(10, 10)
-		rl.DrawText(rl.TextFormat("IoU: %.3f", iou_pred.data[0]), 10, 35, 20, rl.WHITE)
+		rl.DrawText(rl.TextFormat("IoU: %.3f", iou_pred.data[0]), 10, 35, 20, rl.RED)
 
 		rl.EndDrawing()
 

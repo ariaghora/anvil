@@ -10,3 +10,4 @@ odin-simd
 *.tensor
 tensorgen/safetensors
 *.bin
+*.o
