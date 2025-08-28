@@ -18,7 +18,7 @@ No Python. No gigabytes of dependencies. Just compiled code running models.
 Download `mobile_sam-tiny-vitt.safetensors` from [here](https://huggingface.co/lmz/candle-sam/tree/main). Drop it in `weights/` and run:
 
 ```bash
-$ odin run examples/sam_raylib -o:speed -debug
+$ odin run examples/sam_raylib -o:speed
 ```
 
 <p align="center">
