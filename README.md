@@ -25,6 +25,21 @@ $ odin run examples/sam_raylib -o:speed -debug
   <img width="90%" src="assets/sam.gif" />
 </p>
 
+## Notes on Memory Management
+
+This library uses `context.temp_allocator` for intermediate computations and uses the passed allocator argument for the function return values.
+If you're doing operations in a loop, just reset the temp allocator periodically:
+
+
+```odin
+for item in items {
+    // Your tensor ops / model inference here
+    // ...
+
+    free_all(context.temp_allocator)  // Clear intermediates
+}
+```
+
 ## Status
 
 Early development, APIs are unstable. More models coming as operations get implemented.
@@ -34,5 +49,3 @@ Early development, APIs are unstable. More models coming as operations get imple
 - Odin compiler
 - A safetensors file
 - That's it
-
-
