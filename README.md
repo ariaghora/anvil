@@ -11,6 +11,10 @@
 Anvil runs neural networks without the typical ML stack. Load a safetensors file, run inference, get results. Currently implements enough operations to run vision models like SAM. Your deployment is just a binary.
 No Python. No gigabytes of dependencies. Just compiled code running models.
 
+> [!CAUTION]
+> I only tested it on MacBook M1, and currently it relies on Accelerate framework. I don't have access to different machines at this moment. 
+> If you're not on macOS and you don't have Accelerate framework installed, then you're out of luck.
+
 ## Models
 
 ### Segment Anything Model (TinyViT-5M Backbone)

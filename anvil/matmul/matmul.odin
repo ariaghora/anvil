@@ -66,6 +66,4 @@ matmul_2d :: proc(a: []$T, b: []T, m, n, k: uint, c: []T, allocator := context.a
 	} else {
 		#panic("matmul only supports f32 and f64")
 	}
-
-	// return result
 }
