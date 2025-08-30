@@ -22,6 +22,7 @@ vb_resolve_preceding_path :: proc(vb: ^Var_Builder($T), allocator := context.all
 			vb.parent == nil ? "" : fmt.tprintf("%s.", vb_resolve_preceding_path(vb.parent, allocator)),
 			vb.name,
 		},
+		allocator = allocator,
 	)
 
 	return prec
@@ -36,6 +37,7 @@ assign :: proc(
 ) {
 	path := strings.concatenate(
 		{vb_resolve_preceding_path(vb, context.temp_allocator), ".", leaf_name},
+		allocator = context.temp_allocator,
 	)
 	err := st.tensor_assign_from_safe_tensors(target, path, vb.safetensors, should_transpose, loc)
 	if err != nil {

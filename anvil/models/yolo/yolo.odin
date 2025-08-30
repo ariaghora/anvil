@@ -35,7 +35,7 @@ new_conv_block :: proc(
 		init = init,
 		allocator = allocator,
 	)
-	vb.assign(vb_root, "c.weight", conv.w)
+	vb.assign(vb_root, "conv.weight", conv.w)
 
 	bn := nn.new_batch_norm_2d(T, out_channels, allocator)
 	vb.assign(vb_root, "bn.weight", bn.weight)
@@ -126,11 +126,24 @@ load_dark_net :: proc(
 	allocator := context.allocator,
 ) -> ^Dark_Net(T) {
 	w, r, d := m.width, m.ratio, m.depth
-	return new_clone(Dark_Net(T){}, allocator)
+	vb_b1_0 := vb.vb_make(T, "b1.0", vb_root)
+	b1_0 := new_conv_block(
+		T,
+		&vb_b1_0,
+		3,
+		uint(64 * w),
+		3,
+		2,
+		1,
+		init = false,
+		allocator = allocator,
+	)
+	return new_clone(Dark_Net(T){b1_0 = b1_0}, allocator)
 }
 
 free_dark_net :: proc(net: ^Dark_Net($T), allocator := context.allocator) {
-	free(net)
+	free_conv_block(net.b1_0, allocator)
+	free(net, allocator)
 }
 
 forward_dark_net :: proc(
@@ -251,7 +264,7 @@ new_yolo :: proc(
 		safetensors = safetensors,
 		parent      = nil,
 	}
-	head := load_detection_head(&vb_fpn, m, num_classes, allocator)
+	head := load_detection_head(&vb_head, m, num_classes, allocator)
 	return new_clone(YOLO_V8(T){net = net, fpn = fpn, head = head}, allocator)
 }
 
