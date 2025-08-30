@@ -28,7 +28,16 @@ main :: proc() {
 	ensure(err_st == nil)
 	defer st.free_safe_tensors(safetensors)
 
-	model := yolo.new_yolo(f32, safetensors)
+	// NANO
+	multiples := yolo.Multiples {
+		depth = 0.33,
+		width = 0.25,
+		ratio = 2.0,
+	}
+	num_classes := uint(80)
+	model := yolo.new_yolo(f32, safetensors, multiples, num_classes, context.allocator)
 	defer yolo.free_yolo(model)
+
+	result := yolo.forward_yolo(model, nil)
 
 }

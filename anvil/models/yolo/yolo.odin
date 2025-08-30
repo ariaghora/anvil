@@ -120,6 +120,31 @@ Dark_Net :: struct($T: typeid) {
 	b5:   ^Sppf(T),
 }
 
+load_dark_net :: proc(
+	vb_root: ^vb.Var_Builder($T),
+	m: Multiples,
+	allocator := context.allocator,
+) -> ^Dark_Net(T) {
+	w, r, d := m.width, m.ratio, m.depth
+	return new_clone(Dark_Net(T){}, allocator)
+}
+
+free_dark_net :: proc(net: ^Dark_Net($T), allocator := context.allocator) {
+	free(net)
+}
+
+forward_dark_net :: proc(
+	dn: ^Dark_Net($T),
+	x: ^tensor.Tensor(T),
+	allocator := context.allocator,
+) -> (
+	^tensor.Tensor(T),
+	^tensor.Tensor(T),
+	^tensor.Tensor(T),
+) {
+	return nil, nil, nil
+}
+
 
 Yolo_V8_Neck :: struct($T: typeid) {
 	upsample_factor: uint,
@@ -131,9 +156,37 @@ Yolo_V8_Neck :: struct($T: typeid) {
 	n6:              ^C2f(T),
 }
 
+load_yolo_v8_neck :: proc(
+	vb_root: ^vb.Var_Builder($T),
+	m: Multiples,
+	allocator := context.allocator,
+) -> ^Yolo_V8_Neck(T) {
+	return new_clone(Yolo_V8_Neck(T){}, allocator)
+}
+
+free_yolo_v8_neck :: proc(fpn: ^Yolo_V8_Neck($T), allocator := context.allocator) {
+	free(fpn)
+}
+
+forward_neck :: proc(
+	dn: ^Yolo_V8_Neck($T),
+	x1, x2, x3: ^tensor.Tensor(T),
+	allocator := context.allocator,
+) -> (
+	^tensor.Tensor(T),
+	^tensor.Tensor(T),
+	^tensor.Tensor(T),
+) {
+	return nil, nil, nil
+}
+
 Dfl :: struct($T: typeid) {
 	conv:        nn.Conv_2d(T),
 	num_classes: uint,
+}
+
+Detection_Output :: struct($T: typeid) {
+	pred, anchors, strides: ^tensor.Tensor(T),
 }
 
 Detection_Head :: struct($T: typeid) {
@@ -145,6 +198,27 @@ Detection_Head :: struct($T: typeid) {
 	ch, no:   uint,
 }
 
+load_detection_head :: proc(
+	vb_root: ^vb.Var_Builder($T),
+	m: Multiples,
+	num_classes: uint,
+	allocator := context.allocator,
+) -> ^Detection_Head(T) {
+	return new_clone(Detection_Head(T){}, allocator)
+}
+
+free_detection_head :: proc(head: ^Detection_Head($T), allocator := context.allocator) {
+	free(head)
+}
+
+forward_head :: proc(
+	dn: ^Detection_Head($T),
+	x1, x2, x3: ^tensor.Tensor(T),
+	allocator := context.allocator,
+) -> ^Detection_Output(T) {
+	return nil
+}
+
 YOLO_V8 :: struct($T: typeid) {
 	net:  ^Dark_Net(T),
 	fpn:  ^Yolo_V8_Neck(T),
@@ -154,11 +228,46 @@ YOLO_V8 :: struct($T: typeid) {
 new_yolo :: proc(
 	$T: typeid,
 	safetensors: ^st.Safe_Tensors(T),
+	m: Multiples,
+	num_classes: uint,
 	allocator := context.allocator,
 ) -> ^YOLO_V8(T) {
-	return new_clone(YOLO_V8(T){net = nil, fpn = nil, head = nil}, allocator)
+	vb_net := vb.Var_Builder(T) {
+		name        = "net",
+		safetensors = safetensors,
+		parent      = nil,
+	}
+	net := load_dark_net(&vb_net, m, allocator)
+
+	vb_fpn := vb.Var_Builder(T) {
+		name        = "fpn",
+		safetensors = safetensors,
+		parent      = nil,
+	}
+	fpn := load_yolo_v8_neck(&vb_fpn, m, allocator)
+
+	vb_head := vb.Var_Builder(T) {
+		name        = "head",
+		safetensors = safetensors,
+		parent      = nil,
+	}
+	head := load_detection_head(&vb_fpn, m, num_classes, allocator)
+	return new_clone(YOLO_V8(T){net = net, fpn = fpn, head = head}, allocator)
+}
+
+forward_yolo :: proc(
+	yolo: ^YOLO_V8($T),
+	x: ^tensor.Tensor(T),
+	allocator := context.allocator,
+) -> ^Detection_Output(T) {
+	x1, x2, x3 := forward_dark_net(yolo.net, x, context.temp_allocator)
+	x1, x2, x3 = forward_neck(yolo.fpn, x1, x2, x3, context.temp_allocator)
+	return forward_head(yolo.head, x1, x2, x3, allocator)
 }
 
 free_yolo :: proc(model: ^YOLO_V8($T), allocator := context.allocator) {
+	free_dark_net(model.net, allocator)
+	free_yolo_v8_neck(model.fpn, allocator)
+	free_detection_head(model.head, allocator)
 	free(model, allocator)
 }
