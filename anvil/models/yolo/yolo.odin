@@ -5,15 +5,16 @@ import st "../../safetensors"
 import "../../tensor"
 import "../../trace"
 import vb "../sam/var_builder"
+import "core:fmt"
+import "core:math"
 
 Conv_Block :: struct($T: typeid) {
 	conv: ^nn.Conv_2d(T),
 	bn:   ^nn.Batch_Norm_2d(T),
 }
 
-new_conv_block :: proc(
-	$T: typeid,
-	vb_root: ^vb.Var_Builder(T),
+load_conv_block :: proc(
+	vb_root: ^vb.Var_Builder($T), // $T: typeid,
 	in_channels, out_channels: uint,
 	kernel_size: uint,
 	stride: uint = 1,
@@ -97,14 +98,89 @@ Bottleneck :: struct($T: typeid) {
 	residual: bool,
 }
 
+load_bottleneck :: proc(
+	vb_root: ^vb.Var_Builder($T),
+	c1, c2: uint,
+	shortcut: bool,
+	allocator := context.allocator,
+) -> ^Bottleneck(T) {
+	channel_factor := T(1.)
+	c_ := uint(T(c2) * channel_factor)
+	vb_cv1 := vb.vb_make(T, "cv1", vb_root)
+	cv1 := load_conv_block(&vb_cv1, c1, c_, 3, 1, allocator = allocator)
+	vb_cv2 := vb.vb_make(T, "cv2", vb_root)
+	cv2 := load_conv_block(&vb_cv2, c_, c2, 3, 1, allocator = allocator)
+	residual := c1 == c2 && shortcut
+	return new_clone(Bottleneck(T){cv1 = cv1, cv2 = cv2, residual = residual}, allocator)
+}
+
+free_bottleneck :: proc(bottleneck: ^Bottleneck($T), allocator := context.allocator) {
+	free_conv_block(bottleneck.cv1, allocator)
+	free_conv_block(bottleneck.cv2, allocator)
+	free(bottleneck, allocator)
+}
+
 C2f :: struct($T: typeid) {
 	cv1, cv2:   ^Conv_Block(T),
 	bottleneck: [dynamic]^Bottleneck(T),
 }
 
+load_c2f :: proc(
+	vb_root: ^vb.Var_Builder($T),
+	c1, c2: uint,
+	n: uint,
+	shortcut: bool,
+	allocator := context.allocator,
+) -> ^C2f(T) {
+	c := uint(T(c2) * 0.5)
+	vb_cv1 := vb.vb_make(T, "cv1", vb_root)
+	cv1 := load_conv_block(&vb_cv1, c1, 2 * c, 1, 1, allocator = allocator)
+	vb_cv2 := vb.vb_make(T, "cv2", vb_root)
+	cv2 := load_conv_block(&vb_cv2, (2 + n) * c, c2, 1, 1, allocator = allocator)
+
+	bottleneck := make([dynamic]^Bottleneck(T), allocator)
+	for idx in 0 ..< n {
+		vb_i := vb.vb_make(T, fmt.tprintf("bottleneck.%d", idx), vb_root)
+		b := load_bottleneck(&vb_i, c, c, shortcut, allocator)
+		append(&bottleneck, b)
+	}
+
+	return new_clone(C2f(T){cv1 = cv1, cv2 = cv2, bottleneck = bottleneck}, allocator)
+}
+
+free_c2f :: proc(c2f: ^C2f($T), allocator := context.allocator) {
+	free_conv_block(c2f.cv1, allocator)
+	free_conv_block(c2f.cv2, allocator)
+
+	for l in c2f.bottleneck do free_bottleneck(l, allocator)
+	delete(c2f.bottleneck)
+
+	free(c2f, allocator)
+}
+
 Sppf :: struct($T: typeid) {
 	cv1, cv2: ^Conv_Block(T),
 	k:        uint,
+}
+
+load_sppf :: proc(
+	vb_root: ^vb.Var_Builder($T),
+	c1, c2, k: uint,
+	allocator := context.allocator,
+) -> ^Sppf(T) {
+	c_ := c1 / 2
+	vb_cv1 := vb.vb_make(T, "cv1", vb_root)
+	cv1 := load_conv_block(&vb_cv1, c1, c_, 1, 1)
+	vb_cv2 := vb.vb_make(T, "cv2", vb_root)
+	cv2 := load_conv_block(&vb_cv2, c_ * 4, c2, 1, 1)
+
+	return new_clone(Sppf(T){cv1 = cv1, cv2 = cv2, k = k}, allocator)
+}
+
+free_sppf :: proc(sppf: ^Sppf($T), allocator := context.allocator) {
+	free_conv_block(sppf.cv1, allocator)
+	free_conv_block(sppf.cv2, allocator)
+	free(sppf, allocator)
 }
 
 Dark_Net :: struct($T: typeid) {
@@ -127,22 +203,129 @@ load_dark_net :: proc(
 ) -> ^Dark_Net(T) {
 	w, r, d := m.width, m.ratio, m.depth
 	vb_b1_0 := vb.vb_make(T, "b1.0", vb_root)
-	b1_0 := new_conv_block(
-		T,
+	b1_0 := load_conv_block(
 		&vb_b1_0,
 		3,
 		uint(64 * w),
-		3,
-		2,
-		1,
+		kernel_size = 3,
+		stride = 2,
+		padding = 1,
 		init = false,
 		allocator = allocator,
 	)
-	return new_clone(Dark_Net(T){b1_0 = b1_0}, allocator)
+	vb_b1_1 := vb.vb_make(T, "b1.1", vb_root)
+	b1_1 := load_conv_block(
+		&vb_b1_1,
+		uint(64 * w),
+		uint(128 * w),
+		kernel_size = 3,
+		stride = 2,
+		padding = 1,
+		init = false,
+		allocator = allocator,
+	)
+	vb_b2_0 := vb.vb_make(T, "b2.0", vb_root)
+	b2_0 := load_c2f(
+		&vb_b2_0,
+		uint(128 * w),
+		uint(128 * w),
+		uint(math.round(3 * d)),
+		true,
+		allocator,
+	)
+	vb_b2_1 := vb.vb_make(T, "b2.1", vb_root)
+	b2_1 := load_conv_block(
+		&vb_b2_1,
+		uint(128 * w),
+		uint(256 * w),
+		kernel_size = 3,
+		stride = 2,
+		padding = 1,
+		init = false,
+		allocator = allocator,
+	)
+	vb_b2_2 := vb.vb_make(T, "b2.2", vb_root)
+	b2_2 := load_c2f(
+		&vb_b2_2,
+		uint(256 * w),
+		uint(256 * w),
+		uint(math.round(6 * d)),
+		true,
+		allocator,
+	)
+	vb_b3_0 := vb.vb_make(T, "b3.0", vb_root)
+	b3_0 := load_conv_block(
+		&vb_b3_0,
+		uint(256 * w),
+		uint(512 * w),
+		kernel_size = 3,
+		stride = 2,
+		padding = 1,
+		init = false,
+		allocator = allocator,
+	)
+	vb_b3_1 := vb.vb_make(T, "b3.1", vb_root)
+	b3_1 := load_c2f(
+		&vb_b3_1,
+		uint(512 * w),
+		uint(512 * w),
+		uint(math.round(6 * d)),
+		true,
+		allocator,
+	)
+	vb_b4_0 := vb.vb_make(T, "b4.0", vb_root)
+	b4_0 := load_conv_block(
+		&vb_b4_0,
+		uint(512 * w),
+		uint(512 * w * r),
+		kernel_size = 3,
+		stride = 2,
+		padding = 1,
+		init = false,
+		allocator = allocator,
+	)
+	vb_b4_1 := vb.vb_make(T, "b4.1", vb_root)
+	b4_1 := load_c2f(
+		&vb_b4_1,
+		uint(512 * w * r),
+		uint(512 * w * r),
+		uint(math.round(3 * d)),
+		true,
+		allocator,
+	)
+
+	vb_b5 := vb.vb_make(T, "b5.0", vb_root)
+	b5 := load_sppf(&vb_b5, uint(512 * w * r), uint(512 * w * r), 5, allocator)
+
+
+	return new_clone(
+		Dark_Net(T) {
+			b1_0 = b1_0,
+			b1_1 = b1_1,
+			b2_0 = b2_0,
+			b2_1 = b2_1,
+			b2_2 = b2_2,
+			b3_0 = b3_0,
+			b3_1 = b3_1,
+			b4_0 = b4_0,
+			b4_1 = b4_1,
+			b5 = b5,
+		},
+		allocator,
+	)
 }
 
 free_dark_net :: proc(net: ^Dark_Net($T), allocator := context.allocator) {
 	free_conv_block(net.b1_0, allocator)
+	free_conv_block(net.b1_1, allocator)
+	free_c2f(net.b2_0, allocator)
+	free_conv_block(net.b2_1, allocator)
+	free_c2f(net.b2_2, allocator)
+	free_conv_block(net.b3_0, allocator)
+	free_c2f(net.b3_1, allocator)
+	free_conv_block(net.b4_0, allocator)
+	free_c2f(net.b4_1, allocator)
+	free_sppf(net.b5, allocator)
 	free(net, allocator)
 }
 
@@ -238,9 +421,8 @@ YOLO_V8 :: struct($T: typeid) {
 	head: ^Detection_Head(T),
 }
 
-new_yolo :: proc(
-	$T: typeid,
-	safetensors: ^st.Safe_Tensors(T),
+load_yolo :: proc(
+	safetensors: ^st.Safe_Tensors($T),
 	m: Multiples,
 	num_classes: uint,
 	allocator := context.allocator,

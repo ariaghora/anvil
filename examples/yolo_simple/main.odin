@@ -35,7 +35,7 @@ main :: proc() {
 		ratio = 2.0,
 	}
 	num_classes := uint(80)
-	model := yolo.new_yolo(f32, safetensors, multiples, num_classes, context.allocator)
+	model := yolo.load_yolo(safetensors, multiples, num_classes, context.allocator)
 	defer yolo.free_yolo(model)
 
 	result := yolo.forward_yolo(model, nil)
