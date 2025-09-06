@@ -2,9 +2,14 @@ package main
 
 import "../../anvil/models/yolo"
 import st "../../anvil/safetensors/"
+import "../../anvil/tensor"
+import "../../anvil/trace"
 import "core:fmt"
 import "core:mem"
-import rl "vendor:raylib"
+import "core:slice"
+import "core:time"
+
+import "../../anvil/plot"
 
 
 main :: proc() {
@@ -24,6 +29,25 @@ main :: proc() {
 		}
 	}
 
+	trace.init_trace()
+	defer trace.finish_trace()
+
+	safetensors_ref, err_st_ref := st.read_from_file(f32, "weights/yolo_tensors.safetensors")
+	ensure(err_st_ref == nil)
+	defer st.free_safe_tensors(safetensors_ref)
+	input_t := safetensors_ref.tensors["original_input"]
+
+
+	///
+	// plot.visualize_tensor(
+	// 	tensor.squeeze(
+	// 		tensor.upsample_nearest_2d(input_t, 20, 20, context.temp_allocator),
+	// 		context.temp_allocator,
+	// 	),
+	// 	"resize",
+	// )
+
+
 	safetensors, err_st := st.read_from_file(f32, "weights/yolov8n.safetensors")
 	ensure(err_st == nil)
 	defer st.free_safe_tensors(safetensors)
@@ -38,6 +62,28 @@ main :: proc() {
 	model := yolo.load_yolo(safetensors, multiples, num_classes, context.allocator)
 	defer yolo.free_yolo(model)
 
-	result := yolo.forward_yolo(model, nil)
+	t := time.now()
+	result := yolo.forward_yolo(model, input_t, context.allocator)
+	// DarkNet Forward
+	x2, x3, x5 := yolo.forward_dark_net(model.net, input_t, context.temp_allocator)
+	head_1, head_2, head_3 := yolo.forward_neck(model.fpn, x2, x3, x5, context.temp_allocator)
+
+	// fmt.println(time.since(t))
+
+	// Plot references
+	t_own := head_3
+	t_ref := safetensors_ref.tensors["head_3"]
+
+	// fmt.println(t_own.shape, t_ref.shape)
+	t_ref_stack := tensor.squeeze(
+		tensor.cat([]^tensor.Tensor(f32){t_own, t_ref}, 3, context.temp_allocator),
+		context.temp_allocator,
+	)
+
+	c_sliced := 255
+	plot.visualize_tensor(
+		tensor.slice(t_ref_stack, {{c_sliced, c_sliced + 1, 1}, {}, {}}, context.temp_allocator),
+		"comparison",
+	)
 
 }

@@ -60,7 +60,7 @@ forward_conv_block :: proc(
 	defer trace.end_scoped_trace(conv_bn_trace)
 
 	conv_trace := trace.TRACE_SECTION("conv2d")
-	conv_out := nn.forward_conv2d(layer.conv, x, context.temp_allocator)
+	conv_out := nn.forward_conv2d(layer.conv, x, context.temp_allocator, loc)
 	trace.end_scoped_trace(conv_trace)
 
 	bn_trace := trace.TRACE_SECTION("batch_norm")
@@ -121,19 +121,22 @@ forward_bottleneck :: proc(
 	bottleneck: ^Bottleneck($T),
 	xs: ^tensor.Tensor(T),
 	allocator := context.allocator,
+	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
 	if bottleneck.residual {
 		ys := forward_conv_block(
 			bottleneck.cv2,
-			forward_conv_block(bottleneck.cv1, xs, context.temp_allocator),
+			forward_conv_block(bottleneck.cv1, xs, context.temp_allocator, loc),
 			context.temp_allocator,
+			loc,
 		)
 		return tensor.add(xs, ys, allocator)
 	} else {
 		return forward_conv_block(
 			bottleneck.cv2,
-			forward_conv_block(bottleneck.cv1, xs, context.temp_allocator),
+			forward_conv_block(bottleneck.cv1, xs, context.temp_allocator, loc),
 			allocator,
+			loc,
 		)
 	}
 }
@@ -176,6 +179,7 @@ forward_c2f :: proc(
 	c2f: ^C2f($T),
 	xs: ^tensor.Tensor(T),
 	allocator := context.allocator,
+	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
 	ys := forward_conv_block(c2f.cv1, xs, context.temp_allocator)
 	ys_list := slice.to_dynamic(
@@ -184,11 +188,11 @@ forward_c2f :: proc(
 	)
 	for m in c2f.bottleneck {
 		last := ys_list[len(ys_list) - 1]
-		b := forward_bottleneck(m, last, context.temp_allocator)
+		b := forward_bottleneck(m, last, context.temp_allocator, loc)
 		append(&ys_list, b)
 	}
-	zs := tensor.cat(ys_list[:], 1, context.temp_allocator)
-	return forward_conv_block(c2f.cv2, zs, allocator)
+	zs := tensor.cat(ys_list[:], 1, context.temp_allocator, loc)
+	return forward_conv_block(c2f.cv2, zs, allocator, loc)
 }
 
 free_c2f :: proc(c2f: ^C2f($T), allocator := context.allocator) {
@@ -449,23 +453,118 @@ load_yolo_v8_neck :: proc(
 	m: Multiples,
 	allocator := context.allocator,
 ) -> ^Yolo_V8_Neck(T) {
-	return new_clone(Yolo_V8_Neck(T){}, allocator)
+	w, r, d := m.width, m.ratio, m.depth
+	n := uint(math.round(3 * d))
+	vb_n1 := vb.vb_make(T, "n1", vb_root)
+	n1 := load_c2f(&vb_n1, uint(512 * w * (1 + r)), uint(512 * w), n, false, allocator)
+	vb_n2 := vb.vb_make(T, "n2", vb_root)
+	n2 := load_c2f(&vb_n2, uint(768 * w), uint(256 * w), n, false, allocator)
+	vb_n3 := vb.vb_make(T, "n3", vb_root)
+	n3 := load_conv_block(
+		&vb_n3,
+		uint(256 * w),
+		uint(256 * w),
+		3,
+		2,
+		1,
+		init = false,
+		allocator = allocator,
+	)
+	vb_n4 := vb.vb_make(T, "n4", vb_root)
+	n4 := load_c2f(&vb_n4, uint(768 * w), uint(512 * w), n, false, allocator)
+	vb_n5 := vb.vb_make(T, "n5", vb_root)
+	n5 := load_conv_block(
+		&vb_n5,
+		uint(512 * w),
+		uint(512 * w),
+		3,
+		2,
+		1,
+		init = false,
+		allocator = allocator,
+	)
+	vb_n6 := vb.vb_make(T, "n6", vb_root)
+	n6 := load_c2f(&vb_n6, uint(512 * w * (1 + r)), uint(512 * w * r), n, false, allocator)
+
+	return new_clone(
+		Yolo_V8_Neck(T){upsample_factor = 2, n1 = n1, n2 = n2, n3 = n3, n4 = n4, n5 = n5, n6 = n6},
+		allocator,
+	)
 }
 
 free_yolo_v8_neck :: proc(fpn: ^Yolo_V8_Neck($T), allocator := context.allocator) {
+	free_c2f(fpn.n1, allocator)
+	free_c2f(fpn.n2, allocator)
+	free_conv_block(fpn.n3, allocator)
+	free_c2f(fpn.n4, allocator)
+	free_conv_block(fpn.n5, allocator)
+	free_c2f(fpn.n6, allocator)
 	free(fpn)
 }
 
 forward_neck :: proc(
 	dn: ^Yolo_V8_Neck($T),
-	x1, x2, x3: ^tensor.Tensor(T),
+	p3, p4, p5: ^tensor.Tensor(T),
 	allocator := context.allocator,
+	loc := #caller_location,
 ) -> (
 	^tensor.Tensor(T),
 	^tensor.Tensor(T),
 	^tensor.Tensor(T),
 ) {
-	return nil, nil, nil
+	p5_up := tensor.upsample_nearest_2d(
+		p5,
+		dn.upsample_factor * p5.shape[2],
+		dn.upsample_factor * p5.shape[3],
+		context.temp_allocator,
+		loc,
+	)
+	x := forward_c2f(
+		dn.n1,
+		tensor.cat([]^tensor.Tensor(T){p5_up, p4}, 1, context.temp_allocator, loc),
+		context.temp_allocator,
+		loc,
+	)
+
+	x_up := tensor.upsample_nearest_2d(
+		x,
+		dn.upsample_factor * x.shape[2],
+		dn.upsample_factor * x.shape[3],
+		context.temp_allocator,
+	)
+	head_1 := forward_c2f(
+		dn.n2,
+		tensor.cat([]^tensor.Tensor(T){x_up, p3}, 1, context.temp_allocator, loc),
+		allocator,
+		loc,
+	)
+	head_2 := forward_c2f(
+		dn.n4,
+		tensor.cat(
+			[]^tensor.Tensor(T){forward_conv_block(dn.n3, head_1, context.temp_allocator, loc), x},
+			1,
+			context.temp_allocator,
+			loc,
+		),
+		allocator,
+		loc,
+	)
+	head_3 := forward_c2f(
+		dn.n6,
+		tensor.cat(
+			[]^tensor.Tensor(T) {
+				forward_conv_block(dn.n5, head_2, context.temp_allocator, loc),
+				p5,
+			},
+			1,
+			context.temp_allocator,
+			loc,
+		),
+		allocator,
+		loc,
+	)
+
+	return head_1, head_2, head_3
 }
 
 Dfl :: struct($T: typeid) {

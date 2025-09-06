@@ -2,6 +2,7 @@ package nn
 
 import "../tensor"
 import "../trace"
+import "core:fmt"
 
 Conv_2d :: struct($T: typeid) {
 	w:            ^tensor.Tensor(T),
@@ -91,7 +92,11 @@ forward_conv2d :: proc(
 	}
 
 	if x.shape[1] != conv.in_channels {
-		panic("Input channels mismatch")
+		fmt.panicf(
+			"Tensor channels (%d) and weight input channels (%d) mismatch",
+			x.shape[1],
+			conv.in_channels,
+		)
 	}
 
 	out: ^tensor.Tensor(T)
