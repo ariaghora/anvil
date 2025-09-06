@@ -72,19 +72,49 @@ read_from_bytes :: proc(
 		allocator = context.temp_allocator,
 	) or_return
 
-	// Exclude __metadata__ entry because who cares
 	delete_key(&tensors_proto, "__metadata__")
 
 	tensor_data_start := header_size + 8
 	res = new_clone(Safe_Tensors(T){raw_bytes = raw_bytes}, allocator, loc)
 
 	for k, v in tensors_proto {
-		data := mem.slice_data_cast(
-			[]T,
-			raw_bytes[tensor_data_start + v.data_offsets[0]:tensor_data_start + v.data_offsets[1]],
-		)
-		t := tensor.tensor_alloc(T, v.shape, owns_data = false, allocator = allocator, loc = loc)
-		t.data = data
+		raw_data := raw_bytes[tensor_data_start +
+		v.data_offsets[0]:tensor_data_start +
+		v.data_offsets[1]]
+
+		t := tensor.tensor_alloc(T, v.shape, owns_data = true, allocator = allocator, loc = loc)
+
+		// Convert based on source dtype
+		switch v.dtype {
+		case "U8", "u8", "uint8":
+			src_data := mem.slice_data_cast([]u8, raw_data)
+			for i in 0 ..< len(src_data) {
+				t.data[i] = T(src_data[i])
+			}
+		case "F16", "f16", "float16":
+			src_data := mem.slice_data_cast([]f16, raw_data)
+			for i in 0 ..< len(src_data) {
+				t.data[i] = T(src_data[i])
+			}
+		case "F32", "f32", "float32":
+			src_data := mem.slice_data_cast([]f32, raw_data)
+			for i in 0 ..< len(src_data) {
+				t.data[i] = T(src_data[i])
+			}
+		case "F64", "f64", "float64":
+			src_data := mem.slice_data_cast([]f64, raw_data)
+			for i in 0 ..< len(src_data) {
+				t.data[i] = T(src_data[i])
+			}
+		case "I32", "i32", "int32":
+			src_data := mem.slice_data_cast([]i32, raw_data)
+			for i in 0 ..< len(src_data) {
+				t.data[i] = T(src_data[i])
+			}
+		case:
+			panic(fmt.tprintf("Unsupported dtype: %s", v.dtype))
+		}
+
 		res.tensors[k] = t
 	}
 
