@@ -74,6 +74,11 @@ main :: proc() {
 	t_own := head_3
 	t_ref := safetensors_ref.tensors["head_3"]
 
+	vmin, vmax, _ := slice.min_max(t_own.data)
+	for v, i in t_own.data do t_own.data[i] = (t_own.data[i] - vmin) / (vmax - vmin)
+	vmin, vmax, _ = slice.min_max(t_ref.data)
+	for v, i in t_ref.data do t_ref.data[i] = (t_ref.data[i] - vmin) / (vmax - vmin)
+
 	// fmt.println(t_own.shape, t_ref.shape)
 	t_ref_stack := tensor.squeeze(
 		tensor.cat([]^tensor.Tensor(f32){t_own, t_ref}, 3, context.temp_allocator),

@@ -568,34 +568,133 @@ forward_neck :: proc(
 }
 
 Dfl :: struct($T: typeid) {
-	conv:        nn.Conv_2d(T),
+	conv:        ^nn.Conv_2d(T),
 	num_classes: uint,
+}
+
+load_dfl :: proc(
+	vb_root: ^vb.Var_Builder($T),
+	num_classes: uint,
+	allocator := context.allocator,
+) -> ^Dfl(T) {
+	conv := nn.new_conv2d(
+		T,
+		num_classes,
+		1,
+		{1, 1},
+		use_bias = false,
+		init = false,
+		allocator = allocator,
+	)
+	vb.assign(vb_root, "conv.weight", conv.w)
+	return new_clone(Dfl(T){conv = conv, num_classes = num_classes}, allocator)
+}
+
+free_dfl :: proc(dfl: ^Dfl($T), allocator := context.allocator) {
+	nn.free_conv2d(dfl.conv, allocator)
+	free(dfl, allocator)
 }
 
 Detection_Output :: struct($T: typeid) {
 	pred, anchors, strides: ^tensor.Tensor(T),
 }
 
+CV_Head :: struct($T: typeid) {
+	cb0, cb1: ^Conv_Block(T),
+	conv:     ^nn.Conv_2d(T),
+}
+
 Detection_Head :: struct($T: typeid) {
-	dfl:      Dfl(T),
-	cv2, cv3: struct {
-		cb1, cb2: ^Conv_Block(T),
-		c:        ^nn.Conv_2d(T),
-	},
+	dfl:      ^Dfl(T),
+	cv2, cv3: [3]^CV_Head(T),
 	ch, no:   uint,
+}
+
+
+load_cv_head_3 :: proc(
+	vb_root: ^vb.Var_Builder($T),
+	c1, nc, filter: uint,
+	allocator := context.allocator,
+) -> ^CV_Head(T) {
+	vb_0 := vb.vb_make(T, "0", vb_root)
+	cb0 := load_conv_block(&vb_0, filter, c1, 3, 1, init = false, allocator = allocator)
+	vb_1 := vb.vb_make(T, "1", vb_root)
+	cb1 := load_conv_block(&vb_1, c1, c1, 3, 1, init = false, allocator = allocator)
+
+	conv := nn.new_conv2d(T, c1, nc, {1, 1}, init = false, allocator = allocator)
+	vb.assign(vb_root, "2.weight", conv.w)
+	vb.assign(vb_root, "2.bias", conv.b.?)
+
+	return new_clone(CV_Head(T){cb0 = cb0, cb1 = cb1, conv = conv}, allocator)
+}
+
+load_cv_head_2 :: proc(
+	vb_root: ^vb.Var_Builder($T),
+	c2, nc, filter: uint,
+	allocator := context.allocator,
+) -> ^CV_Head(T) {
+	vb_0 := vb.vb_make(T, "0", vb_root)
+	cb0 := load_conv_block(&vb_0, filter, c2, 3, 1, init = false, allocator = allocator)
+	vb_1 := vb.vb_make(T, "1", vb_root)
+	cb1 := load_conv_block(&vb_1, c2, c2, 3, 1, init = false, allocator = allocator)
+
+	conv := nn.new_conv2d(T, c2, 4 * nc, {1, 1}, init = false, allocator = allocator)
+	vb.assign(vb_root, "2.weight", conv.w)
+	vb.assign(vb_root, "2.bias", conv.b.?)
+
+	return new_clone(CV_Head(T){cb0 = cb0, cb1 = cb1, conv = conv}, allocator)
+}
+
+free_cv_head :: proc(cv: ^CV_Head($T), allocator := context.allocator) {
+	free_conv_block(cv.cb0, allocator)
+	free_conv_block(cv.cb1, allocator)
+	nn.free_conv2d(cv.conv, allocator)
+	free(cv, allocator)
 }
 
 load_detection_head :: proc(
 	vb_root: ^vb.Var_Builder($T),
-	m: Multiples,
-	num_classes: uint,
+	nc: uint,
+	f1, f2, f3: uint,
 	allocator := context.allocator,
 ) -> ^Detection_Head(T) {
-	return new_clone(Detection_Head(T){}, allocator)
+	ch: uint = 16
+
+	vb_dfl := vb.vb_make(T, "dfl", vb_root)
+	dfl := load_dfl(&vb_dfl, ch, allocator)
+	c1 := max(nc, f1)
+	c2 := max(ch * 4, f1 / 4)
+
+	vb_cv3_0 := vb.vb_make(T, "cv3.0", vb_root)
+	vb_cv3_1 := vb.vb_make(T, "cv3.1", vb_root)
+	vb_cv3_2 := vb.vb_make(T, "cv3.2", vb_root)
+	cv3 := [3]^CV_Head(T) {
+		load_cv_head_3(&vb_cv3_0, c1, nc, f1, allocator),
+		load_cv_head_3(&vb_cv3_1, c1, nc, f2, allocator),
+		load_cv_head_3(&vb_cv3_2, c1, nc, f3, allocator),
+	}
+
+	vb_cv2_0 := vb.vb_make(T, "cv2.0", vb_root)
+	vb_cv2_1 := vb.vb_make(T, "cv2.1", vb_root)
+	vb_cv2_2 := vb.vb_make(T, "cv2.2", vb_root)
+	cv2 := [3]^CV_Head(T) {
+		load_cv_head_2(&vb_cv2_0, c2, ch, f1, allocator),
+		load_cv_head_2(&vb_cv2_1, c2, ch, f2, allocator),
+		load_cv_head_2(&vb_cv2_2, c2, ch, f3, allocator),
+	}
+
+	no := nc + ch * 4
+	return new_clone(
+		Detection_Head(T){dfl = dfl, cv3 = cv3, cv2 = cv2, ch = ch, no = no},
+		allocator,
+	)
 }
 
 free_detection_head :: proc(head: ^Detection_Head($T), allocator := context.allocator) {
-	free(head)
+	free_dfl(head.dfl, allocator)
+	for cv in head.cv3 do free_cv_head(cv, allocator)
+	for cv in head.cv2 do free_cv_head(cv, allocator)
+	free(head, allocator)
 }
 
 forward_head :: proc(
@@ -637,7 +736,8 @@ load_yolo :: proc(
 		safetensors = safetensors,
 		parent      = nil,
 	}
-	head := load_detection_head(&vb_head, m, num_classes, allocator)
+	f1, f2, f3 := filters_by_size(m)
+	head := load_detection_head(&vb_head, num_classes, f1, f2, f3)
 	return new_clone(YOLO_V8(T){net = net, fpn = fpn, head = head}, allocator)
 }
 
