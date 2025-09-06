@@ -540,7 +540,7 @@ new_with_init :: proc(
 }
 
 @(private = "package")
-compute_linear_index :: proc(indices: []uint, strides: []uint) -> uint {
+compute_linear_index :: proc(indices: []uint, strides: []uint, loc := #caller_location) -> uint {
 	index: uint = 0
 	for i in 0 ..< len(indices) {
 		index += indices[i] * strides[i]
@@ -820,6 +820,37 @@ matmul :: proc(
 	return result
 }
 
+pad_with_zero :: proc(
+	x: ^Tensor($T),
+	dim, left, right: uint,
+	allocator := context.allocator,
+) -> ^Tensor(T) {
+	ensure(
+		dim < len(x.shape),
+		fmt.tprintf("dim %d out of bounds for tensor with %d dimensions", dim, len(x.shape)),
+	)
+
+	if left == 0 && right == 0 {
+		return clone(x, allocator)
+	} else if left == 0 {
+		shape := slice.clone(x.shape, context.temp_allocator)
+		shape[dim] = right
+		right_zeros := zeros(T, shape, context.temp_allocator)
+		return cat([]^Tensor(T){x, right_zeros}, dim, allocator)
+	} else if right == 0 {
+		shape := slice.clone(x.shape, context.temp_allocator)
+		shape[dim] = left
+		left_zeros := zeros(T, shape, context.temp_allocator)
+		return cat([]^Tensor(T){left_zeros, x}, dim, allocator)
+	} else {
+		shape := slice.clone(x.shape, context.temp_allocator)
+		shape[dim] = left
+		left_zeros := zeros(T, shape, context.temp_allocator)
+		shape[dim] = right
+		right_zeros := zeros(T, shape, context.temp_allocator)
+		return cat([]^Tensor(T){left_zeros, x, right_zeros}, dim, allocator)
+	}
+}
 
 // General dimension permutation - specify new order of ALL dimensions
 // Example: permute(tensor, [2, 0, 1]) reorders dims so that dim 0->2, dim 1->0, dim 2->1
@@ -1366,6 +1397,18 @@ repeat_interleave_batch :: proc(
 	}
 
 	return result
+}
+
+squeeze :: proc(
+	tensor: ^Tensor($T),
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	shape_out := make([dynamic]uint, context.temp_allocator)
+	for s in tensor.shape {
+		if s > 1 do append(&shape_out, s)
+	}
+	return reshape(tensor, shape_out[:], allocator, loc)
 }
 
 unsqueeze :: proc(tensor: ^Tensor($T), dim: uint, allocator := context.allocator) -> ^Tensor(T) {

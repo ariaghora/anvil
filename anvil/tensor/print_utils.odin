@@ -1,7 +1,7 @@
 package tensor
 
-import "core:strings"
 import "core:fmt"
+import "core:strings"
 
 // Pretty print tensor with numpy-like formatting
 print :: proc(
@@ -43,7 +43,7 @@ print :: proc(
 }
 
 
-print_value :: proc(builder: ^strings.Builder, value: $T) {
+print_value :: proc(builder: ^strings.Builder, value: $T, loc := #caller_location) {
 	when T == f32 || T == f64 {
 		strings.write_string(builder, fmt.tprintf("%.6f", value))
 	} else {
@@ -60,6 +60,7 @@ print_recursive :: proc(
 	indent: int,
 	builder: ^strings.Builder,
 	max_print_elements_per_dim: uint,
+	loc := #caller_location,
 ) {
 	if depth == len(shape) - 1 {
 		// Innermost dimension
@@ -71,8 +72,8 @@ print_recursive :: proc(
 			for i in 0 ..< 3 {
 				if i > 0 {strings.write_byte(builder, ' ')}
 				indices[depth] = uint(i)
-				index := compute_linear_index(indices, strides)
-				print_value(builder, arr.data[index])
+				index := compute_linear_index(indices, strides, loc)
+				print_value(builder, arr.data[index], loc)
 			}
 
 			strings.write_string(builder, " ... ")

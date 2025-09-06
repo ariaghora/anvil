@@ -1,12 +1,14 @@
 package yolo
 
 import "../../nn"
+import "../../plot"
 import st "../../safetensors"
 import "../../tensor"
 import "../../trace"
 import vb "../sam/var_builder"
 import "core:fmt"
 import "core:math"
+import "core:slice"
 
 Conv_Block :: struct($T: typeid) {
 	conv: ^nn.Conv_2d(T),
@@ -14,15 +16,16 @@ Conv_Block :: struct($T: typeid) {
 }
 
 load_conv_block :: proc(
-	vb_root: ^vb.Var_Builder($T), // $T: typeid,
+	vb_root: ^vb.Var_Builder($T),
 	in_channels, out_channels: uint,
 	kernel_size: uint,
 	stride: uint = 1,
-	padding: uint = 0,
+	padding: Maybe(uint) = nil,
 	groups: uint = 1,
 	init := true,
 	allocator := context.allocator,
 ) -> ^Conv_Block(T) {
+	padding := padding.? or_else kernel_size / 2
 	conv := nn.new_conv2d(
 		T,
 		in_channels,
@@ -61,7 +64,7 @@ forward_conv_block :: proc(
 	trace.end_scoped_trace(conv_trace)
 
 	bn_trace := trace.TRACE_SECTION("batch_norm")
-	bn_out := nn.forward_batch_norm_2d(layer.bn, conv_out, allocator, loc)
+	bn_out := tensor.silu(nn.forward_batch_norm_2d(layer.bn, conv_out, allocator, loc), allocator)
 	trace.end_scoped_trace(bn_trace)
 
 	return bn_out
@@ -114,6 +117,27 @@ load_bottleneck :: proc(
 	return new_clone(Bottleneck(T){cv1 = cv1, cv2 = cv2, residual = residual}, allocator)
 }
 
+forward_bottleneck :: proc(
+	bottleneck: ^Bottleneck($T),
+	xs: ^tensor.Tensor(T),
+	allocator := context.allocator,
+) -> ^tensor.Tensor(T) {
+	if bottleneck.residual {
+		ys := forward_conv_block(
+			bottleneck.cv2,
+			forward_conv_block(bottleneck.cv1, xs, context.temp_allocator),
+			context.temp_allocator,
+		)
+		return tensor.add(xs, ys, allocator)
+	} else {
+		return forward_conv_block(
+			bottleneck.cv2,
+			forward_conv_block(bottleneck.cv1, xs, context.temp_allocator),
+			allocator,
+		)
+	}
+}
+
 free_bottleneck :: proc(bottleneck: ^Bottleneck($T), allocator := context.allocator) {
 	free_conv_block(bottleneck.cv1, allocator)
 	free_conv_block(bottleneck.cv2, allocator)
@@ -148,6 +172,25 @@ load_c2f :: proc(
 	return new_clone(C2f(T){cv1 = cv1, cv2 = cv2, bottleneck = bottleneck}, allocator)
 }
 
+forward_c2f :: proc(
+	c2f: ^C2f($T),
+	xs: ^tensor.Tensor(T),
+	allocator := context.allocator,
+) -> ^tensor.Tensor(T) {
+	ys := forward_conv_block(c2f.cv1, xs, context.temp_allocator)
+	ys_list := slice.to_dynamic(
+		tensor.chunk(ys, 2, 1, context.temp_allocator),
+		context.temp_allocator,
+	)
+	for m in c2f.bottleneck {
+		last := ys_list[len(ys_list) - 1]
+		b := forward_bottleneck(m, last, context.temp_allocator)
+		append(&ys_list, b)
+	}
+	zs := tensor.cat(ys_list[:], 1, context.temp_allocator)
+	return forward_conv_block(c2f.cv2, zs, allocator)
+}
+
 free_c2f :: proc(c2f: ^C2f($T), allocator := context.allocator) {
 	free_conv_block(c2f.cv1, allocator)
 	free_conv_block(c2f.cv2, allocator)
@@ -175,6 +218,28 @@ load_sppf :: proc(
 	cv2 := load_conv_block(&vb_cv2, c_ * 4, c2, 1, 1)
 
 	return new_clone(Sppf(T){cv1 = cv1, cv2 = cv2, k = k}, allocator)
+}
+
+forward_sppf :: proc(
+	sppf: ^Sppf($T),
+	xs: ^tensor.Tensor(T),
+	allocator := context.allocator,
+) -> ^tensor.Tensor(T) {
+	xs := forward_conv_block(sppf.cv1, xs, context.temp_allocator)
+	xs2 := tensor.pad_with_zero(xs, 2, sppf.k / 2, sppf.k / 2, context.temp_allocator)
+	xs2 = tensor.pad_with_zero(xs2, 3, sppf.k / 2, sppf.k / 2, context.temp_allocator)
+	xs2 = tensor.max_pool_2d(xs2, sppf.k, 1, context.temp_allocator)
+
+	xs3 := tensor.pad_with_zero(xs2, 2, sppf.k / 2, sppf.k / 2, context.temp_allocator)
+	xs3 = tensor.pad_with_zero(xs3, 3, sppf.k / 2, sppf.k / 2, context.temp_allocator)
+	xs3 = tensor.max_pool_2d(xs3, sppf.k, 1, context.temp_allocator)
+
+	xs4 := tensor.pad_with_zero(xs3, 2, sppf.k / 2, sppf.k / 2, context.temp_allocator)
+	xs4 = tensor.pad_with_zero(xs4, 3, sppf.k / 2, sppf.k / 2, context.temp_allocator)
+	xs4 = tensor.max_pool_2d(xs4, sppf.k, 1, context.temp_allocator)
+
+	xs_cat := tensor.cat([]^tensor.Tensor(T){xs, xs2, xs3, xs4}, 1, context.temp_allocator)
+	return forward_conv_block(sppf.cv2, xs_cat, allocator)
 }
 
 free_sppf :: proc(sppf: ^Sppf($T), allocator := context.allocator) {
@@ -338,9 +403,36 @@ forward_dark_net :: proc(
 	^tensor.Tensor(T),
 	^tensor.Tensor(T),
 ) {
-	return nil, nil, nil
-}
+	x1 := forward_conv_block(
+		dn.b1_1,
+		forward_conv_block(dn.b1_0, x, context.temp_allocator),
+		context.temp_allocator,
+	)
 
+	// Returned, use parent allocator
+	x2 := forward_c2f(
+		dn.b2_2,
+		forward_conv_block(
+			dn.b2_1,
+			forward_c2f(dn.b2_0, x1, context.temp_allocator),
+			context.temp_allocator,
+		),
+		allocator,
+	)
+
+	// Returned, use parent allocator
+	x3 := forward_c2f(dn.b3_1, forward_conv_block(dn.b3_0, x2, context.temp_allocator), allocator)
+
+	x4 := forward_c2f(
+		dn.b4_1,
+		forward_conv_block(dn.b4_0, x3, context.temp_allocator),
+		context.temp_allocator,
+	)
+
+	x5 := forward_sppf(dn.b5, x4, allocator)
+
+	return x2, x3, x5
+}
 
 Yolo_V8_Neck :: struct($T: typeid) {
 	upsample_factor: uint,
