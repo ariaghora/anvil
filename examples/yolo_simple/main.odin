@@ -63,29 +63,41 @@ main :: proc() {
 	defer yolo.free_yolo(model)
 
 	t := time.now()
-	result := yolo.forward_yolo(model, input_t, context.allocator)
+	// result := yolo.forward_yolo(model, input_t, context.allocator)
+
 	// DarkNet Forward
 	x2, x3, x5 := yolo.forward_dark_net(model.net, input_t, context.temp_allocator)
+
+	// Neck Forward
 	head_1, head_2, head_3 := yolo.forward_neck(model.fpn, x2, x3, x5, context.temp_allocator)
 
-	// fmt.println(time.since(t))
+	// head Forward
+	det1, det2, det3 := yolo.forward_head(
+		model.head,
+		head_1,
+		head_2,
+		head_3,
+		context.temp_allocator,
+	)
+
+	fmt.println(time.since(t))
 
 	// Plot references
-	t_own := head_3
-	t_ref := safetensors_ref.tensors["head_3"]
+	t_own := det3
+	t_ref := safetensors_ref.tensors["det_3"]
 
 	vmin, vmax, _ := slice.min_max(t_own.data)
-	for v, i in t_own.data do t_own.data[i] = (t_own.data[i] - vmin) / (vmax - vmin)
+	// for v, i in t_own.data do t_own.data[i] = (t_own.data[i] - vmin) / (vmax - vmin)
 	vmin, vmax, _ = slice.min_max(t_ref.data)
-	for v, i in t_ref.data do t_ref.data[i] = (t_ref.data[i] - vmin) / (vmax - vmin)
+	// for v, i in t_ref.data do t_ref.data[i] = (t_ref.data[i] - vmin) / (vmax - vmin)
+	fmt.println(t_own.shape, t_ref.shape)
 
-	// fmt.println(t_own.shape, t_ref.shape)
 	t_ref_stack := tensor.squeeze(
 		tensor.cat([]^tensor.Tensor(f32){t_own, t_ref}, 3, context.temp_allocator),
 		context.temp_allocator,
 	)
 
-	c_sliced := 255
+	c_sliced := 3
 	plot.visualize_tensor(
 		tensor.slice(t_ref_stack, {{c_sliced, c_sliced + 1, 1}, {}, {}}, context.temp_allocator),
 		"comparison",

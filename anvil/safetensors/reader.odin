@@ -111,6 +111,11 @@ read_from_bytes :: proc(
 			for i in 0 ..< len(src_data) {
 				t.data[i] = T(src_data[i])
 			}
+		case "I64", "i64", "int64":
+			src_data := mem.slice_data_cast([]i64, raw_data)
+			for i in 0 ..< len(src_data) {
+				t.data[i] = T(src_data[i])
+			}
 		case:
 			panic(fmt.tprintf("Unsupported dtype: %s", v.dtype))
 		}

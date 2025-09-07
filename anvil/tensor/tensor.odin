@@ -679,9 +679,15 @@ reshape :: proc(
 		)
 	}
 
-	res := tensor_alloc(T, new_shape, true, allocator)
-	arr_data, _ := get_strided_data(arr, allocator = context.temp_allocator)
-	copy(res.data, arr_data) // Since we're just changing shape, data can be copied directly
+	res: ^Tensor(T)
+	res_should_own_data := !arr.owns_data
+	res = tensor_alloc(T, new_shape, res_should_own_data, allocator)
+	if arr.owns_data {
+		res.data = arr.data
+	} else {
+		arr_data, _ := get_strided_data(arr, allocator = context.temp_allocator)
+		copy(res.data, arr_data) // Since we're just changing shape, data can be copied directly
+	}
 	return res
 }
 
@@ -1293,6 +1299,65 @@ slice :: proc(input: ^Tensor($T), ranges: []Range, allocator := context.allocato
 	return output
 }
 
+// Repeat tensor along specified dimensions (tiling)
+// e.g., tensor shape (2, 3) with repeats (2, 1) -> (4, 3)
+repeat :: proc(
+	tensor: ^Tensor($T),
+	repeats: []uint,
+	allocator := context.allocator,
+) -> ^Tensor(T) {
+	if len(repeats) != len(tensor.shape) {
+		panic("Repeats must have same length as tensor dimensions")
+	}
+
+	// Calculate new shape
+	new_shape := make([]uint, len(tensor.shape), context.temp_allocator)
+	for i in 0 ..< len(tensor.shape) {
+		new_shape[i] = tensor.shape[i] * repeats[i]
+	}
+
+	result := tensor_alloc(T, new_shape, true, allocator)
+
+	// Get source data
+	src_data, _ := get_strided_data(tensor, allocator = context.temp_allocator)
+
+	// Calculate strides for iterating through result
+	result_strides := make([]uint, len(new_shape), context.temp_allocator)
+	stride := uint(1)
+	for i := len(new_shape) - 1; i >= 0; i -= 1 {
+		result_strides[i] = stride
+		stride *= new_shape[i]
+	}
+
+	// Fill result by tiling
+	total_elements := shape_to_size(new_shape)
+	for i in 0 ..< total_elements {
+		// Calculate coordinates in result tensor
+		coords := make([]uint, len(new_shape), context.temp_allocator)
+		temp := i
+		for dim := len(new_shape) - 1; dim >= 0; dim -= 1 {
+			coords[dim] = temp % new_shape[dim]
+			temp /= new_shape[dim]
+		}
+
+		// Map to source coordinates
+		src_coords := make([]uint, len(tensor.shape), context.temp_allocator)
+		for dim in 0 ..< len(tensor.shape) {
+			src_coords[dim] = coords[dim] % tensor.shape[dim]
+		}
+
+		// Calculate source index
+		src_idx := uint(0)
+		for dim in 0 ..< len(tensor.shape) {
+			src_idx += src_coords[dim] * tensor.strides[dim]
+		}
+
+		result.data[i] = src_data[src_idx]
+	}
+
+	return result
+}
+
 repeat_interleave :: proc(
 	tensor: ^Tensor($T),
 	repeats: uint,
@@ -1448,6 +1513,17 @@ flatten :: proc(
 	append(&new_shape, uint(rest_size))
 	result := tensor_alloc(T, new_shape[:], false, allocator)
 	result.data = t.data
+	return result
+}
+
+// Flatten all dimensions to 1D
+flatten_all :: proc(tensor: ^Tensor($T), allocator := context.allocator) -> ^Tensor(T) {
+	total_size := shape_to_size(tensor.shape)
+	result := tensor_alloc(T, []uint{total_size}, true, allocator)
+
+	data, _ := get_strided_data(tensor, allocator = context.temp_allocator)
+
+	copy(result.data, data)
 	return result
 }
 

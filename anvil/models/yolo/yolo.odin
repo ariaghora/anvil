@@ -10,6 +10,80 @@ import "core:fmt"
 import "core:math"
 import "core:slice"
 
+make_anchors :: proc(
+	xs0, xs1, xs2: ^tensor.Tensor($T),
+	strides: [3]uint,
+	grid_cell_offset: T,
+	allocator := context.allocator,
+) -> (
+	anchor_points: ^tensor.Tensor(T),
+	stride_tensor: ^tensor.Tensor(T),
+) {
+	s0, s1, s2 := strides[0], strides[1], strides[2]
+
+	anchor_points_list := make([dynamic]^tensor.Tensor(T), 0, 3, context.temp_allocator)
+	stride_tensor_list := make([dynamic]^tensor.Tensor(T), 0, 3, context.temp_allocator)
+
+	xs_list := [3]^tensor.Tensor(T){xs0, xs1, xs2}
+	stride_list := [3]uint{s0, s1, s2}
+
+	for i in 0 ..< 3 {
+		xs := xs_list[i]
+		stride := stride_list[i]
+		h := xs.shape[2]
+		w := xs.shape[3]
+
+		// Create coordinate grids
+		sx_range := tensor.arange(T, w, context.temp_allocator)
+		sy_range := tensor.arange(T, h, context.temp_allocator)
+
+		// Add grid_cell_offset to each coordinate
+		offset_tensor := tensor.tensor_alloc(T, []uint{}, true, context.temp_allocator)
+		offset_tensor.data[0] = grid_cell_offset
+
+		sx := tensor.add(sx_range, offset_tensor, context.temp_allocator)
+		sy := tensor.add(sy_range, offset_tensor, context.temp_allocator)
+
+		// Create grid by repeating
+		// sx: (w,) -> (1, w) -> repeat (h, 1) -> (h, w) -> flatten
+		sx_reshaped := tensor.reshape(sx, []uint{1, w}, context.temp_allocator)
+		sx_repeated := tensor.repeat(sx_reshaped, []uint{h, 1}, context.temp_allocator)
+		sx_flat := tensor.flatten_all(sx_repeated, context.temp_allocator)
+
+		// sy: (h,) -> (h, 1) -> repeat (1, w) -> (h, w) -> flatten
+		sy_reshaped := tensor.reshape(sy, []uint{h, 1}, context.temp_allocator)
+		sy_repeated := tensor.repeat(sy_reshaped, []uint{1, w}, context.temp_allocator)
+		sy_flat := tensor.flatten_all(sy_repeated, context.temp_allocator)
+
+		// Reshape to (h*w, 1) before stacking
+		sx_flat_2d := tensor.reshape(sx_flat, []uint{h * w, 1}, context.temp_allocator)
+		sy_flat_2d := tensor.reshape(sy_flat, []uint{h * w, 1}, context.temp_allocator)
+
+		// Concatenate along dimension 1 to get (h*w, 2)
+		points := tensor.cat(
+			[]^tensor.Tensor(T){sx_flat_2d, sy_flat_2d},
+			1,
+			context.temp_allocator,
+		)
+		append(&anchor_points_list, points)
+
+		// Create stride tensor with shape (h*w,) filled with stride value
+		stride_val := tensor.ones(T, []uint{h * w}, context.temp_allocator)
+		stride_scalar := tensor.tensor_alloc(T, []uint{}, true, context.temp_allocator)
+		stride_scalar.data[0] = T(stride)
+
+		stride_scaled := tensor.mul(stride_val, stride_scalar, context.temp_allocator)
+		append(&stride_tensor_list, stride_scaled)
+	}
+
+	// Concatenate all anchor points and stride tensors
+	anchor_points = tensor.cat(anchor_points_list[:], 0, allocator)
+	stride_tensor_concat := tensor.cat(stride_tensor_list[:], 0, context.temp_allocator)
+	stride_tensor = tensor.unsqueeze(stride_tensor_concat, 1, allocator)
+
+	return anchor_points, stride_tensor
+}
+
 Conv_Block :: struct($T: typeid) {
 	conv: ^nn.Conv_2d(T),
 	bn:   ^nn.Batch_Norm_2d(T),
@@ -697,12 +771,41 @@ free_detection_head :: proc(head: ^Detection_Head($T), allocator := context.allo
 	free(head, allocator)
 }
 
+
 forward_head :: proc(
 	dn: ^Detection_Head($T),
-	x1, x2, x3: ^tensor.Tensor(T),
+	xs0, xs1, xs2: ^tensor.Tensor(T),
 	allocator := context.allocator,
-) -> ^Detection_Output(T) {
-	return nil
+	// ) -> ^Detection_Output(T) {
+) -> (
+	^tensor.Tensor(T),
+	^tensor.Tensor(T),
+	^tensor.Tensor(T),
+) {
+	forward_cv := proc(
+		cv2, cv3: [3]^CV_Head(T),
+		xs: ^tensor.Tensor(T),
+		i: uint,
+		allocator := context.allocator,
+	) -> ^tensor.Tensor(T) {
+		xs_2 := forward_conv_block(cv2[i].cb0, xs, context.temp_allocator)
+		xs_2 = forward_conv_block(cv2[i].cb1, xs_2, context.temp_allocator)
+		xs_2 = nn.forward_conv2d(cv2[i].conv, xs_2, context.temp_allocator)
+
+		xs_3 := forward_conv_block(cv3[i].cb0, xs, context.temp_allocator)
+		xs_3 = forward_conv_block(cv3[i].cb1, xs_3, context.temp_allocator)
+		xs_3 = nn.forward_conv2d(cv3[i].conv, xs_3, context.temp_allocator)
+
+		return tensor.cat([]^tensor.Tensor(T){xs_2, xs_3}, 1, allocator)
+	}
+
+	xs0 := forward_cv(dn.cv2, dn.cv3, xs0, 0, allocator = context.temp_allocator)
+	xs1 := forward_cv(dn.cv2, dn.cv3, xs1, 1, allocator = context.temp_allocator)
+	xs2 := forward_cv(dn.cv2, dn.cv3, xs2, 2, allocator = context.temp_allocator)
+
+	// let (anchors, strides) = make_anchors(&xs0, &xs1, &xs2, (8, 16, 32), 0.5)?;
+	anchors, strides := make_anchors(xs0, xs1, xs2, {8, 16, 32}, 0.5, context.temp_allocator)
+	return xs0, xs1, xs2
 }
 
 YOLO_V8 :: struct($T: typeid) {
