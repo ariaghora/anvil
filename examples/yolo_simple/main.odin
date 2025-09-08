@@ -4,13 +4,21 @@ import "../../anvil/models/yolo"
 import st "../../anvil/safetensors/"
 import "../../anvil/tensor"
 import "../../anvil/trace"
+import "core:c"
+import "core:c/libc"
 import "core:fmt"
 import "core:mem"
 import "core:os"
 import "core:slice"
+import "core:strings"
 import "core:time"
+import "vendor:stb/image"
 
 import "../../anvil/plot"
+
+THRESHOLD_NMS :: 0.45
+THRESHOLD_CONF :: 0.50
+NUM_CLASSES :: 80
 
 BBox :: struct {
 	xmin, ymin, xmax, ymax: f32,
@@ -117,19 +125,60 @@ main :: proc() {
 	ensure(err_st_ref == nil)
 	defer st.free_safe_tensors(safetensors_ref)
 
-	input_t := safetensors_ref.tensors["original_input"]
+	f := libc.fopen(strings.clone_to_cstring(image_path, context.temp_allocator), "rb")
+	ensure(f != nil, "cannot open file")
+	defer libc.fclose(f)
+
+
+	ori_w, ori_h, ori_chan: i32
+	image_data := image.loadf_from_file(f, &ori_w, &ori_h, &ori_chan, 0)
+	defer image.image_free(image_data)
+	ensure(ori_chan == 3, "can only support RGB")
+
+	// Sizes have to be divisible by 32.
+	target_w, target_h: uint
+	if ori_w < ori_h {
+		w := ori_w * 640 / ori_h
+		target_w, target_h = uint(w) / 32 * 32, 640
+	} else {
+		h := ori_h * 640 / ori_w
+		target_w, target_h = 640, uint(h) / 32 * 32
+	}
+
+	image_data_resized := make([]f32, ori_chan * i32(target_w * target_h), context.temp_allocator)
+	image.resize_float(
+		image_data,
+		ori_w,
+		ori_h,
+		0,
+		raw_data(image_data_resized),
+		i32(target_w),
+		i32(target_h),
+		0,
+		ori_chan,
+	)
+
+	input_t := tensor.permute(
+		tensor.new_with_init(
+			image_data_resized,
+			{1, target_h, target_w, uint(ori_chan)},
+			context.temp_allocator,
+		),
+		{0, 3, 1, 2},
+		context.temp_allocator,
+	)
 
 	safetensors, err_st := st.read_from_file(f32, model_path)
 	ensure(err_st == nil)
 	defer st.free_safe_tensors(safetensors)
 
-	// NANO
+	// Configuration for nano model
 	multiples := yolo.Multiples {
 		depth = 0.33,
 		width = 0.25,
 		ratio = 2.0,
 	}
-	num_classes := uint(80)
+	num_classes := uint(NUM_CLASSES)
 	model := yolo.load_yolo(safetensors, multiples, num_classes, context.allocator)
 	defer yolo.free_yolo(model)
 
@@ -137,22 +186,26 @@ main :: proc() {
 	pred, _, _ := yolo.forward_yolo(model, input_t, context.allocator)
 	fmt.println("inference time:", time.since(t))
 
-	// postproc
+	// Postprocess the raw detection.
+	// We need to filter out the detections with low confidence. Subsequently,
+	// eliminate detection duplicates by using NMS
 	pred = tensor.squeeze(pred, context.temp_allocator)
-	bboxes := extract_bboxes(pred, 0.25, context.temp_allocator)
-	non_maximum_suppression(bboxes, 0.45)
+	bboxes := extract_bboxes(pred, THRESHOLD_CONF, context.temp_allocator)
+	non_maximum_suppression(bboxes, THRESHOLD_NMS)
 
+	// Print all detections
 	class_names := YOLO_Classes_80
 	for bbox_per_class, i in bboxes {
 		class_name := class_names[i]
 		for bbox in bbox_per_class {
 			fmt.printfln(
-				"class_name:%s , xmin:%f, ymin:%f, xmax:%f, ymax:%f",
+				"class_name:%s , xmin:%f, ymin:%f, xmax:%f, ymax:%f, conf:%f",
 				class_name,
 				bbox.xmin,
 				bbox.ymin,
 				bbox.xmax,
 				bbox.ymax,
+				bbox.conf,
 			)
 		}
 
