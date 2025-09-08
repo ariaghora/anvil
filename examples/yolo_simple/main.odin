@@ -1,6 +1,12 @@
+/*
+This file shows example of how to use YOLOv8 model implemented in Anvil.
+
+Obtain the safetensors model here: https://huggingface.co/lmz/candle-yolo-v8/tree/main
+*/
 package main
 
 import "../../anvil/models/yolo"
+import "../../anvil/plot"
 import st "../../anvil/safetensors/"
 import "../../anvil/tensor"
 import "../../anvil/trace"
@@ -14,18 +20,19 @@ import "core:strings"
 import "core:time"
 import "vendor:stb/image"
 
-import "../../anvil/plot"
-
+// Adjust to your liking
 THRESHOLD_NMS :: 0.45
 THRESHOLD_CONF :: 0.50
 NUM_CLASSES :: 80
-MODEL_PATH :: "weights/yolo_tensors.safetensors"
 
+// Convenience sturct to encode each bounding box
 BBox :: struct {
 	xmin, ymin, xmax, ymax: f32,
 	conf:                   f32,
 }
 
+// Given raw model prediction, extract all bounding boxes with confidence exceeding
+// some threshold.
 extract_bboxes :: proc(
 	pred: ^tensor.Tensor($T),
 	conf_thresh: f32,
@@ -49,8 +56,8 @@ extract_bboxes :: proc(
 			}
 			if pred[4 + class_idx] > 0. {
 				bbox := BBox {
-					xmin = pred[0] - pred[2] / 2.,
-					ymin = pred[1] - pred[3] / 2.,
+					xmin = max(pred[0] - pred[2] / 2., 0),
+					ymin = max(pred[1] - pred[3] / 2., 0),
 					xmax = pred[0] + pred[2] / 2.,
 					ymax = pred[1] + pred[3] / 2.,
 					conf = confidence,
@@ -63,6 +70,7 @@ extract_bboxes :: proc(
 	return bboxes
 }
 
+// Intersection over union
 iou :: proc(b1, b2: BBox) -> f32 {
 	b1_area := (b1.xmax - b1.xmin + 1) * (b1.ymax - b1.ymin + 1)
 	b2_area := (b2.xmax - b2.xmin + 1) * (b2.ymax - b2.ymin + 1)
@@ -96,6 +104,60 @@ non_maximum_suppression :: proc(bboxes: [][dynamic]BBox, threshold: f32) {
 	}
 }
 
+load_image :: proc(
+	image_path: string,
+	allocator := context.allocator,
+) -> (
+	^tensor.Tensor(f32),
+	uint,
+	uint,
+	uint,
+	uint,
+) {
+	f := libc.fopen(strings.clone_to_cstring(image_path, context.temp_allocator), "rb")
+	ensure(f != nil, "cannot open file")
+	defer libc.fclose(f)
+
+	orig_w, orig_h, orig_chan: i32
+	image_data := image.loadf_from_file(f, &orig_w, &orig_h, &orig_chan, 0)
+	defer image.image_free(image_data)
+	ensure(orig_chan == 3, "can only support RGB")
+
+	// Sizes have to be divisible by 32.
+	target_w, target_h: uint
+	if orig_w < orig_h {
+		w := orig_w * 640 / orig_h
+		target_w, target_h = uint(w) / 32 * 32, 640
+	} else {
+		h := orig_h * 640 / orig_w
+		target_w, target_h = 640, uint(h) / 32 * 32
+	}
+
+	image_data_resized := make([]f32, orig_chan * i32(target_w * target_h), allocator)
+	image.resize_float(
+		image_data,
+		orig_w,
+		orig_h,
+		0,
+		raw_data(image_data_resized),
+		i32(target_w),
+		i32(target_h),
+		0,
+		orig_chan,
+	)
+
+	input_t := tensor.permute(
+		tensor.new_with_init(
+			image_data_resized,
+			{1, target_h, target_w, uint(orig_chan)},
+			allocator,
+		),
+		{0, 3, 1, 2},
+		allocator,
+	)
+	return input_t, uint(orig_w), uint(orig_h), target_w, target_h
+}
+
 main :: proc() {
 	when ODIN_DEBUG {
 		track: mem.Tracking_Allocator
@@ -114,75 +176,67 @@ main :: proc() {
 	}
 
 	ensure(
-		len(os.args) == 3,
-		"Program requires two positional arguments: model path and image path",
+		len(os.args) == 4,
+		"Program requires two positional arguments: model path, image path, and model scale (n, s, m, l)",
 	)
-	model_path, image_path := os.args[1], os.args[2]
-
-	trace.init_trace()
-	defer trace.finish_trace()
-
-	safetensors_ref, err_st_ref := st.read_from_file(f32, MODEL_PATH)
-	ensure(err_st_ref == nil)
-	defer st.free_safe_tensors(safetensors_ref)
-
-	f := libc.fopen(strings.clone_to_cstring(image_path, context.temp_allocator), "rb")
-	ensure(f != nil, "cannot open file")
-	defer libc.fclose(f)
+	model_path, image_path, model_scale := os.args[1], os.args[2], os.args[3]
 
 
-	ori_w, ori_h, ori_chan: i32
-	image_data := image.loadf_from_file(f, &ori_w, &ori_h, &ori_chan, 0)
-	defer image.image_free(image_data)
-	ensure(ori_chan == 3, "can only support RGB")
-
-	// Sizes have to be divisible by 32.
-	target_w, target_h: uint
-	if ori_w < ori_h {
-		w := ori_w * 640 / ori_h
-		target_w, target_h = uint(w) / 32 * 32, 640
-	} else {
-		h := ori_h * 640 / ori_w
-		target_w, target_h = 640, uint(h) / 32 * 32
+	// Configuration for different model scales
+	// ref: https://github.com/huggingface/candle/blob/402782c6944993e20953839ed2fb41aab6c66cc2/candle-examples/examples/yolo-v8/model.rs#L12-L46
+	multiples: yolo.Multiples
+	switch model_scale {
+	case "n":
+		// for yolov8n.safetensors (nano)
+		multiples = yolo.Multiples {
+			depth = 0.33,
+			width = 0.25,
+			ratio = 2.0,
+		}
+	case "s":
+		// for yolov8s.safetensors (small)
+		multiples = yolo.Multiples {
+			depth = 0.33,
+			width = 0.50,
+			ratio = 2.0,
+		}
+	case "m":
+		// for yolov8m.safetensors (medium)
+		multiples = yolo.Multiples {
+			depth = 0.67,
+			width = 0.75,
+			ratio = 1.5,
+		}
+	case "l":
+		// for yolov8l.safetensors (large)
+		multiples = yolo.Multiples {
+			depth = 1.0,
+			width = 1.0,
+			ratio = 1.0,
+		}
+	case "x":
+		// for yolov8x.safetensors (extra large)
+		multiples = yolo.Multiples {
+			depth = 1.0,
+			width = 1.25,
+			ratio = 1.0,
+		}
+	case:
+		fmt.panicf("supported scale are n, s, m, l, and x, but found %s", model_scale)
 	}
 
-	image_data_resized := make([]f32, ori_chan * i32(target_w * target_h), context.temp_allocator)
-	image.resize_float(
-		image_data,
-		ori_w,
-		ori_h,
-		0,
-		raw_data(image_data_resized),
-		i32(target_w),
-		i32(target_h),
-		0,
-		ori_chan,
-	)
-
-	input_t := tensor.permute(
-		tensor.new_with_init(
-			image_data_resized,
-			{1, target_h, target_w, uint(ori_chan)},
-			context.temp_allocator,
-		),
-		{0, 3, 1, 2},
-		context.temp_allocator,
-	)
-
-	safetensors, err_st := st.read_from_file(f32, model_path)
+	// Load safetensors file
+	model_safetensors, err_st := st.read_from_file(f32, model_path)
 	ensure(err_st == nil)
-	defer st.free_safe_tensors(safetensors)
-
-	// Configuration for nano model
-	multiples := yolo.Multiples {
-		depth = 0.33,
-		width = 0.25,
-		ratio = 2.0,
-	}
-	num_classes := uint(NUM_CLASSES)
-	model := yolo.load_yolo(safetensors, multiples, num_classes, context.allocator)
+	defer st.free_safe_tensors(model_safetensors)
+	// Then apply it to the model
+	model := yolo.load_yolo(model_safetensors, multiples, NUM_CLASSES, context.allocator)
 	defer yolo.free_yolo(model)
 
+	// Load the input and the original sizes and resized sizes
+	input_t, orig_w, orig_h, resize_w, resize_h := load_image(image_path, context.temp_allocator)
+
+	// Do inference!
 	t := time.now()
 	pred, _, _ := yolo.forward_yolo(model, input_t, context.allocator)
 	fmt.println("inference time:", time.since(t))
@@ -194,18 +248,22 @@ main :: proc() {
 	bboxes := extract_bboxes(pred, THRESHOLD_CONF, context.temp_allocator)
 	non_maximum_suppression(bboxes, THRESHOLD_NMS)
 
+	// Calculate the scale to transform coordinates back to the original size space
+	x_scale := f32(orig_w) / f32(resize_w)
+	y_scale := f32(orig_h) / f32(resize_h)
+
 	// Print all detections
 	class_names := YOLO_Classes_80
 	for bbox_per_class, i in bboxes {
 		class_name := class_names[i]
 		for bbox in bbox_per_class {
 			fmt.printfln(
-				"class_name:%s , xmin:%f, ymin:%f, xmax:%f, ymax:%f, conf:%f",
+				"class_name:%s, xmin:%f, ymin:%f, xmax:%f, ymax:%f, conf:%f",
 				class_name,
-				bbox.xmin,
-				bbox.ymin,
-				bbox.xmax,
-				bbox.ymax,
+				bbox.xmin * x_scale,
+				bbox.ymin * y_scale,
+				bbox.xmax * x_scale,
+				bbox.ymax * y_scale,
 				bbox.conf,
 			)
 		}
