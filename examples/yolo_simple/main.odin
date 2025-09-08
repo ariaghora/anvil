@@ -19,6 +19,7 @@ import "../../anvil/plot"
 THRESHOLD_NMS :: 0.45
 THRESHOLD_CONF :: 0.50
 NUM_CLASSES :: 80
+MODEL_PATH :: "weights/yolo_tensors.safetensors"
 
 BBox :: struct {
 	xmin, ymin, xmax, ymax: f32,
@@ -121,7 +122,7 @@ main :: proc() {
 	trace.init_trace()
 	defer trace.finish_trace()
 
-	safetensors_ref, err_st_ref := st.read_from_file(f32, "weights/yolo_tensors.safetensors")
+	safetensors_ref, err_st_ref := st.read_from_file(f32, MODEL_PATH)
 	ensure(err_st_ref == nil)
 	defer st.free_safe_tensors(safetensors_ref)
 
