@@ -29,9 +29,7 @@ Tensor :: struct($T: typeid) where intrinsics.type_is_numeric(T) {
 
 // Compute total size of an tensor by multiplying dimensions in shape
 shape_to_size :: #force_inline proc(shape: []uint) -> uint {
-	size: uint = 1
-	for s in shape {size *= s}
-	return size
+	return math.prod(shape)
 }
 
 // Create a new n-dimensional tensor with the given shape. For each dimension i
@@ -484,6 +482,7 @@ ones :: proc($T: typeid, shape: []uint, allocator := context.allocator) -> (res:
 
 
 // Create an tensor with normally-distributed random values
+// TODO(Aria): friggin slow, improve or abolish at all
 randn :: proc(
 	$T: typeid,
 	shape: []uint,
@@ -1638,5 +1637,184 @@ softmax_last_dim_inplace :: proc(t: ^Tensor($T)) {
 softmax_last_dim :: proc(t: ^Tensor($T), allocator := context.allocator) -> ^Tensor(T) {
 	result := clone(t, allocator)
 	softmax_last_dim_inplace(result)
+	return result
+}
+
+// Applies softmax along the specified dimension of a tensor
+// Requires contiguous tensor for predictable performance
+softmax_inplace :: proc(t: ^Tensor($T), dim: uint) {
+	softmax_trace := trace.TRACE_FUNCTION("softmax_inplace")
+	defer trace.end_scoped_trace(softmax_trace)
+
+	ensure(t.contiguous, "softmax requires contiguous tensor")
+	ensure(dim < uint(len(t.shape)), "dimension index out of range for softmax")
+
+	dim_size := t.shape[dim]
+	ensure(dim_size > 0, "cannot apply softmax to dimension of size 0")
+
+	// Last dimension is special - we can process contiguous chunks
+	if dim == uint(len(t.shape) - 1) {
+		softmax_last_dim_inplace(t)
+		return
+	}
+
+	// For middle dimensions, we need to jump around in memory
+	// Example: shape [2, 3, 4, 5], dim=2
+	// We process 2*3*5=30 slices, each of size 4
+
+	dim_stride := t.strides[dim]
+
+	// Total number of 1D slices to softmax
+	num_slices := uint(1)
+	for i in 0 ..< len(t.shape) {
+		if i != int(dim) {
+			num_slices *= t.shape[i]
+		}
+	}
+
+	// Size of the "inner block" - dimensions after our target dim
+	// This helps us calculate where each slice starts
+	inner_size := uint(1)
+	for i := int(dim) + 1; i < len(t.shape); i += 1 {
+		inner_size *= t.shape[i]
+	}
+
+	#no_bounds_check for slice_idx in 0 ..< num_slices {
+		// Figure out where this slice starts in the flat array
+		// block_idx: which "outer" repetition are we in?
+		// inner_idx: offset within that block
+		block_idx := slice_idx / inner_size
+		inner_idx := slice_idx % inner_size
+		base_idx := block_idx * dim_stride * dim_size + inner_idx
+
+		when T == f32 {
+			slice_data := t.data[base_idx:]
+
+			// Pass 1: Find max
+			// We gather strided values into SIMD registers for comparison
+			max_val := math.inf_f32(-1)
+			i := uint(0)
+			max_vec := #simd[4]f32 {
+				math.inf_f32(-1),
+				math.inf_f32(-1),
+				math.inf_f32(-1),
+				math.inf_f32(-1),
+			}
+
+			// Process 4 elements at a time by gathering from strided locations
+			for ; i + 4 <= dim_size; i += 4 {
+				idx := i * dim_stride
+				vals := #simd[4]f32 {
+					slice_data[idx],
+					slice_data[idx + dim_stride],
+					slice_data[idx + 2 * dim_stride],
+					slice_data[idx + 3 * dim_stride],
+				}
+				max_vec = simd.max(max_vec, vals)
+			}
+
+			// Reduce the vector to scalar
+			max_val = max(
+				max(simd.extract(max_vec, 0), simd.extract(max_vec, 1)),
+				max(simd.extract(max_vec, 2), simd.extract(max_vec, 3)),
+			)
+
+			// Handle remainder
+			for ; i < dim_size; i += 1 {
+				val := slice_data[i * dim_stride]
+				max_val = max(max_val, val)
+			}
+
+			// Pass 2: Compute exp(x - max) and accumulate sum
+			sum := f32(0)
+			i = 0
+			sum_vec := #simd[4]f32{0, 0, 0, 0}
+
+			for ; i + 4 <= dim_size; i += 4 {
+				idx := i * dim_stride
+
+				// Still have to call scalar exp, but at least we batch the memory ops
+				exp_vals: #simd[4]f32
+				exp_vals = simd.replace(exp_vals, 0, math.exp(slice_data[idx] - max_val))
+				exp_vals = simd.replace(
+					exp_vals,
+					1,
+					math.exp(slice_data[idx + dim_stride] - max_val),
+				)
+				exp_vals = simd.replace(
+					exp_vals,
+					2,
+					math.exp(slice_data[idx + 2 * dim_stride] - max_val),
+				)
+				exp_vals = simd.replace(
+					exp_vals,
+					3,
+					math.exp(slice_data[idx + 3 * dim_stride] - max_val),
+				)
+
+				// Write back (strided)
+				slice_data[idx] = simd.extract(exp_vals, 0)
+				slice_data[idx + dim_stride] = simd.extract(exp_vals, 1)
+				slice_data[idx + 2 * dim_stride] = simd.extract(exp_vals, 2)
+				slice_data[idx + 3 * dim_stride] = simd.extract(exp_vals, 3)
+
+				sum_vec = simd.add(sum_vec, exp_vals)
+			}
+
+			sum =
+				simd.extract(sum_vec, 0) +
+				simd.extract(sum_vec, 1) +
+				simd.extract(sum_vec, 2) +
+				simd.extract(sum_vec, 3)
+
+			// Remainder
+			for ; i < dim_size; i += 1 {
+				idx := i * dim_stride
+				val := math.exp(slice_data[idx] - max_val)
+				slice_data[idx] = val
+				sum += val
+			}
+
+			// Pass 3: Normalize by sum
+			inv_sum := f32(1) / sum
+			for i in 0 ..< dim_size {
+				slice_data[i * dim_stride] *= inv_sum
+			}
+		} else {
+			// No SIMD for other types
+			softmax_slice_scalar(t.data[base_idx:], dim_size, dim_stride, T)
+		}
+	}
+}
+
+@(private)
+softmax_slice_scalar :: proc(slice_data: []$T, dim_size: uint, dim_stride: uint, $type: typeid) {
+	// Standard 3-pass softmax: max, exp, normalize
+	max_val := slice_data[0]
+	for i in 1 ..< dim_size {
+		idx := i * dim_stride
+		if slice_data[idx] > max_val {
+			max_val = slice_data[idx]
+		}
+	}
+
+	sum := T(0)
+	for i in 0 ..< dim_size {
+		idx := i * dim_stride
+		val := math.exp(slice_data[idx] - max_val)
+		slice_data[idx] = val
+		sum += val
+	}
+
+	inv_sum := T(1) / sum
+	for i in 0 ..< dim_size {
+		slice_data[i * dim_stride] *= inv_sum
+	}
+}
+
+// Allocating version
+softmax :: proc(t: ^Tensor($T), dim: uint, allocator := context.allocator) -> ^Tensor(T) {
+	result := clone(t, allocator)
+	softmax_inplace(result, dim)
 	return result
 }

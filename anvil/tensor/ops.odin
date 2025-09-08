@@ -585,8 +585,9 @@ UnaryOp :: enum {
 	NEG, // Negation: -x
 	RELU, // ReLU: max(x, 0)
 	GELU, // GELU activation function
-	SILU, // GELU activation function
+	SILU, // SILU activation function
 	SQRT, // Square root: sqrt(x)
+	SIGMOID,
 	SIN,
 	COS,
 }
@@ -617,6 +618,11 @@ unary_silu :: #force_inline proc($T: typeid, x: T) -> T where T == f32 || T == f
 @(private)
 unary_sqrt :: #force_inline proc($T: typeid, x: T) -> T where T == f32 || T == f64 || T == f16 {
 	return math.sqrt(x)
+}
+
+@(private)
+unary_sigmoid :: #force_inline proc($T: typeid, x: T) -> T {
+	return 1 / (1 + math.exp(-x))
 }
 
 @(private)
@@ -661,6 +667,12 @@ elementwise_unary_op :: proc(
 				result.data[i] = unary_sqrt(T, tensor.data[i])
 			} else {
 				panic("SQRT only supports f16, f32, f64")
+			}
+		case .SIGMOID:
+			when T == f32 || T == f64 || T == f16 {
+				result.data[i] = unary_sigmoid(T, tensor.data[i])
+			} else {
+				panic("SIGMOID only supports f16, f32, f64")
 			}
 		case .SIN:
 			when T == f32 || T == f64 || T == f16 {
@@ -752,4 +764,14 @@ sqrt :: proc(
 	T == f64 ||
 	T == f16 {
 	return elementwise_unary_op(tensor, .SQRT, allocator, loc)
+}
+
+sigmoid :: proc(
+	tensor: ^Tensor($T),
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) where T == f32 ||
+	T == f64 ||
+	T == f16 {
+	return elementwise_unary_op(tensor, .SIGMOID, allocator, loc)
 }
