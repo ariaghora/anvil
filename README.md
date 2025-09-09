@@ -29,6 +29,10 @@ $ odin run examples/sam_raylib -o:speed
   <img width="90%" src="assets/sam.gif" />
 </p>
 
+### YOLOv8 Object detection
+
+See `examples/yolo_simple`
+
 ## Notes on Memory Management
 
 This library uses `context.temp_allocator` for intermediate computations and uses the passed allocator argument for the function return values.
