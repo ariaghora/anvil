@@ -237,8 +237,10 @@ main :: proc() {
 	input_t, orig_w, orig_h, resize_w, resize_h := load_image(image_path, context.temp_allocator)
 
 	// Do inference!
-	t := time.now()
+	trace.init_trace()
+	defer trace.finish_trace()
 
+	t := time.now()
 	pred, _, _ := yolo.forward_yolo(model, input_t, context.allocator)
 	// Postprocess the raw detection.
 	// We need to filter out the detections with low confidence. Subsequently,
@@ -246,7 +248,6 @@ main :: proc() {
 	pred = tensor.squeeze(pred, context.temp_allocator)
 	bboxes := extract_bboxes(pred, THRESHOLD_CONF, context.temp_allocator)
 	non_maximum_suppression(bboxes, THRESHOLD_NMS)
-
 	fmt.println("inference time:", time.since(t))
 
 	// Calculate the scale to transform coordinates back to the original size space

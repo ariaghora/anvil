@@ -103,7 +103,7 @@ gelu_fast :: proc(
 }
 
 tanh_fast_simd_4xf32 :: proc(x: #simd[4]f32) -> #simd[4]f32 {
-	// NOTE(Aria): idk why this works okay-ish. Especially compared to huggingface's 
+	// NOTE(Aria): idk why this works okay-ish. Especially compared to huggingface's
 	// SAM with tiny ViT.
 	max_val := #simd[4]f32{3.0, 3.0, 3.0, 3.0}
 	min_val := #simd[4]f32{-3.0, -3.0, -3.0, -3.0}
@@ -670,7 +670,7 @@ forward_attention :: proc(
 	tensor.softmax_last_dim_inplace(attn_scores)
 	trace.end_scoped_trace(attention_softmax_trace)
 
-	// Apply attention to values 
+	// Apply attention to values
 	attn_output := tensor.matmul(attn_scores, v_transposed, context.temp_allocator)
 
 	// Reshape back: (B, H, N, D) -> (B, N, H*D)
@@ -714,7 +714,7 @@ new_mlp :: proc(
 
 	fc1 := nn.new_linear(T, in_features, hidden_features, true, init, allocator)
 	fc2 := nn.new_linear(T, hidden_features, in_features, true, init, allocator)
-	// Should transpose since pytorch's way of fc is tranposed matmul  
+	// Should transpose since pytorch's way of fc is tranposed matmul
 	vb.assign(vb_root, "fc1.weight", fc1.w, should_transpose = true)
 	vb.assign(vb_root, "fc2.weight", fc2.w, should_transpose = true)
 	vb.assign(vb_root, "fc1.bias", fc1.b.?)

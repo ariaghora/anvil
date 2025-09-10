@@ -151,7 +151,10 @@ forward_conv_block :: proc(
 	trace.end_scoped_trace(conv_trace)
 
 	bn_trace := trace.TRACE_SECTION("batch_norm")
-	bn_out := tensor.silu(nn.forward_batch_norm_2d(layer.bn, conv_out, allocator, loc), allocator)
+	bn_out := tensor.silu_fast(
+		nn.forward_batch_norm_2d(layer.bn, conv_out, allocator, loc),
+		allocator,
+	)
 	trace.end_scoped_trace(bn_trace)
 
 	return bn_out

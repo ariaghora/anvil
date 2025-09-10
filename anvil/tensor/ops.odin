@@ -4,6 +4,7 @@ import "../trace"
 import "core:log"
 import "core:math"
 import "core:mem"
+import "core:simd"
 import "core:slice"
 
 // Binary operations
@@ -774,4 +775,74 @@ sigmoid :: proc(
 	T == f64 ||
 	T == f16 {
 	return elementwise_unary_op(tensor, .SIGMOID, allocator, loc)
+}
+
+/*
+ Fast variant of some activations
+*/
+
+tanh_fast_simd_4xf32 :: proc(x: #simd[4]f32) -> #simd[4]f32 {
+	// NOTE(Aria): idk why this works okay-ish. Especially compared to huggingface's
+	// SAM with tiny ViT and YOLOv8 ;p
+	max_val := #simd[4]f32{3.0, 3.0, 3.0, 3.0}
+	min_val := #simd[4]f32{-3.0, -3.0, -3.0, -3.0}
+	x_clamped := simd.min(simd.max(x, min_val), max_val)
+
+	x2 := simd.mul(x_clamped, x_clamped)
+	c27 := #simd[4]f32{27.0, 27.0, 27.0, 27.0}
+	c9 := #simd[4]f32{9.0, 9.0, 9.0, 9.0}
+
+	numerator := simd.mul(x_clamped, simd.add(c27, x2))
+	denominator := simd.fma(x2, c9, c27)
+
+	return simd.div(numerator, denominator)
+}
+silu_fast :: proc(
+	x: ^Tensor($T),
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	result := tensor_alloc(T, x.shape, true, allocator, loc)
+	total_elements := len(x.data)
+
+	when T == f32 {
+		half := f32(0.5)
+		one := f32(1.0)
+		two := f32(2.0)
+
+		i := 0
+
+		// SIMD path for chunks of 4
+		for ; i + 4 <= total_elements; i += 4 {
+			v := (^#simd[4]f32)(&x.data[i])^
+
+			// tanh(x/2)
+			arg := simd.div(v, #simd[4]f32{two, two, two, two})
+			tanh_result := tanh_fast_simd_4xf32(arg)
+
+			// x * (tanh(x/2) + 1) / 2
+			silu_result := simd.mul(
+				v,
+				simd.mul(
+					simd.add(tanh_result, #simd[4]f32{one, one, one, one}),
+					#simd[4]f32{half, half, half, half},
+				),
+			)
+
+			(^#simd[4]f32)(&result.data[i])^ = silu_result
+		}
+
+		// Scalar fallback
+		for ; i < total_elements; i += 1 {
+			v := x.data[i]
+			result.data[i] = v * (math.tanh(v / 2.0) + 1.0) / 2.0
+		}
+	} else {
+		for i in 0 ..< total_elements {
+			v := x.data[i]
+			result.data[i] = v * (math.tanh(v / 2.0) + 1.0) / 2.0
+		}
+	}
+
+	return result
 }

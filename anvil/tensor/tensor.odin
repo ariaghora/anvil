@@ -1559,10 +1559,7 @@ softmax_last_dim_inplace :: proc(t: ^Tensor($T)) {
 				max_vec = simd.max(max_vec, vals)
 			}
 
-			max_val := max(
-				max(simd.extract(max_vec, 0), simd.extract(max_vec, 1)),
-				max(simd.extract(max_vec, 2), simd.extract(max_vec, 3)),
-			)
+			max_val := simd.reduce_max(max_vec)
 
 			for ; col < last_dim; col += 1 {
 				max_val = max(max_val, row_data[col])
@@ -1585,12 +1582,9 @@ softmax_last_dim_inplace :: proc(t: ^Tensor($T)) {
 				sum_vec = simd.add(sum_vec, exp_vals)
 			}
 
-			sum =
-				simd.extract(sum_vec, 0) +
-				simd.extract(sum_vec, 1) +
-				simd.extract(sum_vec, 2) +
-				simd.extract(sum_vec, 3)
-
+			// Reduce by SIMD
+			sum = simd.reduce_add_ordered(sum_vec)
+			// Reduce remainders
 			for ; col < last_dim; col += 1 {
 				val := math.exp(row_data[col] - max_val)
 				row_data[col] = val
@@ -1714,10 +1708,7 @@ softmax_inplace :: proc(t: ^Tensor($T), dim: uint) {
 			}
 
 			// Reduce the vector to scalar
-			max_val = max(
-				max(simd.extract(max_vec, 0), simd.extract(max_vec, 1)),
-				max(simd.extract(max_vec, 2), simd.extract(max_vec, 3)),
-			)
+			max_val = simd.reduce_max(max_vec)
 
 			// Handle remainder
 			for ; i < dim_size; i += 1 {
@@ -1761,12 +1752,8 @@ softmax_inplace :: proc(t: ^Tensor($T), dim: uint) {
 				sum_vec = simd.add(sum_vec, exp_vals)
 			}
 
-			sum =
-				simd.extract(sum_vec, 0) +
-				simd.extract(sum_vec, 1) +
-				simd.extract(sum_vec, 2) +
-				simd.extract(sum_vec, 3)
-
+			// Sum by SIMD
+			sum = simd.reduce_add_ordered(sum_vec)
 			// Remainder
 			for ; i < dim_size; i += 1 {
 				idx := i * dim_stride
