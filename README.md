@@ -12,8 +12,7 @@ Anvil runs neural networks without the typical ML stack. Load a safetensors file
 No Python. No gigabytes of dependencies. Just compiled code running models.
 
 > [!CAUTION]
-> I only tested it on MacBook M1, and currently it relies on Accelerate framework. I don't have access to different machines at this moment. 
-> If you're not on macOS and you don't have Accelerate framework installed, then you're out of luck.
+> This library is only tested on macOS (MacBook M1) and Ubuntu 22.04. It requires Accelerate framework on macOS and `openblas-dev` on Linux. 
 
 ## Models
 
@@ -56,4 +55,5 @@ Early development, APIs are unstable. More models coming as operations get imple
 
 - Odin compiler
 - A safetensors file
+- OpenBLAS development package (`libopenblas-dev` on Ubuntu)
 - That's it
