@@ -2,7 +2,11 @@ package matmul
 
 import "core:slice"
 
-foreign import blas "system:Accelerate.framework"
+when ODIN_OS == .Darwin {
+	foreign import blas "system:Accelerate.framework"
+} else when ODIN_OS == .Linux {
+	foreign import blas "system:openblas"
+}
 
 CBLAS_ORDER :: enum i32 {
 	RowMajor = 101,

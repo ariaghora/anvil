@@ -241,12 +241,14 @@ main :: proc() {
 	defer trace.finish_trace()
 
 	t := time.now()
-	pred, _, _ := yolo.forward_yolo(model, input_t, context.allocator)
+	pred, anchors, strides := yolo.forward_yolo(model, input_t, context.allocator)
+	defer tensor.free_tensor(pred, anchors, strides, allocator = context.allocator)
+
 	// Postprocess the raw detection.
 	// We need to filter out the detections with low confidence. Subsequently,
 	// eliminate detection duplicates by using NMS
-	pred = tensor.squeeze(pred, context.temp_allocator)
-	bboxes := extract_bboxes(pred, THRESHOLD_CONF, context.temp_allocator)
+	pred_single := tensor.squeeze(pred, context.temp_allocator)
+	bboxes := extract_bboxes(pred_single, THRESHOLD_CONF, context.temp_allocator)
 	non_maximum_suppression(bboxes, THRESHOLD_NMS)
 	fmt.println("inference time:", time.since(t))
 
@@ -270,4 +272,5 @@ main :: proc() {
 			)
 		}
 	}
+	free_all(context.temp_allocator)
 }

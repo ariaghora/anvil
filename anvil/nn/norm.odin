@@ -95,59 +95,50 @@ forward_batch_norm_2d :: proc(
 					// Process 8 elements at a time using two SIMD registers
 					for ; i + 8 <= spatial_size; i += 8 {
 						// Load 8 values
-						vals1 := (^#simd[4]f32)(&x.data[base_idx + i])^
-						vals2 := (^#simd[4]f32)(&x.data[base_idx + i + 4])^
+						vals1 := #simd[4]f32 {
+							x.data[base_idx + i],
+							x.data[base_idx + i + 1],
+							x.data[base_idx + i + 2],
+							x.data[base_idx + i + 3],
+						}
+
+						vals2 := #simd[4]f32 {
+							x.data[base_idx + i + 4],
+							x.data[base_idx + i + 5],
+							x.data[base_idx + i + 6],
+							x.data[base_idx + i + 7],
+						}
 
 						// Apply batch norm: result = x * scale + shift
 						results1 := simd.fma(vals1, scale_vec, shift_vec)
 						results2 := simd.fma(vals2, scale_vec, shift_vec)
 
 						// Store results
-						(^#simd[4]f32)(&result.data[base_idx + i])^ = results1
-						(^#simd[4]f32)(&result.data[base_idx + i + 4])^ = results2
+						result.data[base_idx + i] = simd.extract(results1, 0)
+						result.data[base_idx + i + 1] = simd.extract(results1, 1)
+						result.data[base_idx + i + 2] = simd.extract(results1, 2)
+						result.data[base_idx + i + 3] = simd.extract(results1, 3)
+						result.data[base_idx + i + 4] = simd.extract(results2, 0)
+						result.data[base_idx + i + 5] = simd.extract(results2, 1)
+						result.data[base_idx + i + 6] = simd.extract(results2, 2)
+						result.data[base_idx + i + 7] = simd.extract(results2, 3)
+
 					}
 
 					// Process 4 elements at a time
 					for ; i + 4 <= spatial_size; i += 4 {
-						vals := (^#simd[4]f32)(&x.data[base_idx + i])^
+						vals := #simd[4]f32 {
+							x.data[base_idx + i],
+							x.data[base_idx + i + 1],
+							x.data[base_idx + i + 2],
+							x.data[base_idx + i + 3],
+						}
 						results := simd.fma(vals, scale_vec, shift_vec)
-						(^#simd[4]f32)(&result.data[base_idx + i])^ = results
-					}
 
-					// Handle remainder
-					for ; i < spatial_size; i += 1 {
-						idx := base_idx + i
-						result.data[idx] = x.data[idx] * scales[ch] + shifts[ch]
-					}
-				}
-			}
-		} else when T == f64 {
-			for batch in 0 ..< n {
-				batch_offset := batch * c * spatial_size
-				for ch in 0 ..< c {
-					scale_vec := #simd[2]f64{scales[ch], scales[ch]}
-					shift_vec := #simd[2]f64{shifts[ch], shifts[ch]}
-
-					base_idx := batch_offset + ch * spatial_size
-
-					i := uint(0)
-					// Process 4 elements at a time using two SIMD registers
-					for ; i + 4 <= spatial_size; i += 4 {
-						vals1 := (^#simd[2]f64)(&x.data[base_idx + i])^
-						vals2 := (^#simd[2]f64)(&x.data[base_idx + i + 2])^
-
-						results1 := simd.fma(vals1, scale_vec, shift_vec)
-						results2 := simd.fma(vals2, scale_vec, shift_vec)
-
-						(^#simd[2]f64)(&result.data[base_idx + i])^ = results1
-						(^#simd[2]f64)(&result.data[base_idx + i + 2])^ = results2
-					}
-
-					// Process 2 elements at a time
-					for ; i + 2 <= spatial_size; i += 2 {
-						vals := (^#simd[2]f64)(&x.data[base_idx + i])^
-						results := simd.fma(vals, scale_vec, shift_vec)
-						(^#simd[2]f64)(&result.data[base_idx + i])^ = results
+						result.data[base_idx + i] = simd.extract(results, 0)
+						result.data[base_idx + i + 1] = simd.extract(results, 1)
+						result.data[base_idx + i + 2] = simd.extract(results, 2)
+						result.data[base_idx + i + 3] = simd.extract(results, 3)
 					}
 
 					// Handle remainder

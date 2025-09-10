@@ -43,8 +43,6 @@ max_pool_2d :: proc(
 	#no_bounds_check {
 		when T == f32 {
 			max_pool_2d_f32_simd(src, output.data, b, c, h, w, k_h, k_w, h_out, w_out, stride)
-		} else when T == f64 {
-			max_pool_2d_f64_simd(src, output.data, b, c, h, w, k_h, k_w, h_out, w_out, stride)
 		} else {
 			max_pool_2d_scalar(src, output.data, b, c, h, w, k_h, k_w, h_out, w_out, stride)
 		}
@@ -114,7 +112,12 @@ max_pool_2d_f32_simd :: proc(src, dst: []f32, b, c, h, w, k_h, k_w, h_out, w_out
 
 							// SIMD processing for groups of 4
 							for ; x + 4 <= window_width; x += 4 {
-								vals := (^#simd[4]f32)(&src_channel[row_start + x])^
+								vals := #simd[4]f32 {
+									src_channel[row_start + x],
+									src_channel[row_start + x + 1],
+									src_channel[row_start + x + 2],
+									src_channel[row_start + x + 3],
+								}
 								max_vec = simd.max(max_vec, vals)
 							}
 
@@ -130,58 +133,6 @@ max_pool_2d_f32_simd :: proc(src, dst: []f32, b, c, h, w, k_h, k_w, h_out, w_out
 						dst_channel[dst_idx] = max_val
 						dst_idx += 1
 					}
-				}
-			}
-		}
-	}
-}
-
-@(private)
-max_pool_2d_f64_simd :: proc(src, dst: []f64, b, c, h, w, k_h, k_w, h_out, w_out, stride: uint) {
-	hw_in := h * w
-	hw_out := h_out * w_out
-
-	for b_idx in 0 ..< b {
-		for c_idx in 0 ..< c {
-			src_channel := src[(b_idx * c + c_idx) * hw_in:]
-			dst_channel := dst[(b_idx * c + c_idx) * hw_out:]
-
-			dst_idx := uint(0)
-			for y_out in 0 ..< h_out {
-				y_start := y_out * stride
-				y_end := min(y_start + k_h, h)
-
-				for x_out in 0 ..< w_out {
-					x_start := x_out * stride
-					x_end := min(x_start + k_w, w)
-
-					max_val := math.inf_f64(-1)
-
-					for y in y_start ..< y_end {
-						row_start := y * w + x_start
-						window_width := x_end - x_start
-
-						x := uint(0)
-						max_vec := #simd[2]f64{math.inf_f64(-1), math.inf_f64(-1)}
-
-						// SIMD processing for groups of 2
-						for ; x + 2 <= window_width; x += 2 {
-							vals := (^#simd[2]f64)(&src_channel[row_start + x])^
-							max_vec = simd.max(max_vec, vals)
-						}
-
-						// Reduce SIMD vector
-						max_val = max(max_val, simd.extract(max_vec, 0))
-						max_val = max(max_val, simd.extract(max_vec, 1))
-
-						// Handle remainder
-						for ; x < window_width; x += 1 {
-							max_val = max(max_val, src_channel[row_start + x])
-						}
-					}
-
-					dst_channel[dst_idx] = max_val
-					dst_idx += 1
 				}
 			}
 		}

@@ -3,6 +3,7 @@ package nn
 import "../tensor"
 import "../trace"
 import "core:fmt"
+import "core:simd"
 
 Conv_2d :: struct($T: typeid) {
 	w:            ^tensor.Tensor(T),
@@ -151,14 +152,44 @@ forward_conv2d :: proc(
 
 					i := uint(0)
 					for ; i + 8 <= spatial_size; i += 8 {
-						ptr0 := (^#simd[4]f32)(&out.data[base_idx + i]) // first 4
-						ptr1 := (^#simd[4]f32)(&out.data[base_idx + i + 4]) // next 4
-						ptr0^ += bias_vec4
-						ptr1^ += bias_vec4
+						// First 4
+						vals0 := #simd[4]f32 {
+							out.data[base_idx + i],
+							out.data[base_idx + i + 1],
+							out.data[base_idx + i + 2],
+							out.data[base_idx + i + 3],
+						}
+						vals0 += bias_vec4
+						out.data[base_idx + i] = simd.extract(vals0, 0)
+						out.data[base_idx + i + 1] = simd.extract(vals0, 1)
+						out.data[base_idx + i + 2] = simd.extract(vals0, 2)
+						out.data[base_idx + i + 3] = simd.extract(vals0, 3)
+
+						// Next 4
+						vals1 := #simd[4]f32 {
+							out.data[base_idx + i + 4],
+							out.data[base_idx + i + 5],
+							out.data[base_idx + i + 6],
+							out.data[base_idx + i + 7],
+						}
+						vals1 += bias_vec4
+						out.data[base_idx + i + 4] = simd.extract(vals1, 0)
+						out.data[base_idx + i + 5] = simd.extract(vals1, 1)
+						out.data[base_idx + i + 6] = simd.extract(vals1, 2)
+						out.data[base_idx + i + 7] = simd.extract(vals1, 3)
 					}
 					for ; i + 4 <= spatial_size; i += 4 {
-						ptr := (^#simd[4]f32)(&out.data[base_idx + i])
-						ptr^ += bias_vec4
+						vals := #simd[4]f32 {
+							out.data[base_idx + i],
+							out.data[base_idx + i + 1],
+							out.data[base_idx + i + 2],
+							out.data[base_idx + i + 3],
+						}
+						vals += bias_vec4
+						out.data[base_idx + i] = simd.extract(vals, 0)
+						out.data[base_idx + i + 1] = simd.extract(vals, 1)
+						out.data[base_idx + i + 2] = simd.extract(vals, 2)
+						out.data[base_idx + i + 3] = simd.extract(vals, 3)
 					}
 					for ; i < spatial_size; i += 1 {
 						out.data[base_idx + i] += bias_val

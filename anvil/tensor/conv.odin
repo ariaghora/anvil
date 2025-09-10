@@ -167,10 +167,29 @@ im2col_fast_1x1 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
 						}
 
 						// Store 4 rows of 4 channels each
-						(^#simd[4]f32)(&dst_b[dst_base + c_idx])^ = row0
-						(^#simd[4]f32)(&dst_b[dst_base + c + c_idx])^ = row1
-						(^#simd[4]f32)(&dst_b[dst_base + 2 * c + c_idx])^ = row2
-						(^#simd[4]f32)(&dst_b[dst_base + 3 * c + c_idx])^ = row3
+						// row0
+						dst_b[dst_base + c_idx] = simd.extract(row0, 0)
+						dst_b[dst_base + c_idx + 1] = simd.extract(row0, 1)
+						dst_b[dst_base + c_idx + 2] = simd.extract(row0, 2)
+						dst_b[dst_base + c_idx + 3] = simd.extract(row0, 3)
+
+						// row1
+						dst_b[dst_base + c + c_idx] = simd.extract(row1, 0)
+						dst_b[dst_base + c + c_idx + 1] = simd.extract(row1, 1)
+						dst_b[dst_base + c + c_idx + 2] = simd.extract(row1, 2)
+						dst_b[dst_base + c + c_idx + 3] = simd.extract(row1, 3)
+
+						// row2
+						dst_b[dst_base + 2 * c + c_idx] = simd.extract(row2, 0)
+						dst_b[dst_base + 2 * c + c_idx + 1] = simd.extract(row2, 1)
+						dst_b[dst_base + 2 * c + c_idx + 2] = simd.extract(row2, 2)
+						dst_b[dst_base + 2 * c + c_idx + 3] = simd.extract(row2, 3)
+
+						// row3
+						dst_b[dst_base + 3 * c + c_idx] = simd.extract(row3, 0)
+						dst_b[dst_base + 3 * c + c_idx + 1] = simd.extract(row3, 1)
+						dst_b[dst_base + 3 * c + c_idx + 2] = simd.extract(row3, 2)
+						dst_b[dst_base + 3 * c + c_idx + 3] = simd.extract(row3, 3)
 					}
 
 					// Handle remainder channels for these 4 spatial positions
@@ -194,7 +213,11 @@ im2col_fast_1x1 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
 							src_b[(c_idx + 2) * hw + hw_idx],
 							src_b[(c_idx + 3) * hw + hw_idx],
 						}
-						(^#simd[4]f32)(&dst_b[dst_offset + c_idx])^ = vals
+
+						dst_b[dst_offset + c_idx] = simd.extract(vals, 0)
+						dst_b[dst_offset + c_idx + 1] = simd.extract(vals, 1)
+						dst_b[dst_offset + c_idx + 2] = simd.extract(vals, 2)
+						dst_b[dst_offset + c_idx + 3] = simd.extract(vals, 3)
 					}
 
 					for ; c_idx < c; c_idx += 1 {
@@ -734,8 +757,18 @@ im2col_general_stride1_dilation1 :: proc(
 
 									// Gather 8 values (assuming src_s3 == 1 for contiguous case)
 									if src_s3 == 1 {
-										vals1 := (^#simd[4]f32)(&src[src_offset])^
-										vals2 := (^#simd[4]f32)(&src[src_offset + 4])^
+										vals1 := #simd[4]f32 {
+											src[src_offset],
+											src[src_offset + 1],
+											src[src_offset + 2],
+											src[src_offset + 3],
+										}
+										vals2 := #simd[4]f32 {
+											src[src_offset + 4],
+											src[src_offset + 5],
+											src[src_offset + 6],
+											src[src_offset + 7],
+										}
 
 										// Store with stride
 										dst[dst_offset] = simd.extract(vals1, 0)
@@ -780,7 +813,13 @@ im2col_general_stride1_dilation1 :: proc(
 									dst_offset := dst_row_base + w_idx * (c * h_k * w_k)
 
 									if src_s3 == 1 {
-										vals := (^#simd[4]f32)(&src[src_offset])^
+										vals := #simd[4]f32 {
+											src[src_offset],
+											src[src_offset + 1],
+											src[src_offset + 2],
+											src[src_offset + 3],
+										}
+
 										dst[dst_offset] = simd.extract(vals, 0)
 										dst[dst_offset + (c * h_k * w_k)] = simd.extract(vals, 1)
 										dst[dst_offset + 2 * (c * h_k * w_k)] = simd.extract(
@@ -1148,18 +1187,44 @@ copy_group_output_parallel :: proc(
 					src_offset := (b * channels_per_group + c) * hw_out
 					dst_offset := (b * dst_channels_total + channel_offset + c) * hw_out
 
-					// Copy spatial data with SIMD
+					// Copy spatial data
 					i := uint(0)
 					for ; i + 8 <= hw_out; i += 8 {
-						vals1 := (^#simd[4]f32)(&src.data[src_offset + i])^
-						vals2 := (^#simd[4]f32)(&src.data[src_offset + i + 4])^
-						(^#simd[4]f32)(&dst.data[dst_offset + i])^ = vals1
-						(^#simd[4]f32)(&dst.data[dst_offset + i + 4])^ = vals2
+						vals1 := #simd[4]f32 {
+							src.data[src_offset + i],
+							src.data[src_offset + i + 1],
+							src.data[src_offset + i + 2],
+							src.data[src_offset + i + 3],
+						}
+
+						vals2 := #simd[4]f32 {
+							src.data[src_offset + i + 4],
+							src.data[src_offset + i + 5],
+							src.data[src_offset + i + 6],
+							src.data[src_offset + i + 7],
+						}
+
+						dst.data[dst_offset + i + 0] = simd.extract(vals1, 0)
+						dst.data[dst_offset + i + 1] = simd.extract(vals1, 1)
+						dst.data[dst_offset + i + 2] = simd.extract(vals1, 2)
+						dst.data[dst_offset + i + 3] = simd.extract(vals1, 3)
+						dst.data[dst_offset + i + 4] = simd.extract(vals2, 0)
+						dst.data[dst_offset + i + 5] = simd.extract(vals2, 1)
+						dst.data[dst_offset + i + 6] = simd.extract(vals2, 2)
+						dst.data[dst_offset + i + 7] = simd.extract(vals2, 3)
 					}
 
 					for ; i + 4 <= hw_out; i += 4 {
-						vals := (^#simd[4]f32)(&src.data[src_offset + i])^
-						(^#simd[4]f32)(&dst.data[dst_offset + i])^ = vals
+						vals := #simd[4]f32 {
+							src.data[src_offset + i],
+							src.data[src_offset + i + 1],
+							src.data[src_offset + i + 2],
+							src.data[src_offset + i + 3],
+						}
+						dst.data[dst_offset + i] = simd.extract(vals, 0)
+						dst.data[dst_offset + i + 1] = simd.extract(vals, 1)
+						dst.data[dst_offset + i + 2] = simd.extract(vals, 2)
+						dst.data[dst_offset + i + 3] = simd.extract(vals, 3)
 					}
 
 					for ; i < hw_out; i += 1 {
@@ -1267,10 +1332,29 @@ reshape_bhwc_to_bchw :: proc(
 							simd.extract(row3, 3),
 						}
 
-						(^#simd[4]f32)(&dst_batch[c * hw + hw_idx])^ = dst_c0
-						(^#simd[4]f32)(&dst_batch[(c + 1) * hw + hw_idx])^ = dst_c1
-						(^#simd[4]f32)(&dst_batch[(c + 2) * hw + hw_idx])^ = dst_c2
-						(^#simd[4]f32)(&dst_batch[(c + 3) * hw + hw_idx])^ = dst_c3
+						// dst_c0
+						dst_batch[c * hw + hw_idx] = simd.extract(dst_c0, 0)
+						dst_batch[c * hw + hw_idx + 1] = simd.extract(dst_c0, 1)
+						dst_batch[c * hw + hw_idx + 2] = simd.extract(dst_c0, 2)
+						dst_batch[c * hw + hw_idx + 3] = simd.extract(dst_c0, 3)
+
+						// dst_c1
+						dst_batch[(c + 1) * hw + hw_idx] = simd.extract(dst_c1, 0)
+						dst_batch[(c + 1) * hw + hw_idx + 1] = simd.extract(dst_c1, 1)
+						dst_batch[(c + 1) * hw + hw_idx + 2] = simd.extract(dst_c1, 2)
+						dst_batch[(c + 1) * hw + hw_idx + 3] = simd.extract(dst_c1, 3)
+
+						// dst_c2
+						dst_batch[(c + 2) * hw + hw_idx] = simd.extract(dst_c2, 0)
+						dst_batch[(c + 2) * hw + hw_idx + 1] = simd.extract(dst_c2, 1)
+						dst_batch[(c + 2) * hw + hw_idx + 2] = simd.extract(dst_c2, 2)
+						dst_batch[(c + 2) * hw + hw_idx + 3] = simd.extract(dst_c2, 3)
+
+						// dst_c3
+						dst_batch[(c + 3) * hw + hw_idx] = simd.extract(dst_c3, 0)
+						dst_batch[(c + 3) * hw + hw_idx + 1] = simd.extract(dst_c3, 1)
+						dst_batch[(c + 3) * hw + hw_idx + 2] = simd.extract(dst_c3, 2)
+						dst_batch[(c + 3) * hw + hw_idx + 3] = simd.extract(dst_c3, 3)
 					}
 
 					// Handle remainder channels
@@ -1281,7 +1365,10 @@ reshape_bhwc_to_bchw :: proc(
 							src_batch[src_base + 2 * channels + c],
 							src_batch[src_base + 3 * channels + c],
 						}
-						(^#simd[4]f32)(&dst_batch[c * hw + hw_idx])^ = vals
+						dst_batch[c * hw + hw_idx] = simd.extract(vals, 0)
+						dst_batch[c * hw + hw_idx + 1] = simd.extract(vals, 1)
+						dst_batch[c * hw + hw_idx + 2] = simd.extract(vals, 2)
+						dst_batch[c * hw + hw_idx + 3] = simd.extract(vals, 3)
 					}
 				}
 
@@ -1291,7 +1378,12 @@ reshape_bhwc_to_bchw :: proc(
 
 					c := uint(0)
 					for ; c + 4 <= channels; c += 4 {
-						vals := (^#simd[4]f32)(&src_batch[src_offset + c])^
+						vals := #simd[4]f32 {
+							src_batch[src_offset + c],
+							src_batch[src_offset + c + 1],
+							src_batch[src_offset + c + 2],
+							src_batch[src_offset + c + 3],
+						}
 
 						dst_batch[c * hw + hw_idx] = simd.extract(vals, 0)
 						dst_batch[(c + 1) * hw + hw_idx] = simd.extract(vals, 1)

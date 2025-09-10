@@ -26,17 +26,9 @@ upsample_nearest_2d :: proc(
 		src, allocated = get_strided_data(input, allocator = context.temp_allocator)
 	}
 
-	// Special case for 2x upsampling 
+	// Special case for 2x upsampling
 	if target_h == src_h * 2 && target_w == src_w * 2 {
-		#no_bounds_check {
-			when T == f32 {
-				upsample_2x_f32_simd(src, output.data, b, c, src_h, src_w)
-			} else when T == f64 {
-				upsample_2x_f64_simd(src, output.data, b, c, src_h, src_w)
-			} else {
-				upsample_2x_scalar(src, output.data, b, c, src_h, src_w)
-			}
-		}
+		upsample_2x(src, output.data, b, c, src_h, src_w)
 	} else {
 		// General case with pre-computed indices
 		scale_h := f64(src_h) / f64(target_h)
@@ -73,108 +65,7 @@ upsample_nearest_2d :: proc(
 }
 
 @(private)
-upsample_2x_f32_simd :: proc(src, dst: []f32, b, c, src_h, src_w: uint) {
-	dst_h := src_h * 2
-	dst_w := src_w * 2
-	src_hw := src_h * src_w
-	dst_hw := dst_h * dst_w
-
-	for b_idx in 0 ..< b {
-		for c_idx in 0 ..< c {
-			src_channel := src[(b_idx * c + c_idx) * src_hw:]
-			dst_channel := dst[(b_idx * c + c_idx) * dst_hw:]
-
-			for y in 0 ..< src_h {
-				src_row := src_channel[y * src_w:]
-				dst_row0 := dst_channel[(y * 2) * dst_w:]
-				dst_row1 := dst_channel[(y * 2 + 1) * dst_w:]
-
-				x := uint(0)
-				// Process 4 source pixels -> 8 destination pixels at a time
-				for ; x + 4 <= src_w; x += 4 {
-					src_vals := (^#simd[4]f32)(&src_row[x])^
-
-					// Each source pixel becomes 2x2 block in destination
-					// Unpack to 2 pixels wide per source pixel
-					dst_vals0 := #simd[8]f32 {
-						simd.extract(src_vals, 0),
-						simd.extract(src_vals, 0),
-						simd.extract(src_vals, 1),
-						simd.extract(src_vals, 1),
-						simd.extract(src_vals, 2),
-						simd.extract(src_vals, 2),
-						simd.extract(src_vals, 3),
-						simd.extract(src_vals, 3),
-					}
-
-					// Write to both rows
-					(^#simd[8]f32)(&dst_row0[x * 2])^ = dst_vals0
-					(^#simd[8]f32)(&dst_row1[x * 2])^ = dst_vals0
-				}
-
-				// Handle remainder
-				for ; x < src_w; x += 1 {
-					val := src_row[x]
-					dst_x := x * 2
-					dst_row0[dst_x] = val
-					dst_row0[dst_x + 1] = val
-					dst_row1[dst_x] = val
-					dst_row1[dst_x + 1] = val
-				}
-			}
-		}
-	}
-}
-
-@(private)
-upsample_2x_f64_simd :: proc(src, dst: []f64, b, c, src_h, src_w: uint) {
-	dst_h := src_h * 2
-	dst_w := src_w * 2
-	src_hw := src_h * src_w
-	dst_hw := dst_h * dst_w
-
-	for b_idx in 0 ..< b {
-		for c_idx in 0 ..< c {
-			src_channel := src[(b_idx * c + c_idx) * src_hw:]
-			dst_channel := dst[(b_idx * c + c_idx) * dst_hw:]
-
-			for y in 0 ..< src_h {
-				src_row := src_channel[y * src_w:]
-				dst_row0 := dst_channel[(y * 2) * dst_w:]
-				dst_row1 := dst_channel[(y * 2 + 1) * dst_w:]
-
-				x := uint(0)
-				// Process 2 source pixels -> 4 destination pixels at a time
-				for ; x + 2 <= src_w; x += 2 {
-					src_vals := (^#simd[2]f64)(&src_row[x])^
-
-					dst_vals0 := #simd[4]f64 {
-						simd.extract(src_vals, 0),
-						simd.extract(src_vals, 0),
-						simd.extract(src_vals, 1),
-						simd.extract(src_vals, 1),
-					}
-
-					(^#simd[4]f64)(&dst_row0[x * 2])^ = dst_vals0
-					(^#simd[4]f64)(&dst_row1[x * 2])^ = dst_vals0
-				}
-
-				// Handle remainder
-				for ; x < src_w; x += 1 {
-					val := src_row[x]
-					dst_x := x * 2
-					dst_row0[dst_x] = val
-					dst_row0[dst_x + 1] = val
-					dst_row1[dst_x] = val
-					dst_row1[dst_x + 1] = val
-				}
-			}
-		}
-	}
-}
-
-@(private)
-upsample_2x_scalar :: proc(src, dst: []$T, b, c, src_h, src_w: uint) {
+upsample_2x :: proc(src, dst: []$T, b, c, src_h, src_w: uint) {
 	dst_h := src_h * 2
 	dst_w := src_w * 2
 	src_hw := src_h * src_w
@@ -273,39 +164,20 @@ import "core:testing"
 test_upsample_nearest_2d :: proc(t: ^testing.T) {
 	// Test 2x upsampling
 	{
-		input := new_with_init(
-			[]f32{
-				1, 2,
-				3, 4,
-			},
-			[]uint{1, 1, 2, 2},
-			context.temp_allocator,
-		)
+		input := new_with_init([]f32{1, 2, 3, 4}, []uint{1, 1, 2, 2}, context.temp_allocator)
 		defer free_tensor(input, context.temp_allocator)
 
 		output := upsample_nearest_2d(input, 4, 4, context.temp_allocator)
 		defer free_tensor(output, context.temp_allocator)
 
-		expected := []f32{
-			1, 1, 2, 2,
-			1, 1, 2, 2,
-			3, 3, 4, 4,
-			3, 3, 4, 4,
-		}
+		expected := []f32{1, 1, 2, 2, 1, 1, 2, 2, 3, 3, 4, 4, 3, 3, 4, 4}
 		testing.expect(t, slice.equal(output.data, expected), "2x upsampling failed")
 		testing.expect(t, slice.equal(output.shape, []uint{1, 1, 4, 4}), "Output shape mismatch")
 	}
 
 	// Test arbitrary upsampling
 	{
-		input := new_with_init(
-			[]f32{
-				1, 2,
-				3, 4,
-			},
-			[]uint{1, 1, 2, 2},
-			context.temp_allocator,
-		)
+		input := new_with_init([]f32{1, 2, 3, 4}, []uint{1, 1, 2, 2}, context.temp_allocator)
 		defer free_tensor(input, context.temp_allocator)
 
 		output := upsample_nearest_2d(input, 3, 3, context.temp_allocator)
@@ -315,11 +187,7 @@ test_upsample_nearest_2d :: proc(t: ^testing.T) {
 		// (0,0) -> (0,0), (0,1) -> (0,0), (0,2) -> (0,1)
 		// (1,0) -> (0,0), (1,1) -> (0,0), (1,2) -> (0,1)
 		// (2,0) -> (1,0), (2,1) -> (1,0), (2,2) -> (1,1)
-		expected := []f32{
-			1, 1, 2,
-			1, 1, 2,
-			3, 3, 4,
-		}
+		expected := []f32{1, 1, 2, 1, 1, 2, 3, 3, 4}
 		testing.expect(t, slice.equal(output.data, expected), "Arbitrary upsampling failed")
 		testing.expect(t, slice.equal(output.shape, []uint{1, 1, 3, 3}), "Output shape mismatch")
 	}
@@ -327,13 +195,17 @@ test_upsample_nearest_2d :: proc(t: ^testing.T) {
 	// Test multi-channel upsampling
 	{
 		input := new_with_init(
-			[]f32{
+			[]f32 {
 				// Channel 0
-				1, 2,
-				3, 4,
+				1,
+				2,
+				3,
+				4,
 				// Channel 1
-				5, 6,
-				7, 8,
+				5,
+				6,
+				7,
+				8,
 			},
 			[]uint{1, 2, 2, 2},
 			context.temp_allocator,
@@ -343,17 +215,41 @@ test_upsample_nearest_2d :: proc(t: ^testing.T) {
 		output := upsample_nearest_2d(input, 4, 4, context.temp_allocator)
 		defer free_tensor(output, context.temp_allocator)
 
-		expected := []f32{
+		expected := []f32 {
 			// Channel 0
-			1, 1, 2, 2,
-			1, 1, 2, 2,
-			3, 3, 4, 4,
-			3, 3, 4, 4,
+			1,
+			1,
+			2,
+			2,
+			1,
+			1,
+			2,
+			2,
+			3,
+			3,
+			4,
+			4,
+			3,
+			3,
+			4,
+			4,
 			// Channel 1
-			5, 5, 6, 6,
-			5, 5, 6, 6,
-			7, 7, 8, 8,
-			7, 7, 8, 8,
+			5,
+			5,
+			6,
+			6,
+			5,
+			5,
+			6,
+			6,
+			7,
+			7,
+			8,
+			8,
+			7,
+			7,
+			8,
+			8,
 		}
 		testing.expect(t, slice.equal(output.data, expected), "Multi-channel upsampling failed")
 		testing.expect(t, slice.equal(output.shape, []uint{1, 2, 4, 4}), "Output shape mismatch")

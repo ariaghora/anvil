@@ -817,7 +817,7 @@ silu_fast :: proc(
 
 		// SIMD path for chunks of 4
 		for ; i + 4 <= total_elements; i += 4 {
-			v := (^#simd[4]f32)(&x.data[i])^
+			v := #simd[4]f32{x.data[i], x.data[i + 1], x.data[i + 2], x.data[i + 3]}
 
 			// tanh(x/2)
 			arg := simd.div(v, #simd[4]f32{two, two, two, two})
@@ -832,7 +832,11 @@ silu_fast :: proc(
 				),
 			)
 
-			(^#simd[4]f32)(&result.data[i])^ = silu_result
+			// (^#simd[4]f32)(&result.data[i])^ = silu_result
+			result.data[i] = simd.extract(silu_result, 0)
+			result.data[i + 1] = simd.extract(silu_result, 1)
+			result.data[i + 2] = simd.extract(silu_result, 2)
+			result.data[i + 3] = simd.extract(silu_result, 3)
 		}
 
 		// Scalar fallback
