@@ -2,6 +2,7 @@ package tensor
 
 import "../tensor"
 import "../trace"
+import "core:fmt"
 import "core:os"
 import "core:simd"
 import "core:sync"
@@ -26,8 +27,8 @@ im2col :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
-	// conv_bn_trace := trace.TRACE_FUNCTION("im2col")
-	// defer trace.end_scoped_trace(conv_bn_trace)
+	conv_bn_trace := trace.TRACE_FUNCTION("im2col")
+	defer trace.end_scoped_trace(conv_bn_trace)
 
 	b, c, h, w := t.shape[0], t.shape[1], t.shape[2], t.shape[3]
 	h_out, w_out := get_hw(h, w, h_k, w_k, stride, dilation, padding)
@@ -40,12 +41,38 @@ im2col :: proc(
 	dst_size := b * h_out * w_out * c * h_k * w_k
 	dst := make([]T, dst_size, allocator, loc)
 
-	// im2col_building := trace.TRACE_SECTION("im2col_building")
-	if stride == 1 && dilation == 1 && padding == 0 && t.contiguous {
+	im2col_building := trace.TRACE_SECTION("im2col_building")
+	if stride == 1 && dilation == 1 && t.contiguous {
 		if h_k == 1 && w_k == 1 {
 			im2col_fast_1x1(src, dst, b, c, h, w, h_out, w_out)
 		} else if h_k == 3 && w_k == 3 {
-			im2col_fast_3x3(src, dst, b, c, h, w, h_out, w_out)
+			if padding == 0 {
+				im2col_fast_3x3_padding0(src, dst, b, c, h, w, h_out, w_out)
+			} else if padding == 1 {
+				when T == f32 {
+					im2col_fast_3x3_padding1_simd(src, dst, b, c, h, w, h_out, w_out)
+				} else {
+					im2col_fast_3x3_padding1(src, dst, b, c, h, w, h_out, w_out)
+				}
+			} else {
+				// Fall back to general for other padding values
+				im2col_general(
+					src,
+					dst,
+					b,
+					c,
+					h,
+					w,
+					h_k,
+					w_k,
+					h_out,
+					w_out,
+					stride,
+					dilation,
+					padding,
+					t.strides,
+				)
+			}
 		} else {
 			im2col_general(
 				src,
@@ -82,7 +109,7 @@ im2col :: proc(
 			t.strides,
 		)
 	}
-	// trace.end_scoped_trace(im2col_building)
+	trace.end_scoped_trace(im2col_building)
 
 	t_out := tensor_alloc(T, []uint{b, h_out * w_out, c * h_k * w_k}, false, allocator, loc)
 	t_out.data = dst
@@ -90,8 +117,8 @@ im2col :: proc(
 }
 
 im2col_fast_1x1 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
-	// im2col_trace := trace.TRACE_FUNCTION("im2col_1x1")
-	// defer trace.end_scoped_trace(im2col_trace)
+	im2col_trace := trace.TRACE_FUNCTION("im2col_1x1")
+	defer trace.end_scoped_trace(im2col_trace)
 
 	hw := h * w
 	chw := c * hw
@@ -206,9 +233,9 @@ im2col_fast_1x1 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
 	}
 }
 
-im2col_fast_3x3 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
-	// im2col_trace := trace.TRACE_FUNCTION("im2col_3x3")
-	// defer trace.end_scoped_trace(im2col_trace)
+im2col_fast_3x3_padding0 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
+	im2col_trace := trace.TRACE_FUNCTION("im2col_3x3")
+	defer trace.end_scoped_trace(im2col_trace)
 
 	dst_idx := 0
 	hw := h * w
@@ -235,21 +262,306 @@ im2col_fast_3x3 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
 	}
 }
 
+im2col_fast_3x3_padding1 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
+	im2col_trace := trace.TRACE_FUNCTION("im2col_3x3_padding1")
+	defer trace.end_scoped_trace(im2col_trace)
+
+	hw := h * w
+	chw := c * hw
+
+	#no_bounds_check {
+		when T == f32 {
+			// SIMD optimized version for f32
+			for b_idx in 0 ..< b {
+				src_b := src[b_idx * chw:]
+				dst_idx := b_idx * h_out * w_out * c * 9
+
+				for c_idx in 0 ..< c {
+					src_c := src_b[c_idx * hw:]
+
+					// Process each output position
+					for oh in 0 ..< h_out {
+						for ow in 0 ..< w_out {
+							// Calculate the 3x3 window with padding
+							// For each kernel position, check if it's within bounds
+							dst_base := dst_idx + (oh * w_out + ow) * c * 9 + c_idx * 9
+
+							// Unrolled 3x3 kernel with boundary checks
+							kernel_idx := 0
+							for kh in -1 ..< 2 {
+								ih := int(oh) + kh // input height position
+								for kw in -1 ..< 2 {
+									iw := int(ow) + kw // input width position
+
+									// Check bounds (padding behavior)
+									if ih >= 0 && ih < int(h) && iw >= 0 && iw < int(w) {
+										dst[dst_base + kernel_idx] = src_c[ih * int(w) + iw]
+									} else {
+										dst[dst_base + kernel_idx] = 0 // Zero padding
+									}
+									kernel_idx += 1
+								}
+							}
+						}
+					}
+				}
+			}
+		} else {
+			for b_idx in 0 ..< b {
+				src_b := src[b_idx * chw:]
+				dst_idx := b_idx * h_out * w_out * c * 9
+
+				for c_idx in 0 ..< c {
+					src_c := src_b[c_idx * hw:]
+
+					for oh in 0 ..< h_out {
+						for ow in 0 ..< w_out {
+							dst_base := dst_idx + (oh * w_out + ow) * c * 9 + c_idx * 9
+
+							kernel_idx := 0
+							for kh in -1 ..< 2 {
+								ih := int(oh) + kh
+								for kw in -1 ..< 2 {
+									iw := int(ow) + kw
+
+									if ih >= 0 && ih < int(h) && iw >= 0 && iw < int(w) {
+										dst[dst_base + kernel_idx] = src_c[ih * int(w) + iw]
+									} else {
+										dst[dst_base + kernel_idx] = 0
+									}
+									kernel_idx += 1
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+im2col_fast_3x3_padding1_simd :: proc(src, dst: []f32, b, c, h, w, h_out, w_out: uint) {
+	im2col_trace := trace.TRACE_FUNCTION("im2col_3x3_padding1_simd")
+	defer trace.end_scoped_trace(im2col_trace)
+
+	hw := h * w
+	chw := c * hw
+
+	#no_bounds_check {
+		for b_idx in 0 ..< b {
+			src_b := src[b_idx * chw:]
+			dst_idx := b_idx * h_out * w_out * c * 9
+
+			for c_idx in 0 ..< c {
+				src_c := src_b[c_idx * hw:]
+
+				// Top row (oh = 0) - special handling for top padding
+				oh := uint(0)
+				for ow in 0 ..< w_out {
+					dst_base := dst_idx + (oh * w_out + ow) * c * 9 + c_idx * 9
+
+					// Row -1 (padded)
+					dst[dst_base + 0] = 0 // [-1, -1]
+					dst[dst_base + 1] = (ow > 0) ? src_c[ow - 1] : 0 // [-1, 0]
+					dst[dst_base + 2] = (ow < w - 1) ? src_c[ow] : 0 // [-1, 1]
+
+					// Row 0
+					dst[dst_base + 3] = (ow > 0) ? src_c[w + ow - 1] : 0 // [0, -1]
+					dst[dst_base + 4] = src_c[w + ow] // [0, 0]
+					dst[dst_base + 5] = (ow < w - 1) ? src_c[w + ow + 1] : 0 // [0, 1]
+
+					// Row 1
+					if h > 1 {
+						dst[dst_base + 6] = (ow > 0) ? src_c[2 * w + ow - 1] : 0 // [1, -1]
+						dst[dst_base + 7] = src_c[2 * w + ow] // [1, 0]
+						dst[dst_base + 8] = (ow < w - 1) ? src_c[2 * w + ow + 1] : 0 // [1, 1]
+					} else {
+						dst[dst_base + 6] = 0
+						dst[dst_base + 7] = 0
+						dst[dst_base + 8] = 0
+					}
+				}
+
+				// Middle rows with SIMD
+				for oh in 1 ..< h_out - 1 {
+					// Left edge (ow = 0) - special handling for left padding
+					ow := uint(0)
+					dst_base := dst_idx + (oh * w_out + ow) * c * 9 + c_idx * 9
+
+					row0 := (oh - 1) * w
+					row1 := oh * w
+					row2 := (oh + 1) * w
+
+					dst[dst_base + 0] = 0 // left padding
+					dst[dst_base + 1] = src_c[row0]
+					dst[dst_base + 2] = src_c[row0 + 1]
+					dst[dst_base + 3] = 0 // left padding
+					dst[dst_base + 4] = src_c[row1]
+					dst[dst_base + 5] = src_c[row1 + 1]
+					dst[dst_base + 6] = 0 // left padding
+					dst[dst_base + 7] = src_c[row2]
+					dst[dst_base + 8] = src_c[row2 + 1]
+
+					ow = 1
+					for ; ow + 4 <= w_out - 1; ow += 4 {
+						// Process 4 output positions at once
+						for i in 0 ..< 4 {
+							dst_base := dst_idx + (oh * w_out + ow + uint(i)) * c * 9 + c_idx * 9
+							base_idx := oh * w + ow + uint(i)
+
+							// Use SIMD to load 3 consecutive values for each row
+							row0_vals := #simd[4]f32 {
+								src_c[base_idx - w - 1],
+								src_c[base_idx - w],
+								src_c[base_idx - w + 1],
+								0,
+							}
+							row1_vals := #simd[4]f32 {
+								src_c[base_idx - 1],
+								src_c[base_idx],
+								src_c[base_idx + 1],
+								0,
+							}
+							row2_vals := #simd[4]f32 {
+								src_c[base_idx + w - 1],
+								src_c[base_idx + w],
+								src_c[base_idx + w + 1],
+								0,
+							}
+
+							// Store the 3x3 window
+							dst[dst_base + 0] = simd.extract(row0_vals, 0)
+							dst[dst_base + 1] = simd.extract(row0_vals, 1)
+							dst[dst_base + 2] = simd.extract(row0_vals, 2)
+							dst[dst_base + 3] = simd.extract(row1_vals, 0)
+							dst[dst_base + 4] = simd.extract(row1_vals, 1)
+							dst[dst_base + 5] = simd.extract(row1_vals, 2)
+							dst[dst_base + 6] = simd.extract(row2_vals, 0)
+							dst[dst_base + 7] = simd.extract(row2_vals, 1)
+							dst[dst_base + 8] = simd.extract(row2_vals, 2)
+						}
+					}
+
+					// Process remaining middle positions
+					for ; ow < w_out - 1; ow += 1 {
+						dst_base := dst_idx + (oh * w_out + ow) * c * 9 + c_idx * 9
+						base_idx := oh * w + ow
+
+						dst[dst_base + 0] = src_c[base_idx - w - 1]
+						dst[dst_base + 1] = src_c[base_idx - w]
+						dst[dst_base + 2] = src_c[base_idx - w + 1]
+						dst[dst_base + 3] = src_c[base_idx - 1]
+						dst[dst_base + 4] = src_c[base_idx]
+						dst[dst_base + 5] = src_c[base_idx + 1]
+						dst[dst_base + 6] = src_c[base_idx + w - 1]
+						dst[dst_base + 7] = src_c[base_idx + w]
+						dst[dst_base + 8] = src_c[base_idx + w + 1]
+					}
+
+					// Right edge (ow = w_out - 1) - special handling for right padding
+					if w_out > 1 {
+						ow = w_out - 1
+						dst_base := dst_idx + (oh * w_out + ow) * c * 9 + c_idx * 9
+
+						row0 := (oh - 1) * w
+						row1 := oh * w
+						row2 := (oh + 1) * w
+
+						dst[dst_base + 0] = src_c[row0 + w - 2]
+						dst[dst_base + 1] = src_c[row0 + w - 1]
+						dst[dst_base + 2] = 0 // right padding
+						dst[dst_base + 3] = src_c[row1 + w - 2]
+						dst[dst_base + 4] = src_c[row1 + w - 1]
+						dst[dst_base + 5] = 0 // right padding
+						dst[dst_base + 6] = src_c[row2 + w - 2]
+						dst[dst_base + 7] = src_c[row2 + w - 1]
+						dst[dst_base + 8] = 0 // right padding
+					}
+				}
+
+				// Bottom row (oh = h_out - 1) - special handling for bottom padding
+				if h_out > 1 {
+					oh = h_out - 1
+					for ow in 0 ..< w_out {
+						dst_base := dst_idx + (oh * w_out + ow) * c * 9 + c_idx * 9
+
+						row0 := (h - 2) * w
+						row1 := (h - 1) * w
+
+						// Row h-2
+						if h > 1 {
+							dst[dst_base + 0] = (ow > 0) ? src_c[row0 + ow - 1] : 0
+							dst[dst_base + 1] = src_c[row0 + ow]
+							dst[dst_base + 2] = (ow < w - 1) ? src_c[row0 + ow + 1] : 0
+						} else {
+							dst[dst_base + 0] = 0
+							dst[dst_base + 1] = 0
+							dst[dst_base + 2] = 0
+						}
+
+						// Row h-1
+						dst[dst_base + 3] = (ow > 0) ? src_c[row1 + ow - 1] : 0
+						dst[dst_base + 4] = src_c[row1 + ow]
+						dst[dst_base + 5] = (ow < w - 1) ? src_c[row1 + ow + 1] : 0
+
+						// Row h (padded)
+						dst[dst_base + 6] = 0
+						dst[dst_base + 7] = 0
+						dst[dst_base + 8] = 0
+					}
+				}
+			}
+		}
+	}
+}
+
 im2col_general :: proc(
 	src, dst: []$T,
 	b, c, h, w, h_k, w_k, h_out, w_out: uint,
 	stride, dilation, padding: uint,
 	strides: []uint,
 ) {
-	// im2col_trace := trace.TRACE_FUNCTION("im2col_general")
-	// defer trace.end_scoped_trace(im2col_trace)
+	im2col_trace := trace.TRACE_FUNCTION(
+		fmt.tprintf(
+			"im2col_general_%dx%d_stride%d_dilation%d_padding%d",
+			h_k,
+			w_k,
+			stride,
+			dilation,
+			padding,
+		),
+	)
+	defer trace.end_scoped_trace(im2col_trace)
 	src_s0, src_s1, src_s2, src_s3 := strides[0], strides[1], strides[2], strides[3]
 
+	// Special case: stride=1, dilation=1 with padding can still be optimized
+	if stride == 1 && dilation == 1 {
+		im2col_general_stride1_dilation1(
+			src,
+			dst,
+			b,
+			c,
+			h,
+			w,
+			h_k,
+			w_k,
+			h_out,
+			w_out,
+			padding,
+			src_s0,
+			src_s1,
+			src_s2,
+			src_s3,
+		)
+		return
+	}
+
+	// General case with SIMD optimizations where possible
 	for b_idx in 0 ..< b {
 		src_idx_b := b_idx * src_s0
 		dst_idx_b := b_idx * h_out * w_out * c * h_k * w_k
 
-		// Tile over channels
+		// Tile over channels for cache efficiency
 		for c_tile_start := uint(0); c_tile_start < c; c_tile_start += TILE_C {
 			c_tile_end := min(c_tile_start + TILE_C, c)
 
@@ -261,13 +573,14 @@ im2col_general :: proc(
 				for w_tile_start := uint(0); w_tile_start < w_out; w_tile_start += TILE_W {
 					w_tile_end := min(w_tile_start + TILE_W, w_out)
 
-					// Now process this tile completely
+					// Process this tile
 					for c_idx in c_tile_start ..< c_tile_end {
 						src_idx_c := src_idx_b + c_idx * src_s1
 
 						for h_k_idx in 0 ..< h_k {
-							// Pre-calculate valid h range for this tile
 							h_k_offset := h_k_idx * dilation
+
+							// Pre-calculate valid h range for this tile
 							h_idx_start := h_tile_start
 							h_idx_end := h_tile_end
 
@@ -280,14 +593,15 @@ im2col_general :: proc(
 								}
 								max_src_h := h + padding - 1
 								if h_k_offset > max_src_h {
-									continue // Skip this kernel position entirely
+									continue
 								}
 								h_idx_end = min(h_idx_end, (max_src_h - h_k_offset) / stride + 1)
 							}
 
 							for w_k_idx in 0 ..< w_k {
-								// Pre-calculate valid w range for this tile
 								w_k_offset := w_k_idx * dilation
+
+								// Pre-calculate valid w range for this tile
 								w_idx_start := w_tile_start
 								w_idx_end := w_tile_end
 
@@ -300,7 +614,7 @@ im2col_general :: proc(
 									}
 									max_src_w := w + padding - 1
 									if w_k_offset > max_src_w {
-										continue // Skip this kernel position entirely
+										continue
 									}
 									w_idx_end = min(
 										w_idx_end,
@@ -308,32 +622,309 @@ im2col_general :: proc(
 									)
 								}
 
-								// Inner loops process only the tile
-								for h_idx in h_idx_start ..< h_idx_end {
-									src_h := h_idx * stride + h_k_offset - padding
-									src_idx_h := src_idx_c + src_h * src_s2
-
-									// Pre-calculate some destination indices
-									dst_idx_h_base :=
-										dst_idx_b +
-										h_idx * w_out * (c * h_k * w_k) +
-										c_idx * h_k * w_k +
-										h_k_idx * w_k +
-										w_k_idx
-
-									for w_idx in w_idx_start ..< w_idx_end {
-										src_w := w_idx * stride + w_k_offset - padding
-										src_idx := src_idx_h + src_w * src_s3
-
-										dst_idx := dst_idx_h_base + w_idx * (c * h_k * w_k)
-
-										dst[dst_idx] = src[src_idx]
-									}
+								// SIMD optimization for the innermost loops
+								when T == f32 {
+									im2col_general_inner_simd_f32(
+										src,
+										dst,
+										src_idx_c,
+										dst_idx_b,
+										h_idx_start,
+										h_idx_end,
+										w_idx_start,
+										w_idx_end,
+										h_k_idx,
+										w_k_idx,
+										h_k_offset,
+										w_k_offset,
+										c_idx,
+										c,
+										h_k,
+										w_k,
+										w_out,
+										stride,
+										padding,
+										src_s2,
+										src_s3,
+									)
+								} else {
+									// Scalar fallback for other types
+									im2col_general_inner_scalar(
+										src,
+										dst,
+										src_idx_c,
+										dst_idx_b,
+										h_idx_start,
+										h_idx_end,
+										w_idx_start,
+										w_idx_end,
+										h_k_idx,
+										w_k_idx,
+										h_k_offset,
+										w_k_offset,
+										c_idx,
+										c,
+										h_k,
+										w_k,
+										w_out,
+										stride,
+										padding,
+										src_s2,
+										src_s3,
+									)
 								}
 							}
 						}
 					}
 				}
+			}
+		}
+	}
+}
+
+@(private)
+im2col_general_stride1_dilation1 :: proc(
+	src, dst: []$T,
+	b, c, h, w, h_k, w_k, h_out, w_out: uint,
+	padding: uint,
+	src_s0, src_s1, src_s2, src_s3: uint,
+) {
+	#no_bounds_check {
+		for b_idx in 0 ..< b {
+			src_idx_b := b_idx * src_s0
+			dst_idx_b := b_idx * h_out * w_out * c * h_k * w_k
+
+			for c_idx in 0 ..< c {
+				src_idx_c := src_idx_b + c_idx * src_s1
+
+				for h_k_idx in 0 ..< h_k {
+					for w_k_idx in 0 ..< w_k {
+						// Calculate source position offsets
+						src_h_offset := int(h_k_idx) - int(padding)
+						src_w_offset := int(w_k_idx) - int(padding)
+
+						// Determine valid output range
+						h_start := max(0, -src_h_offset)
+						h_end := min(int(h_out), int(h) - src_h_offset)
+						w_start := max(0, -src_w_offset)
+						w_end := min(int(w_out), int(w) - src_w_offset)
+
+						if h_start >= h_end || w_start >= w_end {
+							continue
+						}
+
+						// Base destination offset
+						dst_base := dst_idx_b + c_idx * h_k * w_k + h_k_idx * w_k + w_k_idx
+
+						when T == f32 {
+							// SIMD optimized copy
+							for h_idx in h_start ..< h_end {
+								src_h := uint(h_idx + src_h_offset)
+								src_row_base := src_idx_c + src_h * src_s2
+								dst_row_base := dst_base + uint(h_idx) * w_out * (c * h_k * w_k)
+
+								w_idx := uint(w_start)
+								w_end_u := uint(w_end)
+
+								// Process 8 elements at a time
+								for ; w_idx + 8 <= w_end_u; w_idx += 8 {
+									src_offset :=
+										src_row_base + (w_idx + uint(src_w_offset)) * src_s3
+									dst_offset := dst_row_base + w_idx * (c * h_k * w_k)
+
+									// Gather 8 values (assuming src_s3 == 1 for contiguous case)
+									if src_s3 == 1 {
+										vals1 := (^#simd[4]f32)(&src[src_offset])^
+										vals2 := (^#simd[4]f32)(&src[src_offset + 4])^
+
+										// Store with stride
+										dst[dst_offset] = simd.extract(vals1, 0)
+										dst[dst_offset + (c * h_k * w_k)] = simd.extract(vals1, 1)
+										dst[dst_offset + 2 * (c * h_k * w_k)] = simd.extract(
+											vals1,
+											2,
+										)
+										dst[dst_offset + 3 * (c * h_k * w_k)] = simd.extract(
+											vals1,
+											3,
+										)
+										dst[dst_offset + 4 * (c * h_k * w_k)] = simd.extract(
+											vals2,
+											0,
+										)
+										dst[dst_offset + 5 * (c * h_k * w_k)] = simd.extract(
+											vals2,
+											1,
+										)
+										dst[dst_offset + 6 * (c * h_k * w_k)] = simd.extract(
+											vals2,
+											2,
+										)
+										dst[dst_offset + 7 * (c * h_k * w_k)] = simd.extract(
+											vals2,
+											3,
+										)
+									} else {
+										// Manual gather for non-contiguous source
+										#unroll for i in 0 ..< 8 {
+											dst[dst_offset + uint(i) * (c * h_k * w_k)] =
+												src[src_offset + uint(i) * src_s3]
+										}
+									}
+								}
+
+								// Process 4 elements at a time
+								for ; w_idx + 4 <= w_end_u; w_idx += 4 {
+									src_offset :=
+										src_row_base + (w_idx + uint(src_w_offset)) * src_s3
+									dst_offset := dst_row_base + w_idx * (c * h_k * w_k)
+
+									if src_s3 == 1 {
+										vals := (^#simd[4]f32)(&src[src_offset])^
+										dst[dst_offset] = simd.extract(vals, 0)
+										dst[dst_offset + (c * h_k * w_k)] = simd.extract(vals, 1)
+										dst[dst_offset + 2 * (c * h_k * w_k)] = simd.extract(
+											vals,
+											2,
+										)
+										dst[dst_offset + 3 * (c * h_k * w_k)] = simd.extract(
+											vals,
+											3,
+										)
+									} else {
+										for i in 0 ..< 4 {
+											dst[dst_offset + uint(i) * (c * h_k * w_k)] =
+												src[src_offset + uint(i) * src_s3]
+										}
+									}
+								}
+
+								// Handle remainder
+								for ; w_idx < w_end_u; w_idx += 1 {
+									src_offset :=
+										src_row_base + (w_idx + uint(src_w_offset)) * src_s3
+									dst_offset := dst_row_base + w_idx * (c * h_k * w_k)
+									dst[dst_offset] = src[src_offset]
+								}
+							}
+						} else {
+							// Scalar version for other types
+							for h_idx in h_start ..< h_end {
+								src_h := uint(h_idx + src_h_offset)
+								src_row_base := src_idx_c + src_h * src_s2
+								dst_row_base := dst_base + uint(h_idx) * w_out * (c * h_k * w_k)
+
+								for w_idx in uint(w_start) ..< uint(w_end) {
+									src_w := w_idx + uint(src_w_offset)
+									src_idx := src_row_base + src_w * src_s3
+									dst_idx := dst_row_base + w_idx * (c * h_k * w_k)
+									dst[dst_idx] = src[src_idx]
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// SIMD-optimized inner loop for f32
+@(private)
+im2col_general_inner_simd_f32 :: proc(
+	src, dst: []f32,
+	src_idx_c: uint,
+	dst_idx_b: uint,
+	h_idx_start, h_idx_end: uint,
+	w_idx_start, w_idx_end: uint,
+	h_k_idx, w_k_idx: uint,
+	h_k_offset, w_k_offset: uint,
+	c_idx: uint,
+	c, h_k, w_k, w_out: uint,
+	stride, padding: uint,
+	src_s2, src_s3: uint,
+) {
+	#no_bounds_check {
+		for h_idx in h_idx_start ..< h_idx_end {
+			src_h := h_idx * stride + h_k_offset - padding
+			src_idx_h := src_idx_c + src_h * src_s2
+
+			// Pre-calculate destination base
+			dst_idx_h_base :=
+				dst_idx_b +
+				h_idx * w_out * (c * h_k * w_k) +
+				c_idx * h_k * w_k +
+				h_k_idx * w_k +
+				w_k_idx
+
+			w_idx := w_idx_start
+
+			// SIMD processing when stride allows
+			if stride == 2 && src_s3 == 1 && w_idx + 4 <= w_idx_end {
+				// Special case for stride=2: process 4 output positions
+				for ; w_idx + 4 <= w_idx_end; w_idx += 4 {
+					// For stride=2, we need values at positions 0, 2, 4, 6
+					src_w_base := w_idx * stride + w_k_offset - padding
+
+					// Gather with stride=2
+					vals := #simd[4]f32 {
+						src[src_idx_h + src_w_base * src_s3],
+						src[src_idx_h + (src_w_base + 2) * src_s3],
+						src[src_idx_h + (src_w_base + 4) * src_s3],
+						src[src_idx_h + (src_w_base + 6) * src_s3],
+					}
+
+					// Store to non-contiguous destinations
+					dst[dst_idx_h_base + w_idx * (c * h_k * w_k)] = simd.extract(vals, 0)
+					dst[dst_idx_h_base + (w_idx + 1) * (c * h_k * w_k)] = simd.extract(vals, 1)
+					dst[dst_idx_h_base + (w_idx + 2) * (c * h_k * w_k)] = simd.extract(vals, 2)
+					dst[dst_idx_h_base + (w_idx + 3) * (c * h_k * w_k)] = simd.extract(vals, 3)
+				}
+			}
+
+			// Scalar fallback for remainder or non-optimizable cases
+			for ; w_idx < w_idx_end; w_idx += 1 {
+				src_w := w_idx * stride + w_k_offset - padding
+				src_idx := src_idx_h + src_w * src_s3
+				dst_idx := dst_idx_h_base + w_idx * (c * h_k * w_k)
+				dst[dst_idx] = src[src_idx]
+			}
+		}
+	}
+}
+
+// Scalar inner loop for non-f32 types
+@(private)
+im2col_general_inner_scalar :: proc(
+	src, dst: []$T,
+	src_idx_c: uint,
+	dst_idx_b: uint,
+	h_idx_start, h_idx_end: uint,
+	w_idx_start, w_idx_end: uint,
+	h_k_idx, w_k_idx: uint,
+	h_k_offset, w_k_offset: uint,
+	c_idx: uint,
+	c, h_k, w_k, w_out: uint,
+	stride, padding: uint,
+	src_s2, src_s3: uint,
+) {
+	#no_bounds_check {
+		for h_idx in h_idx_start ..< h_idx_end {
+			src_h := h_idx * stride + h_k_offset - padding
+			src_idx_h := src_idx_c + src_h * src_s2
+
+			dst_idx_h_base :=
+				dst_idx_b +
+				h_idx * w_out * (c * h_k * w_k) +
+				c_idx * h_k * w_k +
+				h_k_idx * w_k +
+				w_k_idx
+
+			for w_idx in w_idx_start ..< w_idx_end {
+				src_w := w_idx * stride + w_k_offset - padding
+				src_idx := src_idx_h + src_w * src_s3
+				dst_idx := dst_idx_h_base + w_idx * (c * h_k * w_k)
+				dst[dst_idx] = src[src_idx]
 			}
 		}
 	}
@@ -598,6 +1189,7 @@ conv2d :: proc {
 }
 
 // Specialized for conv2d: (B*H*W, C) -> (B, C, H, W)
+@(private = "file")
 reshape_bhwc_to_bchw :: proc(
 	tensor: ^Tensor($T),
 	batch, height, width, channels: uint,
