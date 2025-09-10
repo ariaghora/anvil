@@ -81,7 +81,7 @@ max_pool_2d_f32_simd :: proc(src, dst: []f32, b, c, h, w, k_h, k_w, h_out, w_out
 						val2 := src_channel[idx2]
 						val3 := src_channel[idx3]
 
-						max_val := max(max(val0, val1), max(val2, val3))
+						max_val := simd.reduce_max(#simd[4]f32{val0, val1, val2, val3})
 						dst_channel[dst_idx] = max_val
 						dst_idx += 1
 					}
@@ -119,10 +119,7 @@ max_pool_2d_f32_simd :: proc(src, dst: []f32, b, c, h, w, k_h, k_w, h_out, w_out
 							}
 
 							// Reduce SIMD vector
-							max_val = max(max_val, simd.extract(max_vec, 0))
-							max_val = max(max_val, simd.extract(max_vec, 1))
-							max_val = max(max_val, simd.extract(max_vec, 2))
-							max_val = max(max_val, simd.extract(max_vec, 3))
+							max_val = max(max_val, simd.reduce_max(max_vec))
 
 							// Handle remainder
 							for ; x < window_width; x += 1 {
