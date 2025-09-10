@@ -248,6 +248,9 @@ mul :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
+	trace_mul := trace.TRACE_FUNCTION("mul")
+	defer trace.end_scoped_trace(trace_mul)
+
 	return elementwise_binary_op(a, b, .MULTIPLY, allocator, loc)
 }
 

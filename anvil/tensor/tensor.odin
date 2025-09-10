@@ -664,6 +664,9 @@ reshape :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
+	trace_reshape := trace.TRACE_FUNCTION("reshape")
+	defer trace.end_scoped_trace(trace_reshape)
+
 	// Check if total size matches
 	old_size := shape_to_size(arr.shape)
 	new_size := shape_to_size(new_shape)
@@ -899,6 +902,9 @@ transpose :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
+	trace_transpose := trace.TRACE_FUNCTION("transpose")
+	defer trace.end_scoped_trace(trace_transpose)
+
 	// Validate dimensions
 	if dim0 < 0 || dim0 >= len(tensor.shape) || dim1 < 0 || dim1 >= len(tensor.shape) {
 		panic("Dimension indices out of range")
@@ -1175,124 +1181,127 @@ Range :: struct {
 	step:  int,
 }
 
+simd_copy_f32 :: proc(dst: ^f32, src: ^f32, count: int) {
+	// Process 4 elements at a time
+	for i := 0; i + 4 <= count; i += 4 {
+		v := (^#simd[4]f32)(uintptr(src) + uintptr(i * 4))^
+		(^#simd[4]f32)(uintptr(dst) + uintptr(i * 4))^ = v
+	}
+
+	// Handle remainder
+	for i := 0; i < count; i += 1 {
+		(^f32)(uintptr(dst) + uintptr(i * 4))^ = (^f32)(uintptr(src) + uintptr(i * 4))^
+	}
+}
+
 slice :: proc(input: ^Tensor($T), ranges: []Range, allocator := context.allocator) -> ^Tensor(T) {
+	trace_slice := trace.TRACE_FUNCTION("slice")
+	defer trace.end_scoped_trace(trace_slice)
+
 	rank := len(input.shape)
 	assert(len(ranges) == rank, "ranges must match tensor rank")
 
-	output_shape := make([]uint, rank, allocator)
-	actual_starts := make([]int, rank, context.temp_allocator)
-	actual_steps := make([]int, rank, context.temp_allocator)
+	output_shape: [16]uint
+	starts: [16]int
+	steps: [16]int
+	input_strides := input.strides
 
+	assert(rank <= 16, "rank too high")
+
+	// Normalize ranges and calculate output shape
 	for i in 0 ..< rank {
 		r := ranges[i]
 		dim_size := int(input.shape[i])
 
-		start := r.start
+		start := r.start if r.start >= 0 else r.start + dim_size
 		end := r.end if r.end != 0 else dim_size
+		if end < 0 do end += dim_size
 		step := r.step if r.step != 0 else 1
 
-		if step < 0 {
-			panic("Negative steps not supported")
-		}
+		start = clamp(start, 0, dim_size)
+		end = clamp(end, 0, dim_size)
 
-		if start < 0 do start += dim_size
-		if end < 0 do end += dim_size
-
-		start = max(0, min(start, dim_size - 1))
-		end = max(0, min(end, dim_size))
-
-		slice_length := (end - start + step - 1) / step
-		output_shape[i] = uint(max(0, slice_length))
-
-		actual_starts[i] = start
-		actual_steps[i] = step
+		output_shape[i] = uint(max(0, (end - start + step - 1) / step))
+		starts[i] = start
+		steps[i] = step
 	}
 
-	output := tensor_alloc(T, output_shape, true, allocator)
+	output := tensor_alloc(T, output_shape[:rank], true, allocator)
 
-	// Find the innermost contiguous dimensions (where step=1)
-	contiguous_dims := rank
+	// Find innermost contiguous dimensions
+	contiguous_from := rank
 	for i := rank - 1; i >= 0; i -= 1 {
-		if actual_steps[i] != 1 {
-			contiguous_dims = i + 1
+		if steps[i] != 1 {
+			contiguous_from = i + 1
 			break
 		}
 	}
 
-	// Calculate sizes
-	contiguous_size := uint(1)
-	for i in contiguous_dims ..< rank {
-		contiguous_size *= output_shape[i]
-	}
-
-	outer_size := uint(1)
-	for i in 0 ..< contiguous_dims {
-		outer_size *= output_shape[i]
-	}
-
-	// Calculate strides for input
-	input_strides := make([]uint, rank, context.temp_allocator)
-	input_strides[rank - 1] = 1
-	for i := rank - 2; i >= 0; i -= 1 {
-		input_strides[i] = input_strides[i + 1] * input.shape[i + 1]
-	}
-
-	if contiguous_size > 1 {
-		// Fast path: copy contiguous chunks
-		output_offset := uint(0)
-		outer_indices := make([]int, contiguous_dims, context.temp_allocator)
-
-		for _ in 0 ..< outer_size {
-			// Calculate input offset for this outer position
-			input_offset := uint(0)
-			for i in 0 ..< contiguous_dims {
-				input_idx := actual_starts[i] + outer_indices[i] * actual_steps[i]
-				input_offset += uint(input_idx) * input_strides[i]
-			}
-			// Add offset for the start of contiguous dimensions
-			for i in contiguous_dims ..< rank {
-				input_offset += uint(actual_starts[i]) * input_strides[i]
+	when T == f32 {
+		if contiguous_from < rank {
+			// SIMD path for contiguous inner dimensions
+			contiguous_elements := 1
+			for i in contiguous_from ..< rank {
+				contiguous_elements *= int(output_shape[i])
 			}
 
-			// Copy the contiguous chunk
-			copy(
-				output.data[output_offset:output_offset + contiguous_size],
-				input.data[input_offset:input_offset + contiguous_size],
-			)
-			output_offset += contiguous_size
+			outer_elements := len(output.data) / contiguous_elements
+			indices: [16]int
 
-			// Update outer indices
-			for j := contiguous_dims - 1; j >= 0; j -= 1 {
-				outer_indices[j] += 1
-				if outer_indices[j] < int(output_shape[j]) do break
-				outer_indices[j] = 0
+			for outer_idx in 0 ..< outer_elements {
+				// Calculate base addresses
+				temp := outer_idx
+				for i := contiguous_from - 1; i >= 0; i -= 1 {
+					indices[i] = temp % int(output_shape[i])
+					temp /= int(output_shape[i])
+				}
+
+				input_base := 0
+				for i in 0 ..< contiguous_from {
+					input_pos := starts[i] + indices[i] * steps[i]
+					input_base += input_pos * int(input_strides[i])
+				}
+				for i in contiguous_from ..< rank {
+					input_base += starts[i] * int(input_strides[i])
+				}
+
+				output_base := outer_idx * contiguous_elements
+
+				// SIMD copy of contiguous chunk
+				for i := 0; i + 4 <= contiguous_elements; i += 4 {
+					v := (^#simd[4]f32)(uintptr(&input.data[input_base]) + uintptr(i * 4))^
+					(^#simd[4]f32)(uintptr(&output.data[output_base]) + uintptr(i * 4))^ = v
+				}
+				// remainder
+				for i := 0; i < contiguous_elements; i += 1 {
+					(^f32)(uintptr(&output.data[output_base]) + uintptr(i * 4))^ =
+					(^f32)(uintptr(&input.data[input_base]) + uintptr(i * 4))^
+				}
 			}
+			return output
 		}
-	} else {
-		// Slow path: everything is strided, copy element by element
-		output_indices := make([]int, rank, context.temp_allocator)
-		output_flat_idx := uint(0)
+	}
 
-		for {
-			// Calculate input index from output index
-			input_flat_idx := uint(0)
-			for i in 0 ..< rank {
-				input_idx := actual_starts[i] + output_indices[i] * actual_steps[i]
-				input_flat_idx += uint(input_idx) * input_strides[i]
-			}
+	// Fallback slicing
+	total_elements := len(output.data)
+	indices: [16]int
 
-			output.data[output_flat_idx] = input.data[input_flat_idx]
-			output_flat_idx += 1
-
-			// Update output indices
-			j := rank - 1
-			for ; j >= 0; j -= 1 {
-				output_indices[j] += 1
-				if output_indices[j] < int(output_shape[j]) do break
-				output_indices[j] = 0
-			}
-			if j < 0 do break
+	for out_idx in 0 ..< total_elements {
+		// Convert flat output index to n-dimensional indices
+		temp := out_idx
+		for i := rank - 1; i >= 0; i -= 1 {
+			indices[i] = temp % int(output_shape[i])
+			temp /= int(output_shape[i])
 		}
+
+		// Map to input index
+		input_idx := 0
+		for i in 0 ..< rank {
+			input_pos := starts[i] + indices[i] * steps[i]
+			input_idx += input_pos * int(input_strides[i])
+		}
+
+		output.data[out_idx] = input.data[input_idx]
 	}
 
 	return output
