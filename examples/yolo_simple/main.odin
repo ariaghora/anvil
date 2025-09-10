@@ -238,15 +238,16 @@ main :: proc() {
 
 	// Do inference!
 	t := time.now()
-	pred, _, _ := yolo.forward_yolo(model, input_t, context.allocator)
-	fmt.println("inference time:", time.since(t))
 
+	pred, _, _ := yolo.forward_yolo(model, input_t, context.allocator)
 	// Postprocess the raw detection.
 	// We need to filter out the detections with low confidence. Subsequently,
 	// eliminate detection duplicates by using NMS
 	pred = tensor.squeeze(pred, context.temp_allocator)
 	bboxes := extract_bboxes(pred, THRESHOLD_CONF, context.temp_allocator)
 	non_maximum_suppression(bboxes, THRESHOLD_NMS)
+
+	fmt.println("inference time:", time.since(t))
 
 	// Calculate the scale to transform coordinates back to the original size space
 	x_scale := f32(orig_w) / f32(resize_w)
@@ -267,6 +268,5 @@ main :: proc() {
 				bbox.conf,
 			)
 		}
-
 	}
 }
