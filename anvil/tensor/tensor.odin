@@ -1181,19 +1181,6 @@ Range :: struct {
 	step:  int,
 }
 
-simd_copy_f32 :: proc(dst: ^f32, src: ^f32, count: int) {
-	// Process 4 elements at a time
-	for i := 0; i + 4 <= count; i += 4 {
-		v := (^#simd[4]f32)(uintptr(src) + uintptr(i * 4))^
-		(^#simd[4]f32)(uintptr(dst) + uintptr(i * 4))^ = v
-	}
-
-	// Handle remainder
-	for i := 0; i < count; i += 1 {
-		(^f32)(uintptr(dst) + uintptr(i * 4))^ = (^f32)(uintptr(src) + uintptr(i * 4))^
-	}
-}
-
 slice :: proc(input: ^Tensor($T), ranges: []Range, allocator := context.allocator) -> ^Tensor(T) {
 	trace_slice := trace.TRACE_FUNCTION("slice")
 	defer trace.end_scoped_trace(trace_slice)
