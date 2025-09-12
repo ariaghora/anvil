@@ -55,23 +55,23 @@ Attribute_Type :: enum {
 
 // Data type enum from ONNX
 ONNX_DataType :: enum i32 {
-	UNDEFINED  = 0,
-	FLOAT      = 1, // float32
-	UINT8      = 2,
-	INT8       = 3,
-	UINT16     = 4,
-	INT16      = 5,
-	INT32      = 6,
-	INT64      = 7,
-	STRING     = 8,
-	BOOL       = 9,
-	FLOAT16    = 10,
-	DOUBLE     = 11, // float64
-	UINT32     = 12,
-	UINT64     = 13,
-	COMPLEX64  = 14,
-	COMPLEX128 = 15,
-	BFLOAT16   = 16,
+	Undefined  = 0,
+	Float      = 1, // float32
+	Uint8      = 2,
+	Int8       = 3,
+	Uint16     = 4,
+	Int16      = 5,
+	Int32      = 6,
+	Int64      = 7,
+	String     = 8,
+	Bool       = 9,
+	Float16    = 10,
+	Double     = 11, // float64
+	Uint32     = 12,
+	Uint64     = 13,
+	Complex64  = 14,
+	Complex128 = 15,
+	BFloat16   = 16,
 }
 
 Node :: struct($T: typeid) {
@@ -85,7 +85,7 @@ Node :: struct($T: typeid) {
 Graph :: struct($T: typeid) {
 	raw_bytes:    []u8, // This is ONLY A REFERENCE to the original bytes
 	nodes:        [dynamic]^Node(T),
-	initializers: [dynamic]^tensor.Tensor(T),
+	initializers: map[string]^tensor.Tensor(T),
 }
 
 read_from_file :: proc(
@@ -218,7 +218,7 @@ parse_graph :: proc(
 	err: ONNX_Error,
 ) {
 	nodes := make([dynamic]^Node(T), allocator)
-	initializers := make([dynamic]^tensor.Tensor(T), allocator)
+	initializers := make(map[string]^tensor.Tensor(T), allocator)
 	offset := 0
 	for offset < len(graph_bytes) {
 		tag_value, new_offset := read_varint(graph_bytes, offset) or_return
@@ -243,8 +243,8 @@ parse_graph :: proc(
 				append(&nodes, node)
 			// initializer
 			case 5:
-				t := parse_tensor(T, payload, allocator) or_return
-			// fmt.println("Got Initializer (weights)!")
+				t, name := parse_tensor(T, payload, allocator) or_return
+				initializers[name] = t
 			// value_info
 			case 8:
 			// fmt.println("Got ValueInfo (intermediate shapes)!")
@@ -528,9 +528,9 @@ parse_tensor :: proc(
 	loc := #caller_location,
 ) -> (
 	t: ^tensor.Tensor(T),
+	name: string,
 	err: ONNX_Error,
 ) {
-	name: string
 	dims: [dynamic]i64 // Collect dims, might come unpacked
 	data_type: i32
 	raw_data: []u8
@@ -605,49 +605,49 @@ parse_tensor :: proc(
 	// Convert based on ONNX data type
 	if len(raw_data) > 0 {
 		#partial switch ONNX_DataType(data_type) {
-		case .FLOAT:
+		case .Float:
 			// 1
 			src_data := mem.slice_data_cast([]f32, raw_data)
 			for src_val, i in src_data {
 				t.data[i] = T(src_val)
 			}
 
-		case .UINT8:
+		case .Uint8:
 			// 2
 			src_data := mem.slice_data_cast([]u8, raw_data)
 			for src_val, i in src_data {
 				t.data[i] = T(src_val)
 			}
 
-		case .INT8:
+		case .Int8:
 			// 3
 			src_data := mem.slice_data_cast([]i8, raw_data)
 			for src_val, i in src_data {
 				t.data[i] = T(src_val)
 			}
 
-		case .INT32:
+		case .Int32:
 			// 6
 			src_data := mem.slice_data_cast([]i32, raw_data)
 			for src_val, i in src_data {
 				t.data[i] = T(src_val)
 			}
 
-		case .INT64:
+		case .Int64:
 			// 7
 			src_data := mem.slice_data_cast([]i64, raw_data)
 			for src_val, i in src_data {
 				t.data[i] = T(src_val)
 			}
 
-		case .FLOAT16:
+		case .Float16:
 			// 10
 			src_data := mem.slice_data_cast([]f16, raw_data)
 			for src_val, i in src_data {
 				t.data[i] = T(src_val)
 			}
 
-		case .DOUBLE:
+		case .Double:
 			// 11
 			src_data := mem.slice_data_cast([]f64, raw_data)
 			for src_val, i in src_data {
@@ -661,7 +661,5 @@ parse_tensor :: proc(
 		panic(fmt.tprintf("Tensor %s has no raw_data", name))
 	}
 
-	fmt.println(name)
-
-	return t, nil
+	return t, name, nil
 }

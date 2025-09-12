@@ -3,6 +3,7 @@
 CLAUDE.md
 .claude
 
+*.onnx
 *.safetensors
 trace.json
 odin-simd
