@@ -4,6 +4,7 @@ package onnx
 
 import "../tensor"
 import "core:fmt"
+import "core:mem"
 import "core:os"
 import "core:slice"
 
@@ -50,6 +51,27 @@ Attribute_Type :: enum {
 	Floats    = 6,
 	Ints      = 7,
 	Strings   = 8,
+}
+
+// Data type enum from ONNX
+ONNX_DataType :: enum i32 {
+	UNDEFINED  = 0,
+	FLOAT      = 1, // float32
+	UINT8      = 2,
+	INT8       = 3,
+	UINT16     = 4,
+	INT16      = 5,
+	INT32      = 6,
+	INT64      = 7,
+	STRING     = 8,
+	BOOL       = 9,
+	FLOAT16    = 10,
+	DOUBLE     = 11, // float64
+	UINT32     = 12,
+	UINT64     = 13,
+	COMPLEX64  = 14,
+	COMPLEX128 = 15,
+	BFLOAT16   = 16,
 }
 
 Node :: struct($T: typeid) {
@@ -221,6 +243,7 @@ parse_graph :: proc(
 				append(&nodes, node)
 			// initializer
 			case 5:
+				t := parse_tensor(T, payload, allocator) or_return
 			// fmt.println("Got Initializer (weights)!")
 			// value_info
 			case 8:
@@ -495,4 +518,150 @@ parse_opset :: proc(opset_bytes: []u8) -> (version: i64, err: ONNX_Error) {
 
 	// Non-empty domain is custom opset, ignore for now
 	return 0, ONNX_Format_Error{"Non-empty domain"}
+}
+
+@(private = "file")
+parse_tensor :: proc(
+	$T: typeid,
+	tensor_bytes: []u8,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> (
+	t: ^tensor.Tensor(T),
+	err: ONNX_Error,
+) {
+	name: string
+	dims: [dynamic]i64 // Collect dims, might come unpacked
+	data_type: i32
+	raw_data: []u8
+
+	offset := 0
+	for offset < len(tensor_bytes) {
+		tag_value, new_offset := read_varint(tensor_bytes, offset) or_return
+		offset = new_offset
+
+		wire_type := tag_value & 0x7
+		field_num := tag_value >> 3
+
+		switch wire_type {
+		case 0:
+			// Varint
+			val, new_offset := read_varint(tensor_bytes, offset) or_return
+			offset = new_offset
+
+			switch field_num {
+			case 1:
+				// dims - UNPACKED repeated field!
+				if dims == nil do dims = make([dynamic]i64, context.temp_allocator)
+				append(&dims, i64(val))
+
+			case 2:
+				// data_type
+				data_type = i32(val)
+			}
+
+		case 2:
+			// Length-delimited
+			length, new_offset := read_varint(tensor_bytes, offset) or_return
+			offset = new_offset
+			payload := tensor_bytes[offset:offset + int(length)]
+
+			switch field_num {
+			case 1:
+				// dims - PACKED repeated field
+				if dims == nil do dims = make([dynamic]i64, context.temp_allocator)
+
+				p_offset := 0
+				for p_offset < len(payload) {
+					dim, new_p_offset := read_varint(payload, p_offset) or_return
+					append(&dims, i64(dim))
+					p_offset = new_p_offset
+				}
+
+			case 8:
+				// name
+				name = string(payload)
+
+			case 9:
+				// raw_data
+				raw_data = payload
+			}
+
+			offset += int(length)
+
+		case 5:
+			// 32-bit
+			offset += 4
+		}
+	}
+
+	// Convert dims to shape (using uint as you specified)
+	shape := make([]uint, len(dims), context.temp_allocator)
+	for dim, i in dims do shape[i] = uint(dim)
+
+	// Allocate tensor
+	t = tensor.tensor_alloc(T, shape, owns_data = true, allocator = allocator, loc = loc)
+
+	// Convert based on ONNX data type
+	if len(raw_data) > 0 {
+		#partial switch ONNX_DataType(data_type) {
+		case .FLOAT:
+			// 1
+			src_data := mem.slice_data_cast([]f32, raw_data)
+			for src_val, i in src_data {
+				t.data[i] = T(src_val)
+			}
+
+		case .UINT8:
+			// 2
+			src_data := mem.slice_data_cast([]u8, raw_data)
+			for src_val, i in src_data {
+				t.data[i] = T(src_val)
+			}
+
+		case .INT8:
+			// 3
+			src_data := mem.slice_data_cast([]i8, raw_data)
+			for src_val, i in src_data {
+				t.data[i] = T(src_val)
+			}
+
+		case .INT32:
+			// 6
+			src_data := mem.slice_data_cast([]i32, raw_data)
+			for src_val, i in src_data {
+				t.data[i] = T(src_val)
+			}
+
+		case .INT64:
+			// 7
+			src_data := mem.slice_data_cast([]i64, raw_data)
+			for src_val, i in src_data {
+				t.data[i] = T(src_val)
+			}
+
+		case .FLOAT16:
+			// 10
+			src_data := mem.slice_data_cast([]f16, raw_data)
+			for src_val, i in src_data {
+				t.data[i] = T(src_val)
+			}
+
+		case .DOUBLE:
+			// 11
+			src_data := mem.slice_data_cast([]f64, raw_data)
+			for src_val, i in src_data {
+				t.data[i] = T(src_val)
+			}
+
+		case:
+			panic(fmt.tprintf("Unsupported ONNX data type %d for tensor %s", data_type, name))
+		}
+	} else {
+		panic(fmt.tprintf("Tensor %s has no raw_data", name))
+	}
+
+	fmt.println(name)
+
+	return t, nil
 }
