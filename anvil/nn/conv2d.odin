@@ -100,118 +100,18 @@ forward_conv2d :: proc(
 		)
 	}
 
-	out: ^tensor.Tensor(T)
-	if conv.groups == 1 {
-		out = tensor.conv2d_single(
-			x,
-			conv.w,
-			conv.stride,
-			conv.dilation,
-			conv.padding,
-			allocator,
-			loc,
-		)
-	} else {
-		out = tensor.conv2d_grouped(
-			x,
-			conv.w,
-			conv.groups,
-			conv.stride,
-			conv.dilation,
-			conv.padding,
-			allocator,
-			loc,
-		)
-	}
+	out := tensor.conv2d_xwb(
+		x,
+		conv.w,
+		conv.b,
+		stride = conv.stride,
+		dilation = conv.dilation,
+		padding = conv.padding,
+		groups = conv.groups,
+		allocator = allocator,
+		loc = loc,
+	)
 
-	// Add bias if present
-	if bias, has_bias := conv.b.?; has_bias {
-		conv_add_bias := trace.TRACE_SECTION("conv_add_bias")
-
-		batch_size := out.shape[0]
-		out_channels := out.shape[1]
-		spatial_size := out.shape[2] * out.shape[3]
-
-		#no_bounds_check when T == f32 {
-			for b in 0 ..< batch_size {
-				for c in 0 ..< out_channels {
-					base_idx := (b * out_channels + c) * spatial_size
-					bias_val := bias.data[c]
-
-					bias_vec4 := #simd[4]f32{bias_val, bias_val, bias_val, bias_val}
-					bias_vec8 := #simd[8]f32 {
-						bias_val,
-						bias_val,
-						bias_val,
-						bias_val,
-						bias_val,
-						bias_val,
-						bias_val,
-						bias_val,
-					}
-
-					i := uint(0)
-					for ; i + 8 <= spatial_size; i += 8 {
-						// First 4
-						vals0 := #simd[4]f32 {
-							out.data[base_idx + i],
-							out.data[base_idx + i + 1],
-							out.data[base_idx + i + 2],
-							out.data[base_idx + i + 3],
-						}
-						vals0 += bias_vec4
-						out.data[base_idx + i] = simd.extract(vals0, 0)
-						out.data[base_idx + i + 1] = simd.extract(vals0, 1)
-						out.data[base_idx + i + 2] = simd.extract(vals0, 2)
-						out.data[base_idx + i + 3] = simd.extract(vals0, 3)
-
-						// Next 4
-						vals1 := #simd[4]f32 {
-							out.data[base_idx + i + 4],
-							out.data[base_idx + i + 5],
-							out.data[base_idx + i + 6],
-							out.data[base_idx + i + 7],
-						}
-						vals1 += bias_vec4
-						out.data[base_idx + i + 4] = simd.extract(vals1, 0)
-						out.data[base_idx + i + 5] = simd.extract(vals1, 1)
-						out.data[base_idx + i + 6] = simd.extract(vals1, 2)
-						out.data[base_idx + i + 7] = simd.extract(vals1, 3)
-					}
-					for ; i + 4 <= spatial_size; i += 4 {
-						vals := #simd[4]f32 {
-							out.data[base_idx + i],
-							out.data[base_idx + i + 1],
-							out.data[base_idx + i + 2],
-							out.data[base_idx + i + 3],
-						}
-						vals += bias_vec4
-						out.data[base_idx + i] = simd.extract(vals, 0)
-						out.data[base_idx + i + 1] = simd.extract(vals, 1)
-						out.data[base_idx + i + 2] = simd.extract(vals, 2)
-						out.data[base_idx + i + 3] = simd.extract(vals, 3)
-					}
-					for ; i < spatial_size; i += 1 {
-						out.data[base_idx + i] += bias_val
-					}
-				}
-			}
-		} else {
-			// Scalar fallback
-			for b in 0 ..< batch_size {
-				for c in 0 ..< out_channels {
-					bias_val := bias.data[c]
-					base_idx := (b * out_channels + c) * spatial_size
-					for i in 0 ..< spatial_size {
-						out.data[base_idx + i] += bias_val
-					}
-				}
-			}
-		}
-
-		trace.end_scoped_trace(conv_add_bias)
-		return out
-	}
 	return out
 }
 

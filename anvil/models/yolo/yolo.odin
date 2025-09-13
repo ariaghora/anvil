@@ -322,15 +322,15 @@ forward_sppf :: proc(
 	xs := forward_conv_block(sppf.cv1, xs, context.temp_allocator)
 	xs2 := tensor.pad_with_zero(xs, 2, sppf.k / 2, sppf.k / 2, context.temp_allocator)
 	xs2 = tensor.pad_with_zero(xs2, 3, sppf.k / 2, sppf.k / 2, context.temp_allocator)
-	xs2 = tensor.max_pool_2d(xs2, sppf.k, 1, context.temp_allocator)
+	xs2 = tensor.max_pool_2d(xs2, sppf.k, 1, 0, context.temp_allocator)
 
 	xs3 := tensor.pad_with_zero(xs2, 2, sppf.k / 2, sppf.k / 2, context.temp_allocator)
 	xs3 = tensor.pad_with_zero(xs3, 3, sppf.k / 2, sppf.k / 2, context.temp_allocator)
-	xs3 = tensor.max_pool_2d(xs3, sppf.k, 1, context.temp_allocator)
+	xs3 = tensor.max_pool_2d(xs3, sppf.k, 1, 0, context.temp_allocator)
 
 	xs4 := tensor.pad_with_zero(xs3, 2, sppf.k / 2, sppf.k / 2, context.temp_allocator)
 	xs4 = tensor.pad_with_zero(xs4, 3, sppf.k / 2, sppf.k / 2, context.temp_allocator)
-	xs4 = tensor.max_pool_2d(xs4, sppf.k, 1, context.temp_allocator)
+	xs4 = tensor.max_pool_2d(xs4, sppf.k, 1, 0, context.temp_allocator)
 
 	xs_cat := tensor.cat([]^tensor.Tensor(T){xs, xs2, xs3, xs4}, 1, context.temp_allocator)
 	return forward_conv_block(sppf.cv2, xs_cat, allocator)

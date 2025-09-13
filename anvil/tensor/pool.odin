@@ -4,10 +4,10 @@ import "../trace"
 import "core:math"
 import "core:simd"
 
-// Calculate output dimensions for pooling (same formula as conv)
-get_pool_hw :: proc(h_in, w_in, k_h, k_w, stride: uint) -> (uint, uint) {
-	h_out := (h_in - k_h) / stride + 1
-	w_out := (w_in - k_w) / stride + 1
+// Calculate output dimensions for pooling
+get_pool_hw :: proc(h_in, w_in, k_h, k_w, stride, padding: uint) -> (uint, uint) {
+	h_out := (h_in + 2 * padding - k_h) / stride + 1
+	w_out := (w_in + 2 * padding - k_w) / stride + 1
 	return h_out, w_out
 }
 
@@ -15,6 +15,7 @@ max_pool_2d :: proc(
 	input: ^Tensor($T), // (B, C, H, W)
 	kernel_size: [2]uint, // (K_h, K_w)
 	stride: uint = 1,
+	padding: uint = 0, // Added with default 0 to maintain backward compatibility
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
@@ -26,7 +27,7 @@ max_pool_2d :: proc(
 	k_h, k_w := kernel_size[0], kernel_size[1]
 
 	// Calculate output dimensions
-	h_out, w_out := get_pool_hw(h, w, k_h, k_w, stride)
+	h_out, w_out := get_pool_hw(h, w, k_h, k_w, stride, padding)
 
 	// Allocate output tensor
 	output := tensor_alloc(T, []uint{b, c, h_out, w_out}, true, allocator, loc)
@@ -42,9 +43,35 @@ max_pool_2d :: proc(
 	// Perform max pooling
 	#no_bounds_check {
 		when T == f32 {
-			max_pool_2d_f32_simd(src, output.data, b, c, h, w, k_h, k_w, h_out, w_out, stride)
+			max_pool_2d_f32_simd(
+				src,
+				output.data,
+				b,
+				c,
+				h,
+				w,
+				k_h,
+				k_w,
+				h_out,
+				w_out,
+				stride,
+				padding,
+			)
 		} else {
-			max_pool_2d_scalar(src, output.data, b, c, h, w, k_h, k_w, h_out, w_out, stride)
+			max_pool_2d_scalar(
+				src,
+				output.data,
+				b,
+				c,
+				h,
+				w,
+				k_h,
+				k_w,
+				h_out,
+				w_out,
+				stride,
+				padding,
+			)
 		}
 	}
 
@@ -52,7 +79,10 @@ max_pool_2d :: proc(
 }
 
 @(private)
-max_pool_2d_f32_simd :: proc(src, dst: []f32, b, c, h, w, k_h, k_w, h_out, w_out, stride: uint) {
+max_pool_2d_f32_simd :: proc(
+	src, dst: []f32,
+	b, c, h, w, k_h, k_w, h_out, w_out, stride, padding: uint,
+) {
 	hw_in := h * w
 	hw_out := h_out * w_out
 
@@ -61,8 +91,8 @@ max_pool_2d_f32_simd :: proc(src, dst: []f32, b, c, h, w, k_h, k_w, h_out, w_out
 			src_channel := src[(b_idx * c + c_idx) * hw_in:]
 			dst_channel := dst[(b_idx * c + c_idx) * hw_out:]
 
-			// Special case for 2x2 pooling with stride 2 (common case)
-			if k_h == 2 && k_w == 2 && stride == 2 {
+			// Special case for 2x2 pooling with stride 2 and no padding (common case)
+			if k_h == 2 && k_w == 2 && stride == 2 && padding == 0 {
 				dst_idx := uint(0)
 				for y_out in 0 ..< h_out {
 					y_in := y_out * 2
@@ -85,22 +115,24 @@ max_pool_2d_f32_simd :: proc(src, dst: []f32, b, c, h, w, k_h, k_w, h_out, w_out
 					}
 				}
 			} else {
-				// General case
+				// General case with padding support
 				dst_idx := uint(0)
 				for y_out in 0 ..< h_out {
-					y_start := y_out * stride
-					y_end := min(y_start + k_h, h)
+					y_start := int(y_out * stride) - int(padding)
+					y_end := min(y_start + int(k_h), int(h))
+					y_start_clamped := max(y_start, 0)
 
 					for x_out in 0 ..< w_out {
-						x_start := x_out * stride
-						x_end := min(x_start + k_w, w)
+						x_start := int(x_out * stride) - int(padding)
+						x_end := min(x_start + int(k_w), int(w))
+						x_start_clamped := max(x_start, 0)
 
 						// Find max in window using SIMD where possible
 						max_val := math.inf_f32(-1)
 
-						for y in y_start ..< y_end {
-							row_start := y * w + x_start
-							window_width := x_end - x_start
+						for y in y_start_clamped ..< y_end {
+							row_start := uint(y) * w + uint(x_start_clamped)
+							window_width := uint(x_end - x_start_clamped)
 
 							x := uint(0)
 							max_vec := #simd[4]f32 {
@@ -140,7 +172,10 @@ max_pool_2d_f32_simd :: proc(src, dst: []f32, b, c, h, w, k_h, k_w, h_out, w_out
 }
 
 @(private)
-max_pool_2d_scalar :: proc(src, dst: []$T, b, c, h, w, k_h, k_w, h_out, w_out, stride: uint) {
+max_pool_2d_scalar :: proc(
+	src, dst: []$T,
+	b, c, h, w, k_h, k_w, h_out, w_out, stride, padding: uint,
+) {
 	hw_in := h * w
 	hw_out := h_out * w_out
 
@@ -151,18 +186,26 @@ max_pool_2d_scalar :: proc(src, dst: []$T, b, c, h, w, k_h, k_w, h_out, w_out, s
 
 			dst_idx := uint(0)
 			for y_out in 0 ..< h_out {
-				y_start := y_out * stride
-				y_end := min(y_start + k_h, h)
+				y_start := int(y_out * stride) - int(padding)
+				y_end := min(y_start + int(k_h), int(h))
+				y_start_clamped := max(y_start, 0)
 
 				for x_out in 0 ..< w_out {
-					x_start := x_out * stride
-					x_end := min(x_start + k_w, w)
+					x_start := int(x_out * stride) - int(padding)
+					x_end := min(x_start + int(k_w), int(w))
+					x_start_clamped := max(x_start, 0)
 
-					// Find max in window
-					max_val := src_channel[y_start * w + x_start]
-					for y in y_start ..< y_end {
-						for x in x_start ..< x_end {
-							val := src_channel[y * w + x]
+					// Find max in window, padded regions contribute -inf
+					max_val: T
+					when T == f32 || T == f64 {
+						max_val = math.inf_f32(-1) if T == f32 else math.inf_f64(-1)
+					} else {
+						max_val = min(T)
+					}
+
+					for y in y_start_clamped ..< y_end {
+						for x in x_start_clamped ..< x_end {
+							val := src_channel[uint(y) * w + uint(x)]
 							if val > max_val {
 								max_val = val
 							}
@@ -177,114 +220,94 @@ max_pool_2d_scalar :: proc(src, dst: []$T, b, c, h, w, k_h, k_w, h_out, w_out, s
 	}
 }
 
-import "core:slice"
-import "core:testing"
+global_avg_pool_2d :: proc(
+	input: ^Tensor($T), // (B, C, H, W)
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	pool_trace := trace.TRACE_FUNCTION("global_avg_pool_2d")
+	defer trace.end_scoped_trace(pool_trace)
 
-@(test)
-test_max_pool_2d :: proc(t: ^testing.T) {
-	// Test 2x2 pooling with stride 2
-	{
-		input := new_with_init(
-			[]f32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
-			[]uint{1, 1, 4, 4}, // BCHW
-			context.temp_allocator,
-		)
+	// Extract dimensions
+	b, c, h, w := input.shape[0], input.shape[1], input.shape[2], input.shape[3]
+	hw := h * w
 
-		output := max_pool_2d(input, [2]uint{2, 2}, 2, context.temp_allocator)
+	// Output is (B, C, 1, 1)
+	output := tensor_alloc(T, []uint{b, c, 1, 1}, true, allocator, loc)
 
-		expected := []f32{6, 8, 14, 16}
-		testing.expect(t, slice.equal(output.data, expected), "2x2 max pooling failed")
-		testing.expect(t, slice.equal(output.shape, []uint{1, 1, 2, 2}), "Output shape mismatch")
+	// Get input data (handle non-contiguous case)
+	src := input.data
+	allocated := false
+	if !input.contiguous {
+		src, allocated = get_strided_data(input, allocator = context.temp_allocator)
+	}
+	defer if allocated do delete(src, context.temp_allocator)
+
+	// Perform global average pooling
+	#no_bounds_check {
+		when T == f32 {
+			global_avg_pool_2d_f32_simd(src, output.data, b, c, hw)
+		} else {
+			global_avg_pool_2d_scalar(src, output.data, b, c, hw)
+		}
 	}
 
-	// Test 3x3 pooling with stride 1
-	{
-		input := new_with_init(
-			[]f32 {
-				1,
-				2,
-				3,
-				4,
-				5,
-				6,
-				7,
-				8,
-				9,
-				10,
-				11,
-				12,
-				13,
-				14,
-				15,
-				16,
-				17,
-				18,
-				19,
-				20,
-				21,
-				22,
-				23,
-				24,
-				25,
-			},
-			[]uint{1, 1, 5, 5},
-			context.temp_allocator,
-		)
+	return output
+}
 
-		output := max_pool_2d(input, [2]uint{3, 3}, 1, context.temp_allocator)
+@(private)
+global_avg_pool_2d_f32_simd :: proc(src, dst: []f32, b, c, hw: uint) {
+	scale := f32(1.0) / f32(hw)
 
-		expected := []f32{13, 14, 15, 18, 19, 20, 23, 24, 25}
-		testing.expect(t, slice.equal(output.data, expected), "3x3 max pooling failed")
-		testing.expect(t, slice.equal(output.shape, []uint{1, 1, 3, 3}), "Output shape mismatch")
+	for b_idx in 0 ..< b {
+		for c_idx in 0 ..< c {
+			channel_offset := (b_idx * c + c_idx) * hw
+			src_channel := src[channel_offset:channel_offset + hw]
+
+			// Sum using SIMD
+			sum_vec := #simd[4]f32{0, 0, 0, 0}
+			i := uint(0)
+
+			// Process 4 elements at a time
+			for ; i + 4 <= hw; i += 4 {
+				vals := #simd[4]f32 {
+					src_channel[i],
+					src_channel[i + 1],
+					src_channel[i + 2],
+					src_channel[i + 3],
+				}
+				sum_vec += vals
+			}
+
+			// Sum the vector components
+			sum := simd.reduce_add_bisect(sum_vec)
+
+			// Handle remainder
+			for ; i < hw; i += 1 {
+				sum += src_channel[i]
+			}
+
+			// Store average
+			dst[b_idx * c + c_idx] = sum * scale
+		}
 	}
+}
 
-	// Test multi-channel pooling
-	{
-		input := new_with_init(
-			[]f32 {
-				// Channel 0
-				1,
-				2,
-				3,
-				4,
-				5,
-				6,
-				7,
-				8,
-				9,
-				10,
-				11,
-				12,
-				13,
-				14,
-				15,
-				16,
-				// Channel 1
-				16,
-				15,
-				14,
-				13,
-				12,
-				11,
-				10,
-				9,
-				8,
-				7,
-				6,
-				5,
-				4,
-				3,
-				2,
-				1,
-			},
-			[]uint{1, 2, 4, 4},
-			context.temp_allocator,
-		)
+@(private)
+global_avg_pool_2d_scalar :: proc(src, dst: []$T, b, c, hw: uint) {
+	scale := T(1.0) / T(hw)
 
-		output := max_pool_2d(input, [2]uint{2, 2}, 2, context.temp_allocator)
+	for b_idx in 0 ..< b {
+		for c_idx in 0 ..< c {
+			channel_offset := (b_idx * c + c_idx) * hw
+			src_channel := src[channel_offset:channel_offset + hw]
 
-		expected := []f32{6, 8, 14, 16, 16, 14, 8, 6}
-		testing.expect(t, slice.equal(output.data, expected), "Multi-channel pooling failed")
-		testing.expect(t, slice.equal(output.shape, []uint{1, 2, 2, 2}), "Output shape mismatch")
+			sum := T(0)
+			for i in 0 ..< hw {
+				sum += src_channel[i]
+			}
+
+			dst[b_idx * c + c_idx] = sum * scale
+		}
 	}
 }

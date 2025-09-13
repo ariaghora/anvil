@@ -14,7 +14,7 @@ No Python. No gigabytes of dependencies. Just compiled code running models.
 > [!CAUTION]
 > This library is only tested on macOS (MacBook M1) and Ubuntu 22.04. It requires Accelerate framework on macOS and `openblas-dev` on Linux. 
 
-## Models
+## Safetensors Models
 
 ### Segment Anything Model (TinyViT-5M Backbone)
 
@@ -31,6 +31,15 @@ $ odin run examples/sam_raylib -o:speed
 ### YOLOv8 Object detection
 
 See `examples/yolo_simple`
+
+## ONNX Models
+> [!CAUTION]
+> Still at a very limited supported. Consult `anvil/onnx/execution.odin`'s `run` procedure for the currently supported ops. Yes, that large switch-case.
+
+### ResNet-50
+<p align="center">
+  <img width="90%" src="assets/resnet.png" />
+</p>
 
 ## Notes on Memory Management
 

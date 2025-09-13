@@ -1,4 +1,4 @@
-package matmul
+package matmul_backend
 
 import "core:slice"
 
