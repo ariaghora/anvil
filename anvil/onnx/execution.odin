@@ -64,6 +64,12 @@ run :: proc(model: ^ONNX($T), inputs: map[string]^tensor.Tensor(T)) -> ONNX_Erro
 	return nil
 }
 
+fetch_tensor :: proc(model: ^ONNX($T), name: string) -> (^tensor.Tensor(T), ONNX_Error) {
+	out, ok := model.graph.tensors[name]
+	if !ok do return nil, Value_Error{fmt.tprintf("Tensor `%s` is either not found or not computed yet. Have you run the model?", name)}
+	return out, nil
+}
+
 
 @(private, require_results)
 ensure_batched_image_shape :: proc(
