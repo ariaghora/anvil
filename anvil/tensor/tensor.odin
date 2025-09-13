@@ -915,6 +915,17 @@ matmul :: proc(
 	return result
 }
 
+gemm :: proc(
+	a, b: ^Tensor($T),
+	c: Maybe(^Tensor(T)),
+	alpha, beta: T,
+	trans_a, trans_b: bool,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	return nil
+}
+
 pad_with_zero :: proc(
 	x: ^Tensor($T),
 	dim, left, right: uint,
@@ -1666,7 +1677,7 @@ softmax_last_dim_inplace :: proc(t: ^Tensor($T)) {
 			}
 
 			// Reduce by SIMD
-			sum = simd.reduce_add_ordered(sum_vec)
+			sum = simd.reduce_add_bisect(sum_vec)
 			// Reduce remainders
 			for ; col < last_dim; col += 1 {
 				val := math.exp(row_data[col] - max_val)
@@ -1836,7 +1847,7 @@ softmax_inplace :: proc(t: ^Tensor($T), dim: uint) {
 			}
 
 			// Sum by SIMD
-			sum = simd.reduce_add_ordered(sum_vec)
+			sum = simd.reduce_add_bisect(sum_vec)
 			// Remainder
 			for ; i < dim_size; i += 1 {
 				idx := i * dim_stride

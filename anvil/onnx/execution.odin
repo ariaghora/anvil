@@ -14,7 +14,6 @@ run :: proc(model: ^ONNX($T), inputs: map[string]^tensor.Tensor(T)) -> ONNX_Erro
 	input_names := slice.map_keys(inputs, context.temp_allocator) or_return
 	orders := determine_execution_order(model.graph, input_names, context.temp_allocator)
 	for op_idx, i in orders {
-		fmt.printfln("%d/%d", i + 1, len(orders))
 		op := model.graph.nodes[op_idx]
 
 		// Sanity check for each inputs before node execution
@@ -50,6 +49,14 @@ run :: proc(model: ^ONNX($T), inputs: map[string]^tensor.Tensor(T)) -> ONNX_Erro
 				model.opset_version,
 				allocator,
 			) or_return
+		case "Add":
+			run_add(op, model, allocator) or_return
+		case "Flatten":
+			run_flatten(op, model, allocator) or_return
+		case "Gemm":
+			run_gemm(op, model, allocator) or_return
+		case "GlobalAveragePool":
+			run_global_average_pool(op, model, allocator) or_return
 		case:
 			return Unsupported_Op{op.op_type}
 		}
@@ -58,15 +65,22 @@ run :: proc(model: ^ONNX($T), inputs: map[string]^tensor.Tensor(T)) -> ONNX_Erro
 }
 
 
-@(private)
-ensure_batched_image_shape :: proc(x: ^tensor.Tensor($T), name, op_type: string, is_input: bool) {
-	ensure(
-		len(x.shape) == 4,
-		fmt.tprintf("Input for %s must be a 4D tensor, got %dD", op_type, len(x.shape)),
-	)
+@(private, require_results)
+ensure_batched_image_shape :: proc(
+	x: ^tensor.Tensor($T),
+	name, op_type: string,
+	is_input: bool,
+	loc := #caller_location,
+) -> ONNX_Error {
+	if len(x.shape) != 4 {
+		return Value_Error {
+			fmt.tprintf("Input for %s must be a 4D tensor, got %dD", op_type, len(x.shape)),
+		}
+	}
+	return nil
 }
 
-@(private)
+@(private, require_results)
 ensure_tensor_non_nil :: proc(
 	x: ^tensor.Tensor($T),
 	name, op_type: string,
@@ -297,7 +311,7 @@ run_max_pool :: proc(
 	err: ONNX_Error,
 ) {
 	x := graph.tensors[inputs[0]]
-	ensure_batched_image_shape(x, inputs[0], "MaxPool", true)
+	ensure_batched_image_shape(x, inputs[0], "MaxPool", true) or_return
 
 	auto_pad: string
 	output: ^tensor.Tensor(T)
@@ -335,5 +349,59 @@ run_max_pool :: proc(
 		return Unsupported_Opset{"Conv", opset}
 	}
 	graph.tensors[outputs[0]] = output
+	return
+}
+
+run_flatten :: proc(
+	op: ^Node($T),
+	model: ^ONNX(T),
+	allocator: runtime.Allocator,
+) -> (
+	err: ONNX_Error,
+) {
+	x := model.graph.tensors[op.inputs[0]]
+	axis := op.attributes["axis"].(i64) or_else 1
+	if axis < 0 do return Value_Error{"Flatten axis must be positive"}
+	model.graph.tensors[op.outputs[0]] = tensor.flatten(x, uint(axis), allocator)
+	return
+}
+run_gemm :: proc(
+	op: ^Node($T),
+	model: ^ONNX(T),
+	allocator: runtime.Allocator,
+) -> (
+	err: ONNX_Error,
+) {
+	x := model.graph.tensors[op.inputs[0]]
+	w := model.graph.tensors[op.inputs[1]]
+	b := model.graph.tensors[op.inputs[2]] or_else nil
+	if len(x.shape) != 2 || len(w.shape) != 2 do return Value_Error{"gemm requires both tensors have 2D"}
+	// model.graph.tensors[op.outputs[0]] = tensor.global_avg_pool_2d(x, allocator)
+	return
+}
+
+run_global_average_pool :: proc(
+	op: ^Node($T),
+	model: ^ONNX(T),
+	allocator: runtime.Allocator,
+) -> (
+	err: ONNX_Error,
+) {
+	x := model.graph.tensors[op.inputs[0]]
+	ensure_batched_image_shape(x, op.inputs[0], "GlobalAveragePool", true) or_return
+	model.graph.tensors[op.outputs[0]] = tensor.global_avg_pool_2d(x, allocator)
+	return
+}
+
+run_add :: proc(
+	op: ^Node($T),
+	model: ^ONNX(T),
+	allocator: runtime.Allocator,
+) -> (
+	err: ONNX_Error,
+) {
+	inputs, outputs := op.inputs, op.outputs
+	x, y := model.graph.tensors[inputs[0]], model.graph.tensors[inputs[1]]
+	model.graph.tensors[outputs[0]] = tensor.add(x, y, allocator)
 	return
 }

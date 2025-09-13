@@ -15,7 +15,7 @@ main :: proc() {
 
 	T :: f32
 	inputs := make(map[string]^tensor.Tensor(T), context.temp_allocator)
-	inputs["pixel_values"] = tensor.ones(T, {1, 3, 512, 512}, context.temp_allocator)
+	inputs["pixel_values"] = tensor.ones(T, {1, 3, 224, 224}, context.temp_allocator)
 	err_run := onnx.run(model, inputs)
 	ensure(err_run == nil, fmt.tprint(err_run))
 }

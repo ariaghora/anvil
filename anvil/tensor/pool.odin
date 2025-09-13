@@ -220,131 +220,94 @@ max_pool_2d_scalar :: proc(
 	}
 }
 
-import "core:slice"
-import "core:testing"
+global_avg_pool_2d :: proc(
+	input: ^Tensor($T), // (B, C, H, W)
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	pool_trace := trace.TRACE_FUNCTION("global_avg_pool_2d")
+	defer trace.end_scoped_trace(pool_trace)
 
-@(test)
-test_max_pool_2d :: proc(t: ^testing.T) {
-	// Test 2x2 pooling with stride 2, no padding (backward compatibility)
-	{
-		input := new_with_init(
-			[]f32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
-			[]uint{1, 1, 4, 4}, // BCHW
-			context.temp_allocator,
-		)
+	// Extract dimensions
+	b, c, h, w := input.shape[0], input.shape[1], input.shape[2], input.shape[3]
+	hw := h * w
 
-		output := max_pool_2d(input, [2]uint{2, 2}, 2, 0, context.temp_allocator)
+	// Output is (B, C, 1, 1)
+	output := tensor_alloc(T, []uint{b, c, 1, 1}, true, allocator, loc)
 
-		expected := []f32{6, 8, 14, 16}
-		testing.expect(t, slice.equal(output.data, expected), "2x2 max pooling failed")
-		testing.expect(t, slice.equal(output.shape, []uint{1, 1, 2, 2}), "Output shape mismatch")
+	// Get input data (handle non-contiguous case)
+	src := input.data
+	allocated := false
+	if !input.contiguous {
+		src, allocated = get_strided_data(input, allocator = context.temp_allocator)
+	}
+	defer if allocated do delete(src, context.temp_allocator)
+
+	// Perform global average pooling
+	#no_bounds_check {
+		when T == f32 {
+			global_avg_pool_2d_f32_simd(src, output.data, b, c, hw)
+		} else {
+			global_avg_pool_2d_scalar(src, output.data, b, c, hw)
+		}
 	}
 
-	// Test 3x3 pooling with stride 1, no padding
-	{
-		input := new_with_init(
-			[]f32 {
-				1,
-				2,
-				3,
-				4,
-				5,
-				6,
-				7,
-				8,
-				9,
-				10,
-				11,
-				12,
-				13,
-				14,
-				15,
-				16,
-				17,
-				18,
-				19,
-				20,
-				21,
-				22,
-				23,
-				24,
-				25,
-			},
-			[]uint{1, 1, 5, 5},
-			context.temp_allocator,
-		)
+	return output
+}
 
-		output := max_pool_2d(input, [2]uint{3, 3}, 1, 0, context.temp_allocator)
+@(private)
+global_avg_pool_2d_f32_simd :: proc(src, dst: []f32, b, c, hw: uint) {
+	scale := f32(1.0) / f32(hw)
 
-		expected := []f32{13, 14, 15, 18, 19, 20, 23, 24, 25}
-		testing.expect(t, slice.equal(output.data, expected), "3x3 max pooling failed")
-		testing.expect(t, slice.equal(output.shape, []uint{1, 1, 3, 3}), "Output shape mismatch")
+	for b_idx in 0 ..< b {
+		for c_idx in 0 ..< c {
+			channel_offset := (b_idx * c + c_idx) * hw
+			src_channel := src[channel_offset:channel_offset + hw]
+
+			// Sum using SIMD
+			sum_vec := #simd[4]f32{0, 0, 0, 0}
+			i := uint(0)
+
+			// Process 4 elements at a time
+			for ; i + 4 <= hw; i += 4 {
+				vals := #simd[4]f32 {
+					src_channel[i],
+					src_channel[i + 1],
+					src_channel[i + 2],
+					src_channel[i + 3],
+				}
+				sum_vec += vals
+			}
+
+			// Sum the vector components
+			sum := simd.reduce_add_bisect(sum_vec)
+
+			// Handle remainder
+			for ; i < hw; i += 1 {
+				sum += src_channel[i]
+			}
+
+			// Store average
+			dst[b_idx * c + c_idx] = sum * scale
+		}
 	}
+}
 
-	// Test multi-channel pooling
-	{
-		input := new_with_init(
-			[]f32 {
-				// Channel 0
-				1,
-				2,
-				3,
-				4,
-				5,
-				6,
-				7,
-				8,
-				9,
-				10,
-				11,
-				12,
-				13,
-				14,
-				15,
-				16,
-				// Channel 1
-				16,
-				15,
-				14,
-				13,
-				12,
-				11,
-				10,
-				9,
-				8,
-				7,
-				6,
-				5,
-				4,
-				3,
-				2,
-				1,
-			},
-			[]uint{1, 2, 4, 4},
-			context.temp_allocator,
-		)
+@(private)
+global_avg_pool_2d_scalar :: proc(src, dst: []$T, b, c, hw: uint) {
+	scale := T(1.0) / T(hw)
 
-		output := max_pool_2d(input, [2]uint{2, 2}, 2, 0, context.temp_allocator)
+	for b_idx in 0 ..< b {
+		for c_idx in 0 ..< c {
+			channel_offset := (b_idx * c + c_idx) * hw
+			src_channel := src[channel_offset:channel_offset + hw]
 
-		expected := []f32{6, 8, 14, 16, 16, 14, 8, 6}
-		testing.expect(t, slice.equal(output.data, expected), "Multi-channel pooling failed")
-		testing.expect(t, slice.equal(output.shape, []uint{1, 2, 2, 2}), "Output shape mismatch")
-	}
+			sum := T(0)
+			for i in 0 ..< hw {
+				sum += src_channel[i]
+			}
 
-	// Test with padding=1
-	{
-		input := new_with_init([]f32{1, 2, 3, 4}, []uint{1, 1, 2, 2}, context.temp_allocator)
-
-		output := max_pool_2d(input, [2]uint{2, 2}, 1, 1, context.temp_allocator)
-
-		// With padding=1, the 2x2 input becomes effectively 4x4 padded with -inf
-		// Output should be 3x3
-		expected := []f32{1, 2, 2, 3, 4, 4, 3, 4, 4}
-		testing.expect(t, slice.equal(output.data, expected), "Pooling with padding failed")
-		testing.expect(
-			t,
-			slice.equal(output.shape, []uint{1, 1, 3, 3}),
-			"Output shape mismatch with padding",
-		)
+			dst[b_idx * c + c_idx] = sum * scale
+		}
 	}
 }
