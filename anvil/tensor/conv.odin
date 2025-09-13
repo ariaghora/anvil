@@ -2,6 +2,7 @@ package tensor
 
 import "../tensor"
 import "../trace"
+import "base:runtime"
 import "core:fmt"
 import "core:os"
 import "core:simd"
@@ -1263,80 +1264,30 @@ reshape_bhwc_to_bchw :: proc(
 					c := uint(0)
 					for ; c + 4 <= channels; c += 4 {
 						// Load 4x4 block: 4 spatial × 4 channels
-						row0 := #simd[4]f32 {
-							src_batch[src_base + c],
-							src_batch[src_base + c + 1],
-							src_batch[src_base + c + 2],
-							src_batch[src_base + c + 3],
-						}
-						row1 := #simd[4]f32 {
-							src_batch[src_base + channels + c],
-							src_batch[src_base + channels + c + 1],
-							src_batch[src_base + channels + c + 2],
-							src_batch[src_base + channels + c + 3],
-						}
-						row2 := #simd[4]f32 {
-							src_batch[src_base + 2 * channels + c],
-							src_batch[src_base + 2 * channels + c + 1],
-							src_batch[src_base + 2 * channels + c + 2],
-							src_batch[src_base + 2 * channels + c + 3],
-						}
-						row3 := #simd[4]f32 {
-							src_batch[src_base + 3 * channels + c],
-							src_batch[src_base + 3 * channels + c + 1],
-							src_batch[src_base + 3 * channels + c + 2],
-							src_batch[src_base + 3 * channels + c + 3],
-						}
+						// These are already consecutive, so use SIMD loads
+						row0 := (^#simd[4]f32)(&src_batch[src_base + c])^
+						row1 := (^#simd[4]f32)(&src_batch[src_base + channels + c])^
+						row2 := (^#simd[4]f32)(&src_batch[src_base + 2 * channels + c])^
+						row3 := (^#simd[4]f32)(&src_batch[src_base + 3 * channels + c])^
 
-						// Transpose and store: each channel gets 4 spatial values
-						dst_c0 := #simd[4]f32 {
-							simd.extract(row0, 0),
-							simd.extract(row1, 0),
-							simd.extract(row2, 0),
-							simd.extract(row3, 0),
-						}
-						dst_c1 := #simd[4]f32 {
-							simd.extract(row0, 1),
-							simd.extract(row1, 1),
-							simd.extract(row2, 1),
-							simd.extract(row3, 1),
-						}
-						dst_c2 := #simd[4]f32 {
-							simd.extract(row0, 2),
-							simd.extract(row1, 2),
-							simd.extract(row2, 2),
-							simd.extract(row3, 2),
-						}
-						dst_c3 := #simd[4]f32 {
-							simd.extract(row0, 3),
-							simd.extract(row1, 3),
-							simd.extract(row2, 3),
-							simd.extract(row3, 3),
-						}
+						// Transpose 4x4 matrix using shuffles
+						// Step 1: Interleave pairs
+						tmp0 := simd.shuffle(row0, row1, 0, 1, 4, 5) // [r0[0], r0[1], r1[0], r1[1]]
+						tmp1 := simd.shuffle(row0, row1, 2, 3, 6, 7) // [r0[2], r0[3], r1[2], r1[3]]
+						tmp2 := simd.shuffle(row2, row3, 0, 1, 4, 5) // [r2[0], r2[1], r3[0], r3[1]]
+						tmp3 := simd.shuffle(row2, row3, 2, 3, 6, 7) // [r2[2], r2[3], r3[2], r3[3]]
 
-						// dst_c0
-						dst_batch[c * hw + hw_idx] = simd.extract(dst_c0, 0)
-						dst_batch[c * hw + hw_idx + 1] = simd.extract(dst_c0, 1)
-						dst_batch[c * hw + hw_idx + 2] = simd.extract(dst_c0, 2)
-						dst_batch[c * hw + hw_idx + 3] = simd.extract(dst_c0, 3)
+						// Step 2: Final shuffle to get transposed vectors
+						dst_c0 := simd.shuffle(tmp0, tmp2, 0, 2, 4, 6) // All channel 0s
+						dst_c1 := simd.shuffle(tmp0, tmp2, 1, 3, 5, 7) // All channel 1s
+						dst_c2 := simd.shuffle(tmp1, tmp3, 0, 2, 4, 6) // All channel 2s
+						dst_c3 := simd.shuffle(tmp1, tmp3, 1, 3, 5, 7) // All channel 3s
 
-						// dst_c1
-						dst_batch[(c + 1) * hw + hw_idx] = simd.extract(dst_c1, 0)
-						dst_batch[(c + 1) * hw + hw_idx + 1] = simd.extract(dst_c1, 1)
-						dst_batch[(c + 1) * hw + hw_idx + 2] = simd.extract(dst_c1, 2)
-						dst_batch[(c + 1) * hw + hw_idx + 3] = simd.extract(dst_c1, 3)
-
-						// dst_c2
-						dst_batch[(c + 2) * hw + hw_idx] = simd.extract(dst_c2, 0)
-						dst_batch[(c + 2) * hw + hw_idx + 1] = simd.extract(dst_c2, 1)
-						dst_batch[(c + 2) * hw + hw_idx + 2] = simd.extract(dst_c2, 2)
-						dst_batch[(c + 2) * hw + hw_idx + 3] = simd.extract(dst_c2, 3)
-
-						// dst_c3
-						dst_batch[(c + 3) * hw + hw_idx] = simd.extract(dst_c3, 0)
-						dst_batch[(c + 3) * hw + hw_idx + 1] = simd.extract(dst_c3, 1)
-						dst_batch[(c + 3) * hw + hw_idx + 2] = simd.extract(dst_c3, 2)
-						dst_batch[(c + 3) * hw + hw_idx + 3] = simd.extract(dst_c3, 3)
+						// SIMD stores - 4 consecutive values each
+						(^#simd[4]f32)(&dst_batch[c * hw + hw_idx])^ = dst_c0
+						(^#simd[4]f32)(&dst_batch[(c + 1) * hw + hw_idx])^ = dst_c1
+						(^#simd[4]f32)(&dst_batch[(c + 2) * hw + hw_idx])^ = dst_c2
+						(^#simd[4]f32)(&dst_batch[(c + 3) * hw + hw_idx])^ = dst_c3
 					}
 
 					// Handle remainder channels
@@ -1347,10 +1298,7 @@ reshape_bhwc_to_bchw :: proc(
 							src_batch[src_base + 2 * channels + c],
 							src_batch[src_base + 3 * channels + c],
 						}
-						dst_batch[c * hw + hw_idx] = simd.extract(vals, 0)
-						dst_batch[c * hw + hw_idx + 1] = simd.extract(vals, 1)
-						dst_batch[c * hw + hw_idx + 2] = simd.extract(vals, 2)
-						dst_batch[c * hw + hw_idx + 3] = simd.extract(vals, 3)
+						(^#simd[4]f32)(&dst_batch[c * hw + hw_idx])^ = vals
 					}
 				}
 
@@ -1367,6 +1315,8 @@ reshape_bhwc_to_bchw :: proc(
 							src_batch[src_offset + c + 3],
 						}
 
+						// Destinations are NOT consecutive (strided by hw),
+						// so we're stuck with scalar stores  ¯\_(ツ)_/¯
 						dst_batch[c * hw + hw_idx] = simd.extract(vals, 0)
 						dst_batch[(c + 1) * hw + hw_idx] = simd.extract(vals, 1)
 						dst_batch[(c + 2) * hw + hw_idx] = simd.extract(vals, 2)
