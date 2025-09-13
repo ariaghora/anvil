@@ -1,7 +1,7 @@
 package tensor
 
 
-import "../matmul"
+import "../matmul_backend"
 import "../trace"
 import "base:intrinsics"
 import "core:fmt"
@@ -909,7 +909,7 @@ matmul :: proc(
 		matrix_size_result]
 
 		// Perform 2D matrix multiplication using BLAS
-		matmul.matmul_2d(a_matrix, b_matrix, a_m, b_n, a_k, result_matrix, allocator)
+		matmul_backend.matmul_2d(a_matrix, b_matrix, a_m, b_n, a_k, result_matrix, allocator)
 	}
 
 	return result
@@ -923,7 +923,49 @@ gemm :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
-	return nil
+	ensure(len(a.shape) == 2 && len(b.shape) == 2, "both inputs for gemm must be 2D tensors")
+	a := trans_a ? transpose(a, 0, 1, context.temp_allocator) : a
+	b := trans_b ? transpose(b, 0, 1, context.temp_allocator) : b
+
+	res := matmul(a, b, allocator)
+	if alpha != T(1) {
+		for _, i in res.data do res.data[i] *= alpha
+	}
+
+	// Add bias in-place
+	if bias, has_bias := c.?; has_bias {
+		out_features := res.shape[len(res.shape) - 1]
+		total_elements := shape_to_size(res.shape)
+		batch_elements := total_elements / out_features
+
+		#no_bounds_check {
+			when T == f32 {
+				for i in 0 ..< batch_elements {
+					base_idx := i * out_features
+					j := uint(0)
+
+					for ; j + 4 <= out_features; j += 4 {
+						b := (^#simd[4]f32)(&bias.data[j])^
+						o := (^#simd[4]f32)(&res.data[base_idx + j])^
+						(^#simd[4]f32)(&res.data[base_idx + j])^ = o + b
+					}
+
+					for ; j < out_features; j += 1 {
+						res.data[base_idx + j] += bias.data[j]
+					}
+				}
+			} else {
+				// Scalar fallback
+				for i in 0 ..< batch_elements {
+					base_idx := i * out_features
+					for j in 0 ..< out_features {
+						res.data[base_idx + j] += bias.data[j]
+					}
+				}
+			}
+		}
+	}
+	return res
 }
 
 pad_with_zero :: proc(

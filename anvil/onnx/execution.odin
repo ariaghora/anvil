@@ -374,9 +374,18 @@ run_gemm :: proc(
 ) {
 	x := model.graph.tensors[op.inputs[0]]
 	w := model.graph.tensors[op.inputs[1]]
-	b := model.graph.tensors[op.inputs[2]] or_else nil
 	if len(x.shape) != 2 || len(w.shape) != 2 do return Value_Error{"gemm requires both tensors have 2D"}
-	// model.graph.tensors[op.outputs[0]] = tensor.global_avg_pool_2d(x, allocator)
+	bias: Maybe(^tensor.Tensor(T)) = nil
+
+	if len(op.inputs) > 2 do bias = model.graph.tensors[op.inputs[2]]
+	alpha := op.attributes["alpha"].(f32) or_else 1.0
+	beta := op.attributes["beta"].(f32) or_else 1.0
+	trans_a := (op.attributes["transA"].(i64) or_else 0) == 1
+	trans_b := (op.attributes["transB"].(i64) or_else 0) == 1
+
+	output := tensor.gemm(x, w, bias, alpha, beta, trans_a, trans_b, allocator)
+	model.graph.tensors[op.outputs[0]] = output
+
 	return
 }
 
