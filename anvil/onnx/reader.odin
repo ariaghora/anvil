@@ -3,6 +3,7 @@
 package onnx
 
 import "../tensor"
+import "base:runtime"
 import "core:fmt"
 import "core:mem"
 import "core:os"
@@ -16,12 +17,18 @@ ONNX_Format_Error :: struct {
 	msg: string,
 }
 
+Unsupported_Op :: struct {
+	msg: string,
+}
+
 Truncated_Data :: struct {}
 
 ONNX_Error :: union {
+	runtime.Allocator_Error,
 	IO_Error,
 	ONNX_Format_Error,
 	Truncated_Data,
+	Unsupported_Op,
 }
 
 ONNX :: struct($T: typeid) {
