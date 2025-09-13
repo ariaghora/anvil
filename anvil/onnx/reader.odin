@@ -21,7 +21,25 @@ Unsupported_Op :: struct {
 	msg: string,
 }
 
+Unsupported_Opset :: struct {
+	op_name: string,
+	opset:   i64,
+}
+
+Unsupported_Attribute :: struct {
+	op_name, attribute_name, attribute_value_as_string: string,
+	opset:                                              i64,
+}
+
+Malformed_Attribute :: struct {
+	msg: string,
+}
+
 Truncated_Data :: struct {}
+
+Value_Error :: struct {
+	msg: string,
+}
 
 ONNX_Error :: union {
 	runtime.Allocator_Error,
@@ -29,6 +47,10 @@ ONNX_Error :: union {
 	ONNX_Format_Error,
 	Truncated_Data,
 	Unsupported_Op,
+	Unsupported_Opset,
+	Unsupported_Attribute,
+	Malformed_Attribute,
+	Value_Error,
 }
 
 ONNX :: struct($T: typeid) {
@@ -37,14 +59,15 @@ ONNX :: struct($T: typeid) {
 	producer_version: string,
 	raw_bytes:        []u8,
 	graph:            ^Graph(T),
+	allocator:        runtime.Allocator,
 }
 
 Attribute :: union($T: typeid) {
 	i64,
 	f32,
 	string,
-	[dynamic]i64,
-	[dynamic]f32,
+	[]i64,
+	[]f32,
 	^tensor.Tensor(T),
 }
 
@@ -84,15 +107,15 @@ ONNX_DataType :: enum i32 {
 Node :: struct($T: typeid) {
 	op_type:    string,
 	name:       string,
-	inputs:     [dynamic]string,
-	outputs:    [dynamic]string,
+	inputs:     []string,
+	outputs:    []string,
 	attributes: map[string]Attribute(T),
 }
 
 Graph :: struct($T: typeid) {
-	raw_bytes:    []u8, // This is ONLY A REFERENCE to the original bytes
-	nodes:        [dynamic]^Node(T),
-	initializers: map[string]^tensor.Tensor(T),
+	raw_bytes: []u8, // This is ONLY A REFERENCE to the original bytes
+	nodes:     [dynamic]^Node(T),
+	tensors:   map[string]^tensor.Tensor(T), // To store initializers AND calculated inputs and outputs
 }
 
 read_from_file :: proc(
@@ -182,6 +205,7 @@ read_from_bytes :: proc(
 				producer_version = producer_version,
 				graph = graph,
 				opset_version = opset_version,
+				allocator = allocator,
 			},
 			allocator,
 		),
@@ -280,7 +304,7 @@ parse_graph :: proc(
 		}
 	}
 	graph = new_clone(
-		Graph(T){raw_bytes = graph_bytes, nodes = nodes, initializers = initializers},
+		Graph(T){raw_bytes = graph_bytes, nodes = nodes, tensors = initializers},
 		allocator,
 	)
 
@@ -371,8 +395,8 @@ parse_node :: proc(
 		Node(T) {
 			op_type = op_type,
 			name = name,
-			inputs = inputs,
-			outputs = outputs,
+			inputs = inputs[:],
+			outputs = outputs[:],
 			attributes = attributes,
 		},
 		allocator,
@@ -457,7 +481,7 @@ parse_attribute :: proc(
 					append(&ints, i64(val))
 					p_offset = new_p_offset
 				}
-				value = ints
+				value = ints[:]
 			case:
 				fmt.panicf(
 					"attribute of wire_type %d field_num %d not supported yet",
@@ -479,7 +503,7 @@ parse_attribute :: proc(
 
 	// If we collected unpacked repeated values, use them
 	if len(ints_list) > 0 {
-		value = ints_list
+		value = ints_list[:]
 	}
 
 	return name, value, nil

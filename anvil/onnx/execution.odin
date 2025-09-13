@@ -1,30 +1,55 @@
 package onnx
 
 import "../tensor"
+import "base:runtime"
 import "core:fmt"
 import "core:slice"
 
-run :: proc(
-	model: ^ONNX($T),
-	inputs: map[string]^tensor.Tensor(T),
-	allocator := context.allocator,
-) -> ONNX_Error {
+run :: proc(model: ^ONNX($T), inputs: map[string]^tensor.Tensor(T)) -> ONNX_Error {
+	allocator := model.allocator
+
 	// set inputs to the models
-	for k, v in inputs do model.graph.initializers[k] = v
+	for k, v in inputs do model.graph.tensors[k] = v
 
 	input_names := slice.map_keys(inputs, context.temp_allocator) or_return
-	orders := determine_execution_order(model.graph, input_names, allocator)
-	for op_idx in orders {
+	orders := determine_execution_order(model.graph, input_names, context.temp_allocator)
+	for op_idx, i in orders {
+		fmt.printfln("%d/%d", i + 1, len(orders))
 		op := model.graph.nodes[op_idx]
 
 		// Sanity check for each inputs before node execution
-		for iname in input_names {
-			ensure_tensor_non_nil(model.graph.initializers[iname], iname, op.op_type, true)
+		for iname in op.inputs {
+			ensure_tensor_non_nil(model.graph.tensors[iname], iname, op.op_type, true) or_return
 		}
 
 		switch op.op_type {
 		case "Conv":
-			run_conv(op.inputs[:], op.outputs[:], model.graph, model.opset_version) or_return
+			run_conv(
+				op.inputs[:],
+				op.outputs[:],
+				op.attributes,
+				model.graph,
+				model.opset_version,
+				allocator,
+			) or_return
+		case "Relu":
+			run_relu(
+				op.inputs[:],
+				op.outputs[:],
+				op.attributes,
+				model.graph,
+				model.opset_version,
+				allocator,
+			) or_return
+		case "MaxPool":
+			run_max_pool(
+				op.inputs[:],
+				op.outputs[:],
+				op.attributes,
+				model.graph,
+				model.opset_version,
+				allocator,
+			) or_return
 		case:
 			return Unsupported_Op{op.op_type}
 		}
@@ -32,28 +57,6 @@ run :: proc(
 	return nil
 }
 
-run_conv :: proc(
-	inputs, outputs: []string,
-	graph: ^Graph($T),
-	opset: i64,
-	allocator := context.allocator,
-) -> (
-	err: ONNX_Error,
-) {
-	x := graph.initializers[inputs[0]]
-	ensure(
-		len(x.shape) == 4,
-		fmt.tprintf(
-			"Conv only supports 2D convolutions. Expected input dimension is 4, got $d",
-			len(x.shape),
-		),
-	)
-	ensure_batched_image_shape(x, inputs[0], "Conv", is_input = true)
-	w := graph.initializers[inputs[1]]
-	b := graph.initializers[inputs[2]] or_else nil
-
-	return
-}
 
 @(private)
 ensure_batched_image_shape :: proc(x: ^tensor.Tensor($T), name, op_type: string, is_input: bool) {
@@ -64,16 +67,22 @@ ensure_batched_image_shape :: proc(x: ^tensor.Tensor($T), name, op_type: string,
 }
 
 @(private)
-ensure_tensor_non_nil :: proc(x: ^tensor.Tensor($T), name, op_type: string, is_input: bool) {
-	ensure(
-		x != nil,
-		fmt.tprintfln(
-			"The %s %s, `%s`, is nil",
-			op_type,
-			is_input ? "input for" : "output of",
-			name,
-		),
-	)
+ensure_tensor_non_nil :: proc(
+	x: ^tensor.Tensor($T),
+	name, op_type: string,
+	is_input: bool,
+) -> ONNX_Error {
+	if x == nil {
+		return Value_Error {
+			fmt.tprintfln(
+				"The %s %s, `%s`, is nil",
+				is_input ? "input for" : "output of",
+				op_type,
+				name,
+			),
+		}
+	}
+	return nil
 }
 
 @(private = "file")
@@ -85,7 +94,7 @@ determine_execution_order :: proc(
 	ready_tensors := make(map[string]bool, allocator)
 
 	// Mark initializers as ready
-	for name, _ in graph.initializers {
+	for name, _ in graph.tensors {
 		ready_tensors[name] = true
 	}
 
@@ -107,7 +116,7 @@ determine_execution_order :: proc(
 	for node in graph.nodes {
 		for input in node.inputs {
 			if input == "" do continue
-			_, is_init := graph.initializers[input]
+			_, is_init := graph.tensors[input]
 			_, is_produced := tensor_producers[input]
 			_, is_provided := ready_tensors[input]
 
@@ -191,4 +200,140 @@ determine_execution_order :: proc(
 	}
 
 	return execution_order[:]
+}
+
+run_conv :: proc(
+	inputs, outputs: []string,
+	attributes: map[string]Attribute($T),
+	graph: ^Graph(T),
+	opset: i64,
+	allocator: runtime.Allocator,
+) -> (
+	err: ONNX_Error,
+) {
+	x := graph.tensors[inputs[0]]
+	ensure(
+		len(x.shape) == 4,
+		fmt.tprintf(
+			"Conv only supports 2D convolutions. Expected input dimension is 4, got $d",
+			len(x.shape),
+		),
+	)
+
+	w := graph.tensors[inputs[1]]
+	b := graph.tensors[inputs[2]] or_else nil
+	auto_pad: string
+	dilations, kernel_shape, pads, strides: []i64
+	groups: uint
+
+	output: ^tensor.Tensor(T)
+
+	if opset < 1 {
+		return Unsupported_Opset{"Conv", opset}
+	} else if opset <= 22 {
+		auto_pad = attributes["auto_pad"].(string) or_else "NOTSET"
+		if auto_pad != "NOTSET" do return Unsupported_Attribute{"Conv", "auto_pad", auto_pad, opset}
+
+		dilations = attributes["dilations"].([]i64) or_else {1}
+		if !slice.all_of(dilations, dilations[0]) do return Malformed_Attribute{"Conv only support symmetrical dilations"}
+
+		pads = attributes["pads"].([]i64) or_else {0}
+		if !slice.all_of(pads, pads[0]) do return Malformed_Attribute{"Conv only support symmetrical paddings"}
+
+		strides = attributes["strides"].([]i64) or_else {1}
+		if !slice.all_of(strides, strides[0]) do return Malformed_Attribute{"Conv only support symmetrical strides"}
+
+		// Kernel shape is omitted since we don't use it directly and can just infer from
+		// the kernel tensor itself.
+		// kernel_shape = ...
+
+		// ensure(slice.all_of(dilations, dilations[0]), "Conv only support symmetrical dilations")
+		stride := uint(strides[0])
+		dilation := uint(dilations[0])
+		padding := uint(pads[0])
+		groups = uint(attributes["group"].(i64) or_else 1)
+
+		// Current implementation
+		output = tensor.conv2d_xwb(
+			x,
+			w,
+			b,
+			stride = stride,
+			dilation = dilation,
+			padding = padding,
+			groups = groups,
+			allocator = allocator,
+		)
+	} else {
+		return Unsupported_Opset{"Conv", opset}
+	}
+
+	graph.tensors[outputs[0]] = output
+
+	return
+}
+
+run_relu :: proc(
+	inputs, outputs: []string,
+	attributes: map[string]Attribute($T),
+	graph: ^Graph(T),
+	opset: i64,
+	allocator: runtime.Allocator,
+) -> (
+	err: ONNX_Error,
+) {
+	x := graph.tensors[inputs[0]]
+	graph.tensors[outputs[0]] = tensor.relu(x, allocator)
+	return
+}
+
+run_max_pool :: proc(
+	inputs, outputs: []string,
+	attributes: map[string]Attribute($T),
+	graph: ^Graph(T),
+	opset: i64,
+	allocator: runtime.Allocator,
+) -> (
+	err: ONNX_Error,
+) {
+	x := graph.tensors[inputs[0]]
+	ensure_batched_image_shape(x, inputs[0], "MaxPool", true)
+
+	auto_pad: string
+	output: ^tensor.Tensor(T)
+	dilations, kernel_shape, pads, strides: []i64
+	if opset < 1 {
+		return Unsupported_Opset{"Conv", opset}
+	} else if opset <= 22 {
+		auto_pad = attributes["auto_pad"].(string) or_else "NOTSET"
+		if auto_pad != "NOTSET" do return Unsupported_Attribute{"Conv", "auto_pad", auto_pad, opset}
+
+		ceil_mode := attributes["ceil_mode"].(i64) or_else 0
+		if ceil_mode != 0 do return Value_Error{"nonzero ceil_mode for MaxPool is not supported"}
+
+		dilations = attributes["dilations"].([]i64) or_else {1}
+		if !slice.all_of(dilations, dilations[0]) do return Malformed_Attribute{"Conv only support symmetrical dilations"}
+
+		pads = attributes["pads"].([]i64) or_else {0}
+		if !slice.all_of(pads, pads[0]) do return Malformed_Attribute{"Conv only support symmetrical paddings"}
+
+		strides = attributes["strides"].([]i64) or_else {1}
+		if !slice.all_of(strides, strides[0]) do return Malformed_Attribute{"Conv only support symmetrical strides"}
+
+		kernel_size := attributes["kernel_shape"].([]i64)
+		kernel_size_uint := [2]uint{uint(kernel_size[0]), uint(kernel_size[1])}
+
+		// ensure(slice.all_of(dilations, dilations[0]), "Conv only support symmetrical dilations")
+		stride := uint(strides[0])
+		dilation := uint(dilations[0])
+		if dilation != 1 do return Malformed_Attribute{"MaxPool Opset 11 can only support dilation of 1"}
+		padding := uint(pads[0])
+
+		// Current implementation
+		output = tensor.max_pool_2d(x, kernel_size_uint, stride, padding, allocator = allocator)
+	} else {
+		return Unsupported_Opset{"Conv", opset}
+	}
+	graph.tensors[outputs[0]] = output
+	return
 }
