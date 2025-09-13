@@ -167,29 +167,10 @@ im2col_fast_1x1 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
 						}
 
 						// Store 4 rows of 4 channels each
-						// row0
-						dst_b[dst_base + c_idx] = simd.extract(row0, 0)
-						dst_b[dst_base + c_idx + 1] = simd.extract(row0, 1)
-						dst_b[dst_base + c_idx + 2] = simd.extract(row0, 2)
-						dst_b[dst_base + c_idx + 3] = simd.extract(row0, 3)
-
-						// row1
-						dst_b[dst_base + c + c_idx] = simd.extract(row1, 0)
-						dst_b[dst_base + c + c_idx + 1] = simd.extract(row1, 1)
-						dst_b[dst_base + c + c_idx + 2] = simd.extract(row1, 2)
-						dst_b[dst_base + c + c_idx + 3] = simd.extract(row1, 3)
-
-						// row2
-						dst_b[dst_base + 2 * c + c_idx] = simd.extract(row2, 0)
-						dst_b[dst_base + 2 * c + c_idx + 1] = simd.extract(row2, 1)
-						dst_b[dst_base + 2 * c + c_idx + 2] = simd.extract(row2, 2)
-						dst_b[dst_base + 2 * c + c_idx + 3] = simd.extract(row2, 3)
-
-						// row3
-						dst_b[dst_base + 3 * c + c_idx] = simd.extract(row3, 0)
-						dst_b[dst_base + 3 * c + c_idx + 1] = simd.extract(row3, 1)
-						dst_b[dst_base + 3 * c + c_idx + 2] = simd.extract(row3, 2)
-						dst_b[dst_base + 3 * c + c_idx + 3] = simd.extract(row3, 3)
+						(^#simd[4]f32)(&dst_b[dst_base + 0 * c + c_idx])^ = row0
+						(^#simd[4]f32)(&dst_b[dst_base + 1 * c + c_idx])^ = row1
+						(^#simd[4]f32)(&dst_b[dst_base + 2 * c + c_idx])^ = row2
+						(^#simd[4]f32)(&dst_b[dst_base + 3 * c + c_idx])^ = row3
 					}
 
 					// Handle remainder channels for these 4 spatial positions

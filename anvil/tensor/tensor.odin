@@ -1,5 +1,6 @@
 package tensor
 
+import "base:runtime"
 
 import "../matmul_backend"
 import "../trace"
@@ -11,6 +12,9 @@ import "core:mem"
 import "core:simd"
 import "core:slice"
 import "core:strings"
+
+// NOTE(Aria): this is tuned based on Arm M chips
+SIMD_ALIGNMENT :: 16
 
 // This structure implements a high level multidimensional tensor container using a
 // linear tensor of data internally. The tensor is parametrized for any data type
@@ -46,7 +50,7 @@ tensor_alloc :: proc(
 ) {
 	size := shape_to_size(shape)
 	res = new(Tensor(T), allocator)
-	if owns_data do res.data = make([]T, size, allocator, loc)
+	if owns_data do res.data = runtime.make_aligned([]T, size, SIMD_ALIGNMENT, allocator, loc)
 
 	res.shape = make([]uint, len(shape), allocator)
 	res.strides = make([]uint, len(shape), allocator)
