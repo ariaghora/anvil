@@ -40,7 +40,7 @@ im2col :: proc(
 	}
 
 	dst_size := b * h_out * w_out * c * h_k * w_k
-	dst := make([]T, dst_size, allocator, loc)
+	dst := runtime.make_aligned([]T, dst_size, SIMD_ALIGNMENT, allocator, loc)
 
 	im2col_building := trace.TRACE_SECTION("im2col_building")
 	if stride == 1 && dilation == 1 && t.contiguous {
@@ -114,6 +114,7 @@ im2col :: proc(
 
 	t_out := tensor_alloc(T, []uint{b, h_out * w_out, c * h_k * w_k}, false, allocator, loc)
 	t_out.data = dst
+	t_out.owns_data = true
 	return t_out
 }
 
@@ -1374,18 +1375,23 @@ conv2d_single :: proc(
 	h_out, w_out := get_hw(h, w, k_h, k_w, stride, dilation, padding)
 
 	// Step 1: im2col - (B, C_in, H, W) -> (B, H_out * W_out, C_in * K_h * K_w)
-	col := im2col(input, k_h, k_w, stride, dilation, padding, context.temp_allocator)
+	col := im2col(input, k_h, k_w, stride, dilation, padding, allocator)
+	defer free_tensor(col, allocator)
 
 	// Step 2: Reshape kernel - (C_out, C_in, K_h, K_w) -> (C_in * K_h * K_w, C_out)
 	// im2col_transpose_kernel_trace := trace.TRACE_SECTION("im2col_transpose_kernel")
-	kernel_2d := reshape(kernel, []uint{c_out, c_in * k_h * k_w}, context.temp_allocator)
-	kernel_transposed := transpose(kernel_2d, 0, 1, context.temp_allocator, loc) // -> (C_in * K_h * K_w, C_out)
+	kernel_2d := reshape(kernel, []uint{c_out, c_in * k_h * k_w}, allocator)
+	defer free_tensor(kernel_2d, allocator)
+
+	kernel_transposed := transpose(kernel_2d, 0, 1, allocator, loc) // -> (C_in * K_h * K_w, C_out)
+	defer free_tensor(kernel_transposed, allocator)
 	// trace.end_scoped_trace(im2col_transpose_kernel_trace)
 
 	// Step 3: Batched matrix multiplication
 	// (B, H_out * W_out, C_in * K_h * K_w) @ (C_in * K_h * K_w, C_out) -> (B, H_out * W_out, C_out)
 	// im2col_matmul_trace := trace.TRACE_SECTION("im2col_matmul")
-	result := matmul(col, kernel_transposed, context.temp_allocator, loc)
+	result := matmul(col, kernel_transposed, allocator, loc)
+	defer free_tensor(result, allocator)
 	// trace.end_scoped_trace(im2col_matmul_trace)
 
 	// Step 4: Reshape back to (B, C_out, H_out, W_out)
