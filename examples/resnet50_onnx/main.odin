@@ -4,6 +4,7 @@ import "../../anvil/onnx"
 import "../../anvil/tensor"
 import "core:c/libc"
 import "core:fmt"
+import "core:mem"
 import "core:os/os2"
 import "core:slice"
 import "core:strings"
@@ -13,12 +14,30 @@ import "vendor:stb/image"
 T :: f32
 
 main :: proc() {
+	when ODIN_DEBUG {
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, context.allocator)
+		context.allocator = mem.tracking_allocator(&track)
+
+		defer {
+			if len(track.allocation_map) > 0 {
+				fmt.eprintf("=== %v allocations not freed: ===\n", len(track.allocation_map))
+				for _, entry in track.allocation_map {
+					fmt.eprintf("- %v bytes @ %v\n", entry.size, entry.location)
+				}
+			}
+			mem.tracking_allocator_destroy(&track)
+		}
+	}
+
 	ensure(len(os2.args) == 2, "first positional argument must be an image path")
 	image_file_path := os2.args[1]
 
 	// Get the ONNX file from
 	// https://huggingface.co/onnx-community/resnet-50-ONNX/resolve/main/onnx/model.onnx?download=true
-	model, err := onnx.read_from_file(T, "weights/model.onnx", context.temp_allocator)
+	model, err := onnx.read_from_file(T, "weights/model.onnx")
+	defer onnx.free_onnx(model)
+
 	ensure(err == nil, fmt.tprint(err))
 	fmt.println("Producer Name    : ", model.producer_name)
 	fmt.println("Producer Version : ", model.producer_version)
@@ -62,7 +81,8 @@ main :: proc() {
 		context.temp_allocator,
 	)
 	// NHWC -> NCHW
-	input_t = tensor.permute(input_t, {0, 3, 1, 2}, context.temp_allocator)
+	input_t = tensor.permute(input_t, {0, 3, 1, 2})
+	defer tensor.free_tensor(input_t)
 
 	// Set input for inference
 	inputs := make(map[string]^tensor.Tensor(T), context.temp_allocator)

@@ -107,8 +107,8 @@ ONNX_DataType :: enum i32 {
 Node :: struct($T: typeid) {
 	op_type:    string,
 	name:       string,
-	inputs:     []string,
-	outputs:    []string,
+	inputs:     [dynamic]string,
+	outputs:    [dynamic]string,
 	attributes: map[string]Attribute(T),
 }
 
@@ -395,8 +395,8 @@ parse_node :: proc(
 		Node(T) {
 			op_type = op_type,
 			name = name,
-			inputs = inputs[:],
-			outputs = outputs[:],
+			inputs = inputs,
+			outputs = outputs,
 			attributes = attributes,
 		},
 		allocator,
@@ -693,4 +693,39 @@ parse_tensor :: proc(
 	}
 
 	return t, name, nil
+}
+
+free_onnx :: proc(model: ^ONNX($T), allocator := context.allocator) {
+	raw_bytes_allocator := allocator
+	main_allocator := model.allocator
+	// free nodes
+	for node in model.graph.nodes {
+		// free attributes
+		for _, av in node.attributes {
+			#partial switch v in av {
+			case []i64:
+				delete(v, main_allocator)
+			case []f32:
+				delete(v, main_allocator)
+			}
+		}
+
+		delete(node.inputs)
+		delete(node.outputs)
+		delete(node.attributes)
+		free(node, main_allocator)
+	}
+	// free tensors
+	for k, t in model.graph.tensors {
+		tensor.free_tensor(t, allocator = main_allocator)
+	}
+
+	delete(model.raw_bytes, raw_bytes_allocator)
+
+	delete(model.graph.nodes)
+	delete(model.graph.tensors)
+	free(model.graph, main_allocator)
+
+	free(model, main_allocator)
+
 }

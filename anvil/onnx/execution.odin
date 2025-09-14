@@ -9,7 +9,7 @@ run :: proc(model: ^ONNX($T), inputs: map[string]^tensor.Tensor(T)) -> ONNX_Erro
 	allocator := model.allocator
 
 	// set inputs to the models
-	for k, v in inputs do model.graph.tensors[k] = v
+	for k, v in inputs do model.graph.tensors[k] = tensor.clone(v, allocator)
 
 	input_names := slice.map_keys(inputs, context.temp_allocator) or_return
 	orders := determine_execution_order(model.graph, input_names, context.temp_allocator)
@@ -273,7 +273,6 @@ run_conv :: proc(
 		padding := uint(pads[0])
 		groups = uint(attributes["group"].(i64) or_else 1)
 
-		// Current implementation
 		output = tensor.conv2d_xwb(
 			x,
 			w,
