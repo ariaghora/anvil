@@ -1,6 +1,7 @@
 package simd_backend
 
 import "core:math"
+import "core:simd"
 
 // Platform-specific exp abstraction
 when ODIN_OS == .Darwin {
