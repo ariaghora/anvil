@@ -26,10 +26,10 @@ when ODIN_OS == .Darwin {
 	// Fallback for other platforms
 	expf_4 :: proc(dst: ^#simd[4]f32, src: ^#simd[4]f32) {
 		dst^ = #simd[4]f32 {
-			math.exp(simd.extract(src, 0)),
-			math.exp(simd.extract(src, 1)),
-			math.exp(simd.extract(src, 2)),
-			math.exp(simd.extract(src, 3)),
+			math.exp(simd.extract(src^, 0)),
+			math.exp(simd.extract(src^, 1)),
+			math.exp(simd.extract(src^, 2)),
+			math.exp(simd.extract(src^, 3)),
 		}
 	}
 
