@@ -17,7 +17,7 @@ when ODIN_OS == .Darwin {
 	}
 
 	// Blast em all
-	expf_bath :: proc(dst, src: []f32) {
+	expf_batch :: proc(dst, src: []f32) {
 		assert(len(dst) == len(src))
 		n := i32(len(src))
 		vvexpf(raw_data(dst), raw_data(src), &n)
