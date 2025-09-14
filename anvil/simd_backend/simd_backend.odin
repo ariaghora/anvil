@@ -1,5 +1,7 @@
 package simd_backend
 
+import "core:math"
+
 // Platform-specific exp abstraction
 when ODIN_OS == .Darwin {
 	foreign import accelerate "system:Accelerate.framework"
