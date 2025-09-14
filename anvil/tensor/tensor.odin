@@ -3,6 +3,7 @@ package tensor
 import "base:runtime"
 
 import "../matmul_backend"
+import "../simd_backend"
 import "../trace"
 import "base:intrinsics"
 import "core:fmt"
@@ -1608,12 +1609,10 @@ softmax_last_dim_inplace :: proc(t: ^Tensor($T)) {
 
 			for ; col + 4 <= last_dim; col += 4 {
 				vals := (^#simd[4]f32)(&row_data[col])^
+				vals = simd.sub(vals, #simd[4]f32{max_val, max_val, max_val, max_val})
 
 				exp_vals: #simd[4]f32
-				exp_vals = simd.replace(exp_vals, 0, math.exp(simd.extract(vals, 0) - max_val))
-				exp_vals = simd.replace(exp_vals, 1, math.exp(simd.extract(vals, 1) - max_val))
-				exp_vals = simd.replace(exp_vals, 2, math.exp(simd.extract(vals, 2) - max_val))
-				exp_vals = simd.replace(exp_vals, 3, math.exp(simd.extract(vals, 3) - max_val))
+				simd_backend.expf_4(&exp_vals, &vals)
 
 				(^#simd[4]f32)(&row_data[col])^ = exp_vals
 				sum_vec = simd.add(sum_vec, exp_vals)
@@ -1736,8 +1735,8 @@ softmax_inplace :: proc(t: ^Tensor($T), dim: uint) {
 			for ; i + 4 <= dim_size; i += 4 {
 				idx := i * dim_stride
 				vals := #simd[4]f32 {
-					slice_data[idx],
-					slice_data[idx + dim_stride],
+					slice_data[idx + 0 * dim_stride],
+					slice_data[idx + 1 * dim_stride],
 					slice_data[idx + 2 * dim_stride],
 					slice_data[idx + 3 * dim_stride],
 				}
@@ -1765,15 +1764,11 @@ softmax_inplace :: proc(t: ^Tensor($T), dim: uint) {
 					// Load 4 consecutive values
 					vals := (^#simd[4]f32)(&slice_data[i])^
 
-					// Subtract max (vectorized)
+					// Subtract max
 					vals = simd.sub(vals, #simd[4]f32{max_val, max_val, max_val, max_val})
 
-					exp_vals := #simd[4]f32 {
-						math.exp(simd.extract(vals, 0)),
-						math.exp(simd.extract(vals, 1)),
-						math.exp(simd.extract(vals, 2)),
-						math.exp(simd.extract(vals, 3)),
-					}
+					exp_vals: #simd[4]f32
+					simd_backend.expf_4(&exp_vals, (^#simd[4]f32)(&vals))
 
 					// SIMD store
 					(^#simd[4]f32)(&slice_data[i])^ = exp_vals
