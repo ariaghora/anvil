@@ -717,7 +717,7 @@ matmul :: proc(
 	}
 
 	// Construct result shape: [...batch_dims, m, n]
-	result_shape := make([]uint, len(result_batch) + 2, allocator, loc)
+	result_shape := make([]uint, len(result_batch) + 2, context.temp_allocator, loc)
 	copy(result_shape[:len(result_batch)], result_batch)
 	result_shape[len(result_batch)] = a_m
 	result_shape[len(result_batch) + 1] = b_n

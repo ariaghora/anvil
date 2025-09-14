@@ -1374,18 +1374,18 @@ conv2d_single :: proc(
 	h_out, w_out := get_hw(h, w, k_h, k_w, stride, dilation, padding)
 
 	// Step 1: im2col - (B, C_in, H, W) -> (B, H_out * W_out, C_in * K_h * K_w)
-	col := im2col(input, k_h, k_w, stride, dilation, padding, allocator)
+	col := im2col(input, k_h, k_w, stride, dilation, padding, context.temp_allocator)
 
 	// Step 2: Reshape kernel - (C_out, C_in, K_h, K_w) -> (C_in * K_h * K_w, C_out)
 	// im2col_transpose_kernel_trace := trace.TRACE_SECTION("im2col_transpose_kernel")
-	kernel_2d := reshape(kernel, []uint{c_out, c_in * k_h * k_w}, allocator)
-	kernel_transposed := transpose(kernel_2d, 0, 1, allocator, loc) // -> (C_in * K_h * K_w, C_out)
+	kernel_2d := reshape(kernel, []uint{c_out, c_in * k_h * k_w}, context.temp_allocator)
+	kernel_transposed := transpose(kernel_2d, 0, 1, context.temp_allocator, loc) // -> (C_in * K_h * K_w, C_out)
 	// trace.end_scoped_trace(im2col_transpose_kernel_trace)
 
 	// Step 3: Batched matrix multiplication
 	// (B, H_out * W_out, C_in * K_h * K_w) @ (C_in * K_h * K_w, C_out) -> (B, H_out * W_out, C_out)
 	// im2col_matmul_trace := trace.TRACE_SECTION("im2col_matmul")
-	result := matmul(col, kernel_transposed, allocator, loc)
+	result := matmul(col, kernel_transposed, context.temp_allocator, loc)
 	// trace.end_scoped_trace(im2col_matmul_trace)
 
 	// Step 4: Reshape back to (B, C_out, H_out, W_out)
