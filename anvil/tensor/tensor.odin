@@ -1861,45 +1861,44 @@ softmax_inplace :: proc(t: ^Tensor($T), dim: uint) {
 			i = 0
 			sum_vec := #simd[4]f32{0, 0, 0, 0}
 
-			for ; i + 4 <= dim_size; i += 4 {
-				idx := i * dim_stride
+			// Check if data is consecutive
+			if dim_stride == 1 {
+				// Fast path: consecutive data, real SIMD benefit
+				for ; i + 4 <= dim_size; i += 4 {
+					// Load 4 consecutive values
+					vals := (^#simd[4]f32)(&slice_data[i])^
 
-				// Still have to call scalar exp, but at least we batch the memory ops
-				exp_vals: #simd[4]f32
-				exp_vals = simd.replace(exp_vals, 0, math.exp(slice_data[idx] - max_val))
-				exp_vals = simd.replace(
-					exp_vals,
-					1,
-					math.exp(slice_data[idx + dim_stride] - max_val),
-				)
-				exp_vals = simd.replace(
-					exp_vals,
-					2,
-					math.exp(slice_data[idx + 2 * dim_stride] - max_val),
-				)
-				exp_vals = simd.replace(
-					exp_vals,
-					3,
-					math.exp(slice_data[idx + 3 * dim_stride] - max_val),
-				)
+					// Subtract max (vectorized)
+					vals = simd.sub(vals, #simd[4]f32{max_val, max_val, max_val, max_val})
 
-				// Write back (strided)
-				slice_data[idx] = simd.extract(exp_vals, 0)
-				slice_data[idx + dim_stride] = simd.extract(exp_vals, 1)
-				slice_data[idx + 2 * dim_stride] = simd.extract(exp_vals, 2)
-				slice_data[idx + 3 * dim_stride] = simd.extract(exp_vals, 3)
+					exp_vals := #simd[4]f32 {
+						math.exp(simd.extract(vals, 0)),
+						math.exp(simd.extract(vals, 1)),
+						math.exp(simd.extract(vals, 2)),
+						math.exp(simd.extract(vals, 3)),
+					}
 
-				sum_vec = simd.add(sum_vec, exp_vals)
-			}
+					// SIMD store
+					(^#simd[4]f32)(&slice_data[i])^ = exp_vals
+					sum_vec = simd.add(sum_vec, exp_vals)
+				}
 
-			// Sum by SIMD
-			sum = simd.reduce_add_bisect(sum_vec)
-			// Remainder
-			for ; i < dim_size; i += 1 {
-				idx := i * dim_stride
-				val := math.exp(slice_data[idx] - max_val)
-				slice_data[idx] = val
-				sum += val
+				sum = simd.reduce_add_bisect(sum_vec)
+
+				// Handle remainder
+				for ; i < dim_size; i += 1 {
+					val := math.exp(slice_data[i] - max_val)
+					slice_data[i] = val
+					sum += val
+				}
+			} else {
+				// Strided data: just go scalar, it's cleaner and likely faster
+				for i in 0 ..< dim_size {
+					idx := i * dim_stride
+					val := math.exp(slice_data[idx] - max_val)
+					slice_data[idx] = val
+					sum += val
+				}
 			}
 
 			// Pass 3: Normalize by sum

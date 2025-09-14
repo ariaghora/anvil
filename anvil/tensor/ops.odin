@@ -800,6 +800,7 @@ tanh_fast_simd_4xf32 :: proc(x: #simd[4]f32) -> #simd[4]f32 {
 
 	return simd.div(numerator, denominator)
 }
+
 silu_fast :: proc(
 	x: ^Tensor($T),
 	allocator := context.allocator,
@@ -817,7 +818,7 @@ silu_fast :: proc(
 
 		// SIMD path for chunks of 4
 		for ; i + 4 <= total_elements; i += 4 {
-			v := #simd[4]f32{x.data[i], x.data[i + 1], x.data[i + 2], x.data[i + 3]}
+			v := (^#simd[4]f32)(&x.data[i])^
 
 			// tanh(x/2)
 			arg := simd.div(v, #simd[4]f32{two, two, two, two})
@@ -832,11 +833,7 @@ silu_fast :: proc(
 				),
 			)
 
-			// (^#simd[4]f32)(&result.data[i])^ = silu_result
-			result.data[i] = simd.extract(silu_result, 0)
-			result.data[i + 1] = simd.extract(silu_result, 1)
-			result.data[i + 2] = simd.extract(silu_result, 2)
-			result.data[i + 3] = simd.extract(silu_result, 3)
+			(^#simd[4]f32)(&result.data[i])^ = silu_result
 		}
 
 		// Scalar fallback
