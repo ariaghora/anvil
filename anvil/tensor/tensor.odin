@@ -120,28 +120,21 @@ copy_strided_1d :: proc(dst, src: []$T, shape, strides: []uint) {
 
 		// SIMD path for unit stride (contiguous)
 		if s0 == 1 {
+			// Both src and dst are contiguous
 			for ; i + 8 <= shape[0]; i += 8 {
-				vals1 := #simd[4]f32{src[i], src[i + 1], src[i + 2], src[i + 3]}
-				vals2 := #simd[4]f32{src[i + 4], src[i + 5], src[i + 6], src[i + 7]}
-				dst[i] = simd.extract(vals1, 0)
-				dst[i + 1] = simd.extract(vals1, 1)
-				dst[i + 2] = simd.extract(vals1, 2)
-				dst[i + 3] = simd.extract(vals1, 3)
-				dst[i + 4] = simd.extract(vals2, 0)
-				dst[i + 5] = simd.extract(vals2, 1)
-				dst[i + 6] = simd.extract(vals2, 2)
-				dst[i + 7] = simd.extract(vals2, 3)
+				vals1 := (^#simd[4]f32)(&src[i])^
+				vals2 := (^#simd[4]f32)(&src[i + 4])^
+				(^#simd[4]f32)(&dst[i])^ = vals1
+				(^#simd[4]f32)(&dst[i + 4])^ = vals2
 			}
 
 			for ; i + 4 <= shape[0]; i += 4 {
-				vals := #simd[4]f32{src[i], src[i + 1], src[i + 2], src[i + 3]}
-				dst[i] = simd.extract(vals, 0)
-				dst[i + 1] = simd.extract(vals, 1)
-				dst[i + 2] = simd.extract(vals, 2)
-				dst[i + 3] = simd.extract(vals, 3)
+				vals := (^#simd[4]f32)(&src[i])^
+				(^#simd[4]f32)(&dst[i])^ = vals
 			}
 		} else if s0 == 2 {
 			// Special case for stride 2 (every other element)
+			// src is strided, but dst is consecutive
 			for ; i + 4 <= shape[0]; i += 4 {
 				vals := #simd[4]f32 {
 					src[i * 2],
@@ -149,10 +142,7 @@ copy_strided_1d :: proc(dst, src: []$T, shape, strides: []uint) {
 					src[(i + 2) * 2],
 					src[(i + 3) * 2],
 				}
-				dst[i] = simd.extract(vals, 0)
-				dst[i + 1] = simd.extract(vals, 1)
-				dst[i + 2] = simd.extract(vals, 2)
-				dst[i + 3] = simd.extract(vals, 3)
+				(^#simd[4]f32)(&dst[i])^ = vals
 			}
 		}
 
@@ -161,7 +151,7 @@ copy_strided_1d :: proc(dst, src: []$T, shape, strides: []uint) {
 			dst[i] = src[i * s0]
 		}
 	} else {
-		// Original scalar code
+		// Slow scalar reference
 		for i in 0 ..< shape[0] {
 			dst[i] = src[i * s0]
 		}
@@ -183,40 +173,16 @@ copy_strided_2d :: proc(dst, src: []$T, shape, strides: []uint) {
 				j := uint(0)
 				// Copy entire rows with SIMD
 				for ; j + 8 <= d1; j += 8 {
-					vals1 := #simd[4]f32 {
-						src[src_row_start + j],
-						src[src_row_start + j + 1],
-						src[src_row_start + j + 2],
-						src[src_row_start + j + 3],
-					}
-					vals2 := #simd[4]f32 {
-						src[src_row_start + j + 4],
-						src[src_row_start + j + 5],
-						src[src_row_start + j + 6],
-						src[src_row_start + j + 7],
-					}
-					dst[dst_idx] = simd.extract(vals1, 0)
-					dst[dst_idx + 1] = simd.extract(vals1, 1)
-					dst[dst_idx + 2] = simd.extract(vals1, 2)
-					dst[dst_idx + 3] = simd.extract(vals1, 3)
-					dst[dst_idx + 4] = simd.extract(vals2, 0)
-					dst[dst_idx + 5] = simd.extract(vals2, 1)
-					dst[dst_idx + 6] = simd.extract(vals2, 2)
-					dst[dst_idx + 7] = simd.extract(vals2, 3)
+					vals1 := (^#simd[4]f32)(&src[src_row_start + j])^
+					vals2 := (^#simd[4]f32)(&src[src_row_start + j + 4])^
+					(^#simd[4]f32)(&dst[dst_idx])^ = vals1
+					(^#simd[4]f32)(&dst[dst_idx + 4])^ = vals2
 					dst_idx += 8
 				}
 
 				for ; j + 4 <= d1; j += 4 {
-					vals := #simd[4]f32 {
-						src[src_row_start + j],
-						src[src_row_start + j + 1],
-						src[src_row_start + j + 2],
-						src[src_row_start + j + 3],
-					}
-					dst[dst_idx] = simd.extract(vals, 0)
-					dst[dst_idx + 1] = simd.extract(vals, 1)
-					dst[dst_idx + 2] = simd.extract(vals, 2)
-					dst[dst_idx + 3] = simd.extract(vals, 3)
+					vals := (^#simd[4]f32)(&src[src_row_start + j])^
+					(^#simd[4]f32)(&dst[dst_idx])^ = vals
 					dst_idx += 4
 				}
 
@@ -239,11 +205,7 @@ copy_strided_2d :: proc(dst, src: []$T, shape, strides: []uint) {
 						src[src_row + (j + 2) * s1],
 						src[src_row + (j + 3) * s1],
 					}
-					dst[dst_idx] = simd.extract(vals, 0)
-					dst[dst_idx + 1] = simd.extract(vals, 1)
-					dst[dst_idx + 2] = simd.extract(vals, 2)
-					dst[dst_idx + 3] = simd.extract(vals, 3)
-
+					(^#simd[4]f32)(&dst[dst_idx])^ = vals
 					dst_idx += 4
 				}
 
@@ -281,40 +243,16 @@ copy_strided_3d :: proc(dst, src: []$T, shape, strides: []uint) {
 
 					k := uint(0)
 					for ; k + 8 <= d2; k += 8 {
-						vals1 := #simd[4]f32 {
-							src[src_row_start + k],
-							src[src_row_start + k + 1],
-							src[src_row_start + k + 2],
-							src[src_row_start + k + 3],
-						}
-						vals2 := #simd[4]f32 {
-							src[src_row_start + k + 4],
-							src[src_row_start + k + 5],
-							src[src_row_start + k + 6],
-							src[src_row_start + k + 7],
-						}
-						dst[dst_idx] = simd.extract(vals1, 0)
-						dst[dst_idx + 1] = simd.extract(vals1, 1)
-						dst[dst_idx + 2] = simd.extract(vals1, 2)
-						dst[dst_idx + 3] = simd.extract(vals1, 3)
-						dst[dst_idx + 4] = simd.extract(vals2, 0)
-						dst[dst_idx + 5] = simd.extract(vals2, 1)
-						dst[dst_idx + 6] = simd.extract(vals2, 2)
-						dst[dst_idx + 7] = simd.extract(vals2, 3)
+						vals1 := (^#simd[4]f32)(&src[src_row_start + k])^
+						vals2 := (^#simd[4]f32)(&src[src_row_start + k + 4])^
+						(^#simd[4]f32)(&dst[dst_idx])^ = vals1
+						(^#simd[4]f32)(&dst[dst_idx + 4])^ = vals2
 						dst_idx += 8
 					}
 
 					for ; k + 4 <= d2; k += 4 {
-						vals := #simd[4]f32 {
-							src[src_row_start + k],
-							src[src_row_start + k + 1],
-							src[src_row_start + k + 2],
-							src[src_row_start + k + 3],
-						}
-						dst[dst_idx] = simd.extract(vals, 0)
-						dst[dst_idx + 1] = simd.extract(vals, 1)
-						dst[dst_idx + 2] = simd.extract(vals, 2)
-						dst[dst_idx + 3] = simd.extract(vals, 3)
+						vals := (^#simd[4]f32)(&src[src_row_start + k])^
+						(^#simd[4]f32)(&dst[dst_idx])^ = vals
 						dst_idx += 4
 					}
 
@@ -392,7 +330,6 @@ copy_strided_4d :: proc(dst, src: []$T, shape, strides: []uint) {
 					for k in 0 ..< d2 {
 						src_row_start := src_plane + k * s2
 
-						// Unroll more aggressively with prefetch
 						l := uint(0)
 
 						// Process 16 elements at a time
@@ -402,61 +339,21 @@ copy_strided_4d :: proc(dst, src: []$T, shape, strides: []uint) {
 								_ = src[src_plane + (k + 1) * s2] // Prefetch hint
 							}
 
-							vals0 := #simd[4]f32 {
-								src[src_row_start + l],
-								src[src_row_start + l + 1],
-								src[src_row_start + l + 2],
-								src[src_row_start + l + 3],
-							}
-							vals1 := #simd[4]f32 {
-								src[src_row_start + l + 4],
-								src[src_row_start + l + 5],
-								src[src_row_start + l + 6],
-								src[src_row_start + l + 7],
-							}
-							vals2 := #simd[4]f32 {
-								src[src_row_start + l + 8],
-								src[src_row_start + l + 9],
-								src[src_row_start + l + 10],
-								src[src_row_start + l + 11],
-							}
-							vals3 := #simd[4]f32 {
-								src[src_row_start + l + 12],
-								src[src_row_start + l + 13],
-								src[src_row_start + l + 14],
-								src[src_row_start + l + 15],
-							}
+							vals0 := (^#simd[4]f32)(&src[src_row_start + l])^
+							vals1 := (^#simd[4]f32)(&src[src_row_start + l + 4])^
+							vals2 := (^#simd[4]f32)(&src[src_row_start + l + 8])^
+							vals3 := (^#simd[4]f32)(&src[src_row_start + l + 12])^
 
-							dst[dst_idx] = simd.extract(vals0, 0)
-							dst[dst_idx + 1] = simd.extract(vals0, 1)
-							dst[dst_idx + 2] = simd.extract(vals0, 2)
-							dst[dst_idx + 3] = simd.extract(vals0, 3)
-							dst[dst_idx + 4] = simd.extract(vals1, 0)
-							dst[dst_idx + 5] = simd.extract(vals1, 1)
-							dst[dst_idx + 6] = simd.extract(vals1, 2)
-							dst[dst_idx + 7] = simd.extract(vals1, 3)
-							dst[dst_idx + 8] = simd.extract(vals2, 0)
-							dst[dst_idx + 9] = simd.extract(vals2, 1)
-							dst[dst_idx + 10] = simd.extract(vals2, 2)
-							dst[dst_idx + 11] = simd.extract(vals2, 3)
-							dst[dst_idx + 12] = simd.extract(vals3, 0)
-							dst[dst_idx + 13] = simd.extract(vals3, 1)
-							dst[dst_idx + 14] = simd.extract(vals3, 2)
-							dst[dst_idx + 15] = simd.extract(vals3, 3)
+							(^#simd[4]f32)(&dst[dst_idx])^ = vals0
+							(^#simd[4]f32)(&dst[dst_idx + 4])^ = vals1
+							(^#simd[4]f32)(&dst[dst_idx + 8])^ = vals2
+							(^#simd[4]f32)(&dst[dst_idx + 12])^ = vals3
 							dst_idx += 16
 						}
 
 						for ; l + 4 <= d3; l += 4 {
-							vals := #simd[4]f32 {
-								src[src_row_start + l],
-								src[src_row_start + l + 1],
-								src[src_row_start + l + 2],
-								src[src_row_start + l + 3],
-							}
-							dst[dst_idx] = simd.extract(vals, 0)
-							dst[dst_idx + 1] = simd.extract(vals, 1)
-							dst[dst_idx + 2] = simd.extract(vals, 2)
-							dst[dst_idx + 3] = simd.extract(vals, 3)
+							vals := (^#simd[4]f32)(&src[src_row_start + l])^
+							(^#simd[4]f32)(&dst[dst_idx])^ = vals
 							dst_idx += 4
 						}
 
