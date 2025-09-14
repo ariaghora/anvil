@@ -92,7 +92,7 @@ get_strided_data :: proc(
 	}
 
 	size := shape_to_size(target_shape)
-	data := make([]T, size, allocator)
+	data := runtime.make_aligned([]T, size, SIMD_ALIGNMENT, allocator)
 
 	// Specialized copy loops based on dimensionality
 	switch len(target_shape) {
@@ -365,7 +365,7 @@ copy_strided_4d :: proc(dst, src: []$T, shape, strides: []uint) {
 				}
 			}
 		} else {
-			// General case - no contiguity
+			// General case, no contiguity
 			for i in 0 ..< d0 {
 				src_batch := i * s0
 				for j in 0 ..< d1 {
@@ -411,7 +411,7 @@ copy_strided_4d :: proc(dst, src: []$T, shape, strides: []uint) {
 
 @(private = "file")
 copy_strided_nd :: proc(dst, src: []$T, shape, strides: []uint) {
-	// For higher dimensions, use your existing approach but optimize
+	// For higher dimensions, use existing approach but optimize
 	// by pre-computing as much as possible
 	indices := make([]uint, len(shape), context.temp_allocator)
 
