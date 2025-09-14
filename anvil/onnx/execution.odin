@@ -4,6 +4,7 @@ import "../tensor"
 import "base:runtime"
 import "core:fmt"
 import "core:slice"
+import "core:time"
 
 run :: proc(model: ^ONNX($T), inputs: map[string]^tensor.Tensor(T)) -> ONNX_Error {
 	allocator := model.allocator

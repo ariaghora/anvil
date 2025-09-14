@@ -2,6 +2,7 @@ package main
 
 import "../../anvil/onnx"
 import "../../anvil/tensor"
+import "../../anvil/trace"
 import "core:c/libc"
 import "core:fmt"
 import "core:mem"
@@ -29,6 +30,9 @@ main :: proc() {
 			mem.tracking_allocator_destroy(&track)
 		}
 	}
+
+	trace.init_trace()
+	defer trace.finish_trace()
 
 	ensure(len(os2.args) == 2, "first positional argument must be an image path")
 	image_file_path := os2.args[1]

@@ -944,12 +944,16 @@ transpose :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
-	trace_transpose := trace.TRACE_FUNCTION("transpose")
+	trace_transpose := trace.TRACE_FUNCTION(fmt.tprint("transpose", tensor.shape))
 	defer trace.end_scoped_trace(trace_transpose)
 
 	// Validate dimensions
 	if dim0 < 0 || dim0 >= len(tensor.shape) || dim1 < 0 || dim1 >= len(tensor.shape) {
 		panic("Dimension indices out of range")
+	}
+
+	if len(tensor.shape) == 2 {
+		return matrix_transpose(tensor, allocator, loc)
 	}
 
 	// Create new shape and strides
@@ -974,8 +978,35 @@ transpose :: proc(
 	return result
 }
 
-// Matrix transpose convenience function - swaps last two dimensions
-// Equivalent to transpose(tensor, -2, -1) but without negative index support
+// Matrix transpose, specialization for 2D
+BLOCK_SIZE :: 16 // TODO(Aria): tune this
+@(private = "file")
+matrix_transpose_blocked :: proc(
+	tensor: ^Tensor($T),
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	rows, cols := tensor.shape[0], tensor.shape[1]
+	new_shape := []uint{cols, rows}
+	out := tensor_alloc(T, new_shape, true, allocator, loc)
+
+	// Process in blocks for better cache locality
+	for row_block := uint(0); row_block < rows; row_block += BLOCK_SIZE {
+		for col_block := uint(0); col_block < cols; col_block += BLOCK_SIZE {
+			// Transpose within block
+			row_end := min(row_block + BLOCK_SIZE, rows)
+			col_end := min(col_block + BLOCK_SIZE, cols)
+
+			for row in row_block ..< row_end {
+				for col in col_block ..< col_end {
+					out.data[col * rows + row] = tensor.data[row * cols + col]
+				}
+			}
+		}
+	}
+
+	return out
+}
 matrix_transpose :: proc(
 	tensor: ^Tensor($T),
 	allocator := context.allocator,
@@ -985,10 +1016,14 @@ matrix_transpose :: proc(
 		panic("Matrix transpose requires at least 2D tensor")
 	}
 
-	last := len(tensor.shape) - 1
-	second_last := len(tensor.shape) - 2
-
-	return transpose(tensor, second_last, last, allocator, loc)
+	// when ODIN_OS == .Darwin && T == f32 {
+	// 	rows, cols := tensor.shape[0], tensor.shape[1]
+	// 	out := tensor_alloc(T, []uint{cols, rows}, true, allocator, loc)
+	// 	simd_backend.transposef(out.data, tensor.data, rows, cols)
+	// 	return out
+	// } else {
+	return matrix_transpose_blocked(tensor, allocator, loc)
+	// }
 }
 
 // Split tensor into chunks along specified dimension

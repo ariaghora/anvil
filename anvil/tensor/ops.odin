@@ -1,6 +1,8 @@
 package tensor
 
 import "../trace"
+import "base:runtime"
+import "core:fmt"
 import "core:log"
 import "core:math"
 import "core:mem"
@@ -234,11 +236,22 @@ elementwise_binary_op :: proc(
 }
 
 // Addition operation
+import "../simd_backend"
 add :: proc(
 	a, b: ^Tensor($T),
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
+	trace_mul := trace.TRACE_FUNCTION("add")
+	defer trace.end_scoped_trace(trace_mul)
+
+	if slice.equal(a.shape, b.shape) && a.contiguous && b.contiguous {
+		when T == f32 {
+			res := tensor_alloc(T, a.shape, true, allocator, loc)
+			simd_backend.addf_batch(res.data, a.data, b.data)
+			return res
+		}
+	}
 	return elementwise_binary_op(a, b, .ADD, allocator, loc)
 }
 
@@ -250,6 +263,12 @@ mul :: proc(
 ) -> ^Tensor(T) {
 	trace_mul := trace.TRACE_FUNCTION("mul")
 	defer trace.end_scoped_trace(trace_mul)
+
+	if slice.equal(a.shape, b.shape) && a.contiguous && b.contiguous {
+		when T == f32 {
+			// TODO(Aria): batched
+		}
+	}
 
 	return elementwise_binary_op(a, b, .MULTIPLY, allocator, loc)
 }

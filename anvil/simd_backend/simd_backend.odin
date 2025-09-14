@@ -9,6 +9,8 @@ when ODIN_OS == .Darwin {
 
 	foreign accelerate {
 		vvexpf :: proc(y: [^]f32, x: [^]f32, n: ^i32) ---
+		vDSP_vadd :: proc(A: [^]f32, IA: i32, B: [^]f32, IB: i32, C: [^]f32, IC: i32, N: u32) ---
+		vDSP_mtrans :: proc(A: [^]f32, IA: i32, C: [^]f32, IC: i32, M: u32, N: u32) ---
 	}
 
 	expf_4 :: proc(dst: ^#simd[4]f32, src: ^#simd[4]f32) {
@@ -16,12 +18,21 @@ when ODIN_OS == .Darwin {
 		vvexpf(cast([^]f32)dst, cast([^]f32)src, &count)
 	}
 
+	//===================================================
 	// Blast em all
+	addf_batch :: proc(dst, a, b: []f32) {
+		vDSP_vadd(raw_data(a), 1, raw_data(b), 1, raw_data(dst), 1, u32(len(a)))
+	}
+
 	expf_batch :: proc(dst, src: []f32) {
 		assert(len(dst) == len(src))
 		n := i32(len(src))
 		vvexpf(raw_data(dst), raw_data(src), &n)
 	}
+	transposef :: proc(dst, src: []f32, rows, cols: uint) {
+		vDSP_mtrans(raw_data(src), i32(cols), raw_data(dst), i32(rows), u32(rows), u32(cols))
+	}
+
 } else {
 	// Fallback for other platforms
 	expf_4 :: proc(dst: ^#simd[4]f32, src: ^#simd[4]f32) {

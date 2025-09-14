@@ -1389,15 +1389,15 @@ conv2d_single :: proc(
 
 	// Step 3: Batched matrix multiplication
 	// (B, H_out * W_out, C_in * K_h * K_w) @ (C_in * K_h * K_w, C_out) -> (B, H_out * W_out, C_out)
-	// im2col_matmul_trace := trace.TRACE_SECTION("im2col_matmul")
+	im2col_matmul_trace := trace.TRACE_SECTION("im2col_matmul")
 	result := matmul(col, kernel_transposed, allocator, loc)
 	defer free_tensor(result, allocator)
-	// trace.end_scoped_trace(im2col_matmul_trace)
+	trace.end_scoped_trace(im2col_matmul_trace)
 
 	// Step 4: Reshape back to (B, C_out, H_out, W_out)
-	// reshape_back_get_strided_data_trace := trace.TRACE_SECTION("reshape_back_get_strided_data")
+	reshape_back_get_strided_data_trace := trace.TRACE_SECTION("reshape_back_get_strided_data")
 	final := reshape_bhwc_to_bchw(result, b, h_out, w_out, c_out, allocator)
-	// trace.end_scoped_trace(reshape_back_get_strided_data_trace)
+	trace.end_scoped_trace(reshape_back_get_strided_data_trace)
 
 	return final
 }
@@ -1412,9 +1412,16 @@ conv2d_xwb :: proc(
 ) -> (
 	out: ^tensor.Tensor(T),
 ) {
+	conv2d_xwb_trace := trace.TRACE_FUNCTION("conv2d_xwb")
+	defer trace.end_scoped_trace(conv2d_xwb_trace)
+
 	if groups == 1 {
+		conv2d_single_trace := trace.TRACE_SECTION("conv2d_single")
+		defer trace.end_scoped_trace(conv2d_single_trace)
 		out = tensor.conv2d_single(input, kernel, stride, dilation, padding, allocator, loc)
 	} else {
+		conv2d_grouped_trace := trace.TRACE_SECTION("conv2d_grouped")
+		defer trace.end_scoped_trace(conv2d_grouped_trace)
 		out = tensor.conv2d_grouped(
 			input,
 			kernel,
@@ -1429,6 +1436,9 @@ conv2d_xwb :: proc(
 
 	// Add bias if present
 	if bias, has_bias := bias.?; has_bias {
+		add_bias_trace := trace.TRACE_SECTION("add_bias")
+		defer trace.end_scoped_trace(add_bias_trace)
+
 		batch_size := out.shape[0]
 		out_channels := out.shape[1]
 		spatial_size := out.shape[2] * out.shape[3]
@@ -1439,59 +1449,27 @@ conv2d_xwb :: proc(
 					base_idx := (b * out_channels + c) * spatial_size
 					bias_val := bias.data[c]
 
-					bias_vec4 := #simd[4]f32{bias_val, bias_val, bias_val, bias_val}
-					bias_vec8 := #simd[8]f32 {
-						bias_val,
-						bias_val,
-						bias_val,
-						bias_val,
-						bias_val,
-						bias_val,
-						bias_val,
-						bias_val,
-					}
+					bias_vec := #simd[4]f32{bias_val, bias_val, bias_val, bias_val}
 
 					i := uint(0)
 					for ; i + 8 <= spatial_size; i += 8 {
-						// First 4
-						vals0 := #simd[4]f32 {
-							out.data[base_idx + i],
-							out.data[base_idx + i + 1],
-							out.data[base_idx + i + 2],
-							out.data[base_idx + i + 3],
-						}
-						vals0 += bias_vec4
-						out.data[base_idx + i] = simd.extract(vals0, 0)
-						out.data[base_idx + i + 1] = simd.extract(vals0, 1)
-						out.data[base_idx + i + 2] = simd.extract(vals0, 2)
-						out.data[base_idx + i + 3] = simd.extract(vals0, 3)
+						// Load, add, store - no extracts needed
+						vals0 := (^#simd[4]f32)(&out.data[base_idx + i])^
+						vals1 := (^#simd[4]f32)(&out.data[base_idx + i + 4])^
 
-						// Next 4
-						vals1 := #simd[4]f32 {
-							out.data[base_idx + i + 4],
-							out.data[base_idx + i + 5],
-							out.data[base_idx + i + 6],
-							out.data[base_idx + i + 7],
-						}
-						vals1 += bias_vec4
-						out.data[base_idx + i + 4] = simd.extract(vals1, 0)
-						out.data[base_idx + i + 5] = simd.extract(vals1, 1)
-						out.data[base_idx + i + 6] = simd.extract(vals1, 2)
-						out.data[base_idx + i + 7] = simd.extract(vals1, 3)
+						vals0 += bias_vec
+						vals1 += bias_vec
+
+						(^#simd[4]f32)(&out.data[base_idx + i])^ = vals0
+						(^#simd[4]f32)(&out.data[base_idx + i + 4])^ = vals1
 					}
+
 					for ; i + 4 <= spatial_size; i += 4 {
-						vals := #simd[4]f32 {
-							out.data[base_idx + i],
-							out.data[base_idx + i + 1],
-							out.data[base_idx + i + 2],
-							out.data[base_idx + i + 3],
-						}
-						vals += bias_vec4
-						out.data[base_idx + i] = simd.extract(vals, 0)
-						out.data[base_idx + i + 1] = simd.extract(vals, 1)
-						out.data[base_idx + i + 2] = simd.extract(vals, 2)
-						out.data[base_idx + i + 3] = simd.extract(vals, 3)
+						vals := (^#simd[4]f32)(&out.data[base_idx + i])^
+						vals += bias_vec
+						(^#simd[4]f32)(&out.data[base_idx + i])^ = vals
 					}
+
 					for ; i < spatial_size; i += 1 {
 						out.data[base_idx + i] += bias_val
 					}
