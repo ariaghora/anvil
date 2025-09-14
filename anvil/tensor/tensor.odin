@@ -1012,10 +1012,11 @@ matrix_transpose :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
-	if len(tensor.shape) < 2 {
-		panic("Matrix transpose requires at least 2D tensor")
+	if len(tensor.shape) != 2 {
+		panic("Matrix transpose requires  2D tensor")
 	}
 
+	// TODO(Aria): fix SIMD version
 	// when ODIN_OS == .Darwin && T == f32 {
 	// 	rows, cols := tensor.shape[0], tensor.shape[1]
 	// 	out := tensor_alloc(T, []uint{cols, rows}, true, allocator, loc)

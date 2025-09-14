@@ -2,6 +2,7 @@ package sam
 
 import st "../../safetensors"
 import "../../tensor"
+import "core:fmt"
 import md "mask_decoder"
 import pe "prompt_encoder"
 import "vit"

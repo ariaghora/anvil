@@ -640,8 +640,9 @@ forward_attention :: proc(
 	k_transposed := tensor.permute(k, []uint{0, 2, 1, 3}, context.temp_allocator)
 	v_transposed := tensor.permute(v, []uint{0, 2, 1, 3}, context.temp_allocator)
 
-	// Attention computation: Q @ K^T - USE BLAS!
-	k_t := tensor.matrix_transpose(k_transposed, context.temp_allocator)
+	// Attention computation: Q @ K^T
+	ndim := len(k_transposed.shape)
+	k_t := tensor.transpose(k_transposed, ndim - 1, ndim - 2, context.temp_allocator)
 	attn_scores := tensor.matmul(q_transposed, k_t, context.temp_allocator)
 	trace.end_scoped_trace(qkv_permute_transpose_matmul_trace)
 
