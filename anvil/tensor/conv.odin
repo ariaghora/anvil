@@ -1000,7 +1000,7 @@ conv2d_grouped :: proc(
 		defer trace.end_scoped_trace(grouped_conv_trace)
 
 		// Create a thread pool with optimal number of threads
-		num_threads := min(int(groups), os.processor_core_count())
+		num_threads := min(int(groups), 4)
 		pool: thread.Pool
 		thread.pool_init(&pool, context.allocator, num_threads)
 		defer thread.pool_destroy(&pool)

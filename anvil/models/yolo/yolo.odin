@@ -502,33 +502,24 @@ forward_dark_net :: proc(
 	^tensor.Tensor(T),
 	^tensor.Tensor(T),
 ) {
-	x1 := forward_conv_block(
-		dn.b1_1,
-		forward_conv_block(dn.b1_0, x, context.temp_allocator),
-		context.temp_allocator,
-	)
+	x1_cb := forward_conv_block(dn.b1_0, x, allocator)
+	x1 := forward_conv_block(dn.b1_1, x1_cb, allocator)
+	defer tensor.free_tensor(x1_cb, x1, allocator = allocator)
 
-	// Returned, use parent allocator
-	x2 := forward_c2f(
-		dn.b2_2,
-		forward_conv_block(
-			dn.b2_1,
-			forward_c2f(dn.b2_0, x1, context.temp_allocator),
-			context.temp_allocator,
-		),
-		allocator,
-	)
+	x2_c2f := forward_c2f(dn.b2_0, x1, allocator)
+	x2_cb := forward_conv_block(dn.b2_1, x2_c2f, allocator)
+	defer tensor.free_tensor(x2_c2f, x2_cb, allocator = allocator)
+	x2 := forward_c2f(dn.b2_2, x2_cb, allocator) // Returned
 
-	// Returned, use parent allocator
-	x3 := forward_c2f(dn.b3_1, forward_conv_block(dn.b3_0, x2, context.temp_allocator), allocator)
+	x3_cb := forward_conv_block(dn.b3_0, x2, allocator)
+	defer tensor.free_tensor(x3_cb, allocator = allocator)
+	x3 := forward_c2f(dn.b3_1, x3_cb, allocator) // Returned
 
-	x4 := forward_c2f(
-		dn.b4_1,
-		forward_conv_block(dn.b4_0, x3, context.temp_allocator),
-		context.temp_allocator,
-	)
+	x4_cb := forward_conv_block(dn.b4_0, x3, allocator)
+	x4 := forward_c2f(dn.b4_1, x4_cb, allocator)
+	defer tensor.free_tensor(x4_cb, x4, allocator = allocator)
 
-	x5 := forward_sppf(dn.b5, x4, allocator)
+	x5 := forward_sppf(dn.b5, x4, allocator) // Returned
 
 	return x2, x3, x5
 }
@@ -611,53 +602,34 @@ forward_neck :: proc(
 		p5,
 		dn.upsample_factor * p5.shape[2],
 		dn.upsample_factor * p5.shape[3],
-		context.temp_allocator,
+		allocator,
 		loc,
 	)
-	x := forward_c2f(
-		dn.n1,
-		tensor.cat([]^tensor.Tensor(T){p5_up, p4}, 1, context.temp_allocator, loc),
-		context.temp_allocator,
-		loc,
-	)
+	x_cat := tensor.cat([]^tensor.Tensor(T){p5_up, p4}, 1, allocator, loc)
+	x := forward_c2f(dn.n1, x_cat, allocator, loc)
+	defer tensor.free_tensor(p5_up, x_cat, x, allocator = allocator)
 
 	x_up := tensor.upsample_nearest_2d(
 		x,
 		dn.upsample_factor * x.shape[2],
 		dn.upsample_factor * x.shape[3],
-		context.temp_allocator,
-	)
-	head_1 := forward_c2f(
-		dn.n2,
-		tensor.cat([]^tensor.Tensor(T){x_up, p3}, 1, context.temp_allocator, loc),
 		allocator,
-		loc,
 	)
-	head_2 := forward_c2f(
-		dn.n4,
-		tensor.cat(
-			[]^tensor.Tensor(T){forward_conv_block(dn.n3, head_1, context.temp_allocator, loc), x},
-			1,
-			context.temp_allocator,
-			loc,
-		),
-		allocator,
-		loc,
-	)
-	head_3 := forward_c2f(
-		dn.n6,
-		tensor.cat(
-			[]^tensor.Tensor(T) {
-				forward_conv_block(dn.n5, head_2, context.temp_allocator, loc),
-				p5,
-			},
-			1,
-			context.temp_allocator,
-			loc,
-		),
-		allocator,
-		loc,
-	)
+	defer tensor.free_tensor(x_up, allocator = allocator)
+
+	head_1_cat := tensor.cat([]^tensor.Tensor(T){x_up, p3}, 1, allocator, loc)
+	defer tensor.free_tensor(head_1_cat, allocator = allocator)
+	head_1 := forward_c2f(dn.n2, head_1_cat, allocator, loc)
+
+	head_2_cb := forward_conv_block(dn.n3, head_1, allocator, loc)
+	head_2_cat := tensor.cat([]^tensor.Tensor(T){head_2_cb, x}, 1, allocator, loc)
+	defer tensor.free_tensor(head_2_cb, head_2_cat, allocator = allocator)
+	head_2 := forward_c2f(dn.n4, head_2_cat, allocator, loc)
+
+	head_3_cb := forward_conv_block(dn.n5, head_2, allocator, loc)
+	head_3_cat := tensor.cat([]^tensor.Tensor(T){head_3_cb, p5}, 1, allocator, loc)
+	defer tensor.free_tensor(head_3_cb, head_3_cat, allocator = allocator)
+	head_3 := forward_c2f(dn.n6, head_3_cat, allocator, loc)
 
 	return head_1, head_2, head_3
 }
@@ -691,18 +663,14 @@ forward_dfl :: proc(
 	allocator := context.temp_allocator,
 ) -> ^tensor.Tensor(T) {
 	bsz, chans, anchors := xs.shape[0], xs.shape[1], xs.shape[2]
-	xs := tensor.transpose(
-		tensor.reshape(xs, {bsz, 4, dfl.num_classes, anchors}, context.temp_allocator),
-		2,
-		1,
-		context.temp_allocator,
-	)
-	xs = tensor.softmax(xs, 1, context.temp_allocator)
-	return tensor.reshape(
-		nn.forward_conv2d(dfl.conv, xs, context.temp_allocator),
-		{bsz, 4, anchors},
-		allocator,
-	)
+	xs_reshape := tensor.reshape(xs, {bsz, 4, dfl.num_classes, anchors}, allocator)
+	xs_tr := tensor.transpose(xs_reshape, 2, 1, allocator)
+	xs := tensor.softmax(xs_tr, 1, allocator)
+	out_conv := nn.forward_conv2d(dfl.conv, xs, allocator)
+	out := tensor.reshape(out_conv, {bsz, 4, anchors}, allocator)
+
+	tensor.free_tensor(xs_reshape, xs_tr, xs, out_conv, allocator = allocator)
+	return out
 }
 
 free_dfl :: proc(dfl: ^Dfl($T), allocator := context.allocator) {

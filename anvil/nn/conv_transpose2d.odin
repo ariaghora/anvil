@@ -307,7 +307,7 @@ conv_transpose_2d_grouped :: proc(
 
 	output := tensor.tensor_alloc(T, []uint{b, c_out, h_out, w_out}, true, allocator, loc)
 	pool: thread.Pool
-	thread.pool_init(&pool, context.allocator, int(min(groups, 8))) // Cap at 8 threads
+	thread.pool_init(&pool, context.allocator, int(min(groups, 4))) // Cap at 4 threads
 	defer thread.pool_destroy(&pool)
 
 	Group_Work :: struct($T: typeid) {
@@ -523,7 +523,7 @@ test_conv_transpose_2d_stride :: proc(t: ^testing.T) {
 	input_data := []f32{1, 2, 3, 4}
 	input := tensor.new_with_init(input_data, []uint{1, 1, 2, 2}, context.temp_allocator)
 
-	// Kernel: 1x1x3x3 
+	// Kernel: 1x1x3x3
 	kernel_data := []f32{1, 1, 1, 1, 1, 1, 1, 1, 1}
 	kernel := tensor.new_with_init(kernel_data, []uint{1, 1, 3, 3}, context.temp_allocator)
 

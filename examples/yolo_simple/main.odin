@@ -174,10 +174,6 @@ main :: proc() {
 			}
 			mem.tracking_allocator_destroy(&track)
 		}
-	} else {
-		arena: vmem.Arena
-		assert(vmem.arena_init_growing(&arena) == nil)
-		context.allocator = vmem.arena_allocator(&arena)
 	}
 
 	ensure(
@@ -246,8 +242,8 @@ main :: proc() {
 	defer trace.finish_trace()
 
 	t := time.now()
-	pred, anchors, strides := yolo.forward_yolo(model, input_t, context.allocator)
-	defer tensor.free_tensor(pred, anchors, strides, allocator = context.allocator)
+	pred, anchors, strides := yolo.forward_yolo(model, input_t)
+	defer tensor.free_tensor(pred, anchors, strides)
 
 	// Postprocess the raw detection.
 	// We need to filter out the detections with low confidence. Subsequently,
