@@ -21,8 +21,14 @@ make_anchors :: proc(
 ) {
 	s0, s1, s2 := strides[0], strides[1], strides[2]
 
-	anchor_points_list := make([dynamic]^tensor.Tensor(T), 0, 3, context.temp_allocator)
-	stride_tensor_list := make([dynamic]^tensor.Tensor(T), 0, 3, context.temp_allocator)
+	anchor_points_list := make([dynamic]^tensor.Tensor(T), 0, 3, allocator)
+	stride_tensor_list := make([dynamic]^tensor.Tensor(T), 0, 3, allocator)
+	defer {
+		for t in anchor_points_list do tensor.free_tensor(t, allocator = allocator)
+		for t in stride_tensor_list do tensor.free_tensor(t, allocator = allocator)
+		delete(anchor_points_list)
+		delete(stride_tensor_list)
+	}
 
 	xs_list := [3]^tensor.Tensor(T){xs0, xs1, xs2}
 	stride_list := [3]uint{s0, s1, s2}
@@ -33,48 +39,51 @@ make_anchors :: proc(
 		h := xs.shape[2]
 		w := xs.shape[3]
 
-		sx_range := tensor.arange(T, w, context.temp_allocator)
-		sy_range := tensor.arange(T, h, context.temp_allocator)
+		sx_range := tensor.arange(T, w, allocator)
+		sy_range := tensor.arange(T, h, allocator)
+		defer tensor.free_tensor(sx_range, sy_range, allocator = allocator)
 
 		// Add grid_cell_offset to each coordinate
-		offset_tensor := tensor.tensor_alloc(T, []uint{}, true, context.temp_allocator)
+		offset_tensor := tensor.tensor_alloc(T, []uint{}, true, allocator)
+		defer tensor.free_tensor(offset_tensor, allocator = allocator)
 		offset_tensor.data[0] = grid_cell_offset
 
-		sx := tensor.add(sx_range, offset_tensor, context.temp_allocator)
-		sy := tensor.add(sy_range, offset_tensor, context.temp_allocator)
+		sx := tensor.add(sx_range, offset_tensor, allocator)
+		sy := tensor.add(sy_range, offset_tensor, allocator)
+		defer tensor.free_tensor(sx, sy, allocator = allocator)
 
 		// Create grid by repeating
 		// sx: (w,) -> (1, w) -> repeat (h, 1) -> (h, w) -> flatten
-		sx_reshaped := tensor.reshape(sx, []uint{1, w}, context.temp_allocator)
-		sx_repeated := tensor.repeat(sx_reshaped, []uint{h, 1}, context.temp_allocator)
-		sx_flat := tensor.flatten_all(sx_repeated, context.temp_allocator)
+		sx_reshaped := tensor.reshape(sx, []uint{1, w}, allocator)
+		sx_repeated := tensor.repeat(sx_reshaped, []uint{h, 1}, allocator)
+		sx_flat := tensor.flatten_all(sx_repeated, allocator)
+		defer tensor.free_tensor(sx_reshaped, sx_repeated, sx_flat, allocator = allocator)
 
 		// sy: (h,) -> (h, 1) -> repeat (1, w) -> (h, w) -> flatten
-		sy_reshaped := tensor.reshape(sy, []uint{h, 1}, context.temp_allocator)
-		sy_repeated := tensor.repeat(sy_reshaped, []uint{1, w}, context.temp_allocator)
-		sy_flat := tensor.flatten_all(sy_repeated, context.temp_allocator)
+		sy_reshaped := tensor.reshape(sy, []uint{h, 1}, allocator)
+		sy_repeated := tensor.repeat(sy_reshaped, []uint{1, w}, allocator)
+		sy_flat := tensor.flatten_all(sy_repeated, allocator)
+		defer tensor.free_tensor(sy_reshaped, sy_repeated, sy_flat, allocator = allocator)
 
 		// Reshape and concatenate along dimension 1 to get (h*w, 2)
-		sx_flat_2d := tensor.reshape(sx_flat, []uint{h * w, 1}, context.temp_allocator)
-		sy_flat_2d := tensor.reshape(sy_flat, []uint{h * w, 1}, context.temp_allocator)
-		points := tensor.cat(
-			[]^tensor.Tensor(T){sx_flat_2d, sy_flat_2d},
-			1,
-			context.temp_allocator,
-		)
+		sx_flat_2d := tensor.reshape(sx_flat, []uint{h * w, 1}, allocator)
+		sy_flat_2d := tensor.reshape(sy_flat, []uint{h * w, 1}, allocator)
+		defer tensor.free_tensor(sx_flat_2d, sy_flat_2d, allocator = allocator)
+		points := tensor.cat([]^tensor.Tensor(T){sx_flat_2d, sy_flat_2d}, 1, allocator)
 		append(&anchor_points_list, points)
 
 		// Create stride tensor with shape (h*w,) filled with stride value
-		stride_val := tensor.ones(T, []uint{h * w}, context.temp_allocator)
-		stride_scalar := tensor.tensor_alloc(T, []uint{}, true, context.temp_allocator)
+		stride_val := tensor.ones(T, []uint{h * w}, allocator)
+		stride_scalar := tensor.tensor_alloc(T, []uint{}, true, allocator)
 		stride_scalar.data[0] = T(stride)
-
-		stride_scaled := tensor.mul(stride_val, stride_scalar, context.temp_allocator)
+		defer tensor.free_tensor(stride_val, stride_scalar, allocator = allocator)
+		stride_scaled := tensor.mul(stride_val, stride_scalar, allocator)
 		append(&stride_tensor_list, stride_scaled)
 	}
 
 	anchor_points = tensor.cat(anchor_points_list[:], 0, allocator)
-	stride_tensor_concat := tensor.cat(stride_tensor_list[:], 0, context.temp_allocator)
+	stride_tensor_concat := tensor.cat(stride_tensor_list[:], 0, allocator)
+	defer tensor.free_tensor(stride_tensor_concat, allocator = allocator)
 	stride_tensor = tensor.unsqueeze(stride_tensor_concat, 1, allocator)
 
 	return anchor_points, stride_tensor
@@ -84,16 +93,22 @@ dist2bbox :: proc(
 	distance, anchor_points: ^tensor.Tensor($T),
 	allocator := context.allocator,
 ) -> ^tensor.Tensor(T) {
-	chunks := tensor.chunk(distance, 2, 1, context.temp_allocator)
+	chunks := tensor.chunk(distance, 2, 1, allocator)
 	lt, rb := chunks[0], chunks[1]
-	x1y1 := tensor.sub(anchor_points, lt, context.temp_allocator)
-	x2y2 := tensor.add(anchor_points, rb, context.temp_allocator)
+	x1y1 := tensor.sub(anchor_points, lt, allocator)
+	x2y2 := tensor.add(anchor_points, rb, allocator)
 
 	// Center, (x1y1+x2y2) / 2
-	c_xy := tensor.add(x1y1, x2y2, context.temp_allocator)
+	c_xy := tensor.add(x1y1, x2y2, allocator)
 	for _, i in c_xy.data do c_xy.data[i] *= T(0.5)
 
-	wh := tensor.sub(x2y2, x1y1, context.temp_allocator)
+	wh := tensor.sub(x2y2, x1y1, allocator)
+
+	defer {
+		for c in chunks do tensor.free_tensor(c, allocator = allocator)
+		delete(chunks, allocator)
+		tensor.free_tensor(x1y1, x2y2, c_xy, wh, allocator = allocator)
+	}
 	return tensor.cat([]^tensor.Tensor(T){c_xy, wh}, 1, allocator)
 }
 
@@ -152,13 +167,12 @@ forward_conv_block :: proc(
 	trace.end_scoped_trace(conv_trace)
 
 	bn_trace := trace.TRACE_SECTION("batch_norm")
-	bn_out := tensor.silu_fast(
-		nn.forward_batch_norm_2d(layer.bn, conv_out, allocator, loc),
-		allocator,
-	)
+	bn_out := nn.forward_batch_norm_2d(layer.bn, conv_out, allocator, loc)
+	defer tensor.free_tensor(bn_out, allocator = allocator)
+	bn_out_silu := tensor.silu_fast(bn_out, allocator)
 	trace.end_scoped_trace(bn_trace)
 
-	return bn_out
+	return bn_out_silu
 }
 
 free_conv_block :: proc(layer: ^Conv_Block($T), allocator := context.allocator) {
@@ -270,17 +284,19 @@ forward_c2f :: proc(
 	ys := forward_conv_block(c2f.cv1, xs, allocator)
 	ys_chunk := tensor.chunk(ys, 2, 1, allocator)
 	ys_list := slice.to_dynamic(ys_chunk, allocator)
-	defer {
-		tensor.free_tensor(ys, allocator = allocator)
-		for t in ys_chunk do tensor.free_tensor(t, allocator = allocator)
-	}
 
 	for m in c2f.bottleneck {
 		last := ys_list[len(ys_list) - 1]
 		b := forward_bottleneck(m, last, allocator, loc)
 		append(&ys_list, b)
 	}
-	defer for t in ys_list do tensor.free_tensor(t, allocator = allocator)
+
+	defer {
+		tensor.free_tensor(ys, allocator = allocator)
+		for t in ys_list do tensor.free_tensor(t, allocator = allocator)
+		delete(ys_list)
+		delete(ys_chunk)
+	}
 
 	zs := tensor.cat(ys_list[:], 1, allocator, loc)
 	defer tensor.free_tensor(zs, allocator = allocator)
@@ -325,7 +341,7 @@ forward_sppf :: proc(
 	xs2_pz1 := tensor.pad_with_zero(xs, 2, sppf.k / 2, sppf.k / 2, allocator)
 	xs2_pz2 := tensor.pad_with_zero(xs2_pz1, 3, sppf.k / 2, sppf.k / 2, allocator)
 	xs2 := tensor.max_pool_2d(xs2_pz2, sppf.k, 1, 0, allocator)
-	defer tensor.free_tensor(xs, xs2_pz1, xs2_pz2, allocator = allocator)
+	defer tensor.free_tensor(xs, xs2, xs2_pz1, xs2_pz2, allocator = allocator)
 
 	xs3_pz1 := tensor.pad_with_zero(xs2, 2, sppf.k / 2, sppf.k / 2, allocator)
 	xs3_pz2 := tensor.pad_with_zero(xs3_pz1, 3, sppf.k / 2, sppf.k / 2, allocator)
@@ -335,6 +351,7 @@ forward_sppf :: proc(
 	xs4_pz1 := tensor.pad_with_zero(xs3, 2, sppf.k / 2, sppf.k / 2, allocator)
 	xs4_pz2 := tensor.pad_with_zero(xs4_pz1, 3, sppf.k / 2, sppf.k / 2, allocator)
 	xs4 := tensor.max_pool_2d(xs4_pz2, sppf.k, 1, 0, allocator)
+	defer tensor.free_tensor(xs4, xs4_pz1, xs4_pz2, allocator = allocator)
 
 	xs_cat := tensor.cat([]^tensor.Tensor(T){xs, xs2, xs3, xs4}, 1, allocator)
 	defer tensor.free_tensor(xs_cat, allocator = allocator)
@@ -797,67 +814,72 @@ forward_head :: proc(
 		i: uint,
 		allocator := context.allocator,
 	) -> ^tensor.Tensor(T) {
-		xs_2 := forward_conv_block(cv2[i].cb0, xs, context.temp_allocator)
-		xs_2 = forward_conv_block(cv2[i].cb1, xs_2, context.temp_allocator)
-		xs_2 = nn.forward_conv2d(cv2[i].conv, xs_2, context.temp_allocator)
+		xs_2_cb1 := forward_conv_block(cv2[i].cb0, xs, allocator)
+		xs_2_cb2 := forward_conv_block(cv2[i].cb1, xs_2_cb1, allocator)
+		xs_2 := nn.forward_conv2d(cv2[i].conv, xs_2_cb2, allocator)
 
-		xs_3 := forward_conv_block(cv3[i].cb0, xs, context.temp_allocator)
-		xs_3 = forward_conv_block(cv3[i].cb1, xs_3, context.temp_allocator)
-		xs_3 = nn.forward_conv2d(cv3[i].conv, xs_3, context.temp_allocator)
+		xs_3_cb1 := forward_conv_block(cv3[i].cb0, xs, allocator)
+		xs_3_cb2 := forward_conv_block(cv3[i].cb1, xs_3_cb1, allocator)
+		xs_3 := nn.forward_conv2d(cv3[i].conv, xs_3_cb2, allocator)
 
+		defer tensor.free_tensor(
+			xs_2_cb1,
+			xs_2_cb2,
+			xs_2,
+			xs_3_cb1,
+			xs_3_cb2,
+			xs_3,
+			allocator = allocator,
+		)
 		return tensor.cat([]^tensor.Tensor(T){xs_2, xs_3}, 1, allocator)
 	}
 
-	xs0 := forward_cv(dn.cv2, dn.cv3, xs0, 0, allocator = context.temp_allocator)
-	xs1 := forward_cv(dn.cv2, dn.cv3, xs1, 1, allocator = context.temp_allocator)
-	xs2 := forward_cv(dn.cv2, dn.cv3, xs2, 2, allocator = context.temp_allocator)
-	anchors, strides := make_anchors(xs0, xs1, xs2, {8, 16, 32}, 0.5, context.temp_allocator)
+	xs0 := forward_cv(dn.cv2, dn.cv3, xs0, 0, allocator = allocator)
+	xs1 := forward_cv(dn.cv2, dn.cv3, xs1, 1, allocator = allocator)
+	xs2 := forward_cv(dn.cv2, dn.cv3, xs2, 2, allocator = allocator)
+	defer tensor.free_tensor(xs0, xs1, xs2, allocator = allocator)
 
-	// this will be returned
-	anchors = tensor.unsqueeze(
-		tensor.transpose(anchors, 0, 1, context.temp_allocator),
-		0,
-		allocator,
-	)
-	// this will be returned
-	strides = tensor.transpose(strides, 0, 1, allocator)
+	anchors, strides := make_anchors(xs0, xs1, xs2, {8, 16, 32}, 0.5, allocator)
+	anchors_tr := tensor.transpose(anchors, 0, 1, allocator)
+	defer tensor.free_tensor(anchors, strides, anchors_tr, allocator = allocator)
+
+	// these will be returned
+	anchors_unsq := tensor.unsqueeze(anchors_tr, 0, allocator)
+	strides_tr := tensor.transpose(strides, 0, 1, allocator)
 
 	reshape := proc(
 		xs: ^tensor.Tensor(T),
 		no: uint,
-		allocator := context.temp_allocator,
+		allocator := context.allocator,
 	) -> ^tensor.Tensor(T) {
 		d := xs.shape[0]
 		el := tensor.shape_to_size(xs.shape)
 		return tensor.reshape(xs, {d, no, el / (d * no)}, allocator)
 	}
 
-	ys0 := reshape(xs0, dn.no, context.temp_allocator)
-	ys1 := reshape(xs1, dn.no, context.temp_allocator)
-	ys2 := reshape(xs2, dn.no, context.temp_allocator)
-
-	x_cat := tensor.cat([]^tensor.Tensor(T){ys0, ys1, ys2}, 2, context.temp_allocator)
+	ys0 := reshape(xs0, dn.no, allocator)
+	ys1 := reshape(xs1, dn.no, allocator)
+	ys2 := reshape(xs2, dn.no, allocator)
+	x_cat := tensor.cat([]^tensor.Tensor(T){ys0, ys1, ys2}, 2, allocator)
+	defer tensor.free_tensor(ys0, ys1, ys2, x_cat, allocator = allocator)
 
 	chan_mid := int(dn.ch * 4)
 	chan_end := int(x_cat.shape[1])
-	box := tensor.slice(x_cat, {{}, {0, chan_mid, 1}, {}}, context.temp_allocator)
-	cls := tensor.slice(x_cat, {{}, {chan_mid, chan_end, 1}, {}}, context.temp_allocator)
 
-	dbox := dist2bbox(
-		forward_dfl(dn.dfl, box, context.temp_allocator),
-		anchors,
-		context.temp_allocator,
-	)
-	dbox = tensor.mul(dbox, strides, context.temp_allocator)
+	box := tensor.slice(x_cat, {{}, {0, chan_mid, 1}, {}}, allocator)
+	cls := tensor.slice(x_cat, {{}, {chan_mid, chan_end, 1}, {}}, allocator)
+	defer tensor.free_tensor(box, cls, allocator = allocator)
+
+	box_dfl := forward_dfl(dn.dfl, box, allocator)
+	dbox := dist2bbox(box_dfl, anchors_unsq, allocator)
+	dbox_mul := tensor.mul(dbox, strides_tr, allocator)
+	pred_sig := tensor.sigmoid(cls, allocator)
+	defer tensor.free_tensor(box_dfl, dbox, dbox_mul, pred_sig, allocator = allocator)
 
 	// this will be returned
-	pred := tensor.cat(
-		[]^tensor.Tensor(T){dbox, tensor.sigmoid(cls, context.temp_allocator)},
-		1,
-		allocator,
-	)
+	pred_cat := tensor.cat([]^tensor.Tensor(T){dbox_mul, pred_sig}, 1, allocator)
 
-	return pred, anchors, strides
+	return pred_cat, anchors_unsq, strides_tr
 }
 
 YOLO_V8 :: struct($T: typeid) {
@@ -900,14 +922,16 @@ forward_yolo :: proc(
 	yolo: ^YOLO_V8($T),
 	x: ^tensor.Tensor(T),
 	allocator := context.allocator,
+	loc := #caller_location,
 ) -> (
 	^tensor.Tensor(T),
 	^tensor.Tensor(T),
 	^tensor.Tensor(T),
 ) {
-	x1, x2, x3 := forward_dark_net(yolo.net, x, context.temp_allocator)
-	x1, x2, x3 = forward_neck(yolo.fpn, x1, x2, x3, context.temp_allocator)
-	return forward_head(yolo.head, x1, x2, x3, allocator)
+	x1, x2, x3 := forward_dark_net(yolo.net, x, allocator)
+	x1_neck, x2_neck, x3_neck := forward_neck(yolo.fpn, x1, x2, x3, allocator)
+	defer tensor.free_tensor(x1, x2, x3, x1_neck, x2_neck, x3_neck, allocator = allocator)
+	return forward_head(yolo.head, x1_neck, x2_neck, x3_neck, allocator)
 }
 
 free_yolo :: proc(model: ^YOLO_V8($T), allocator := context.allocator) {

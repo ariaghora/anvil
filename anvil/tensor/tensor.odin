@@ -542,15 +542,19 @@ free_tensor :: proc {
 }
 
 @(private = "file")
-free_tensor_one :: proc(arr: ^Tensor($T), allocator := context.allocator) {
+free_tensor_one :: proc(
+	arr: ^Tensor($T),
+	allocator := context.allocator,
+	loc := #caller_location,
+) {
 	// Only free data if this tensor owns its data
 	if arr.owns_data {
-		delete(arr.data, allocator)
+		delete(arr.data, allocator, loc)
 	}
 	// Always free shape and strides (each tensor owns these)
-	delete(arr.shape, allocator)
-	delete(arr.strides, allocator)
-	free(arr, allocator)
+	delete(arr.shape, allocator, loc)
+	delete(arr.strides, allocator, loc)
+	free(arr, allocator, loc)
 }
 
 @(private = "file")
