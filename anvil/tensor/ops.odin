@@ -211,10 +211,7 @@ elementwise_binary_op :: proc(
 
 	result := tensor_alloc(T, result_shape, true, allocator, loc)
 	a_strides := broadcast_strides(a.shape, result_shape, a.strides, context.temp_allocator)
-	defer delete(a_strides, context.temp_allocator)
-
 	b_strides := broadcast_strides(b.shape, result_shape, b.strides, context.temp_allocator)
-	defer delete(b_strides, context.temp_allocator)
 
 	total_elements := shape_to_size(result_shape)
 	for i in 0 ..< total_elements {
@@ -481,7 +478,6 @@ tensor_reduce_single_axis :: proc(
 	for result_linear_idx in 0 ..< result_size {
 		// Convert result linear index to multi-dimensional coordinates
 		result_coords := make([]uint, len(result.shape), context.temp_allocator)
-		defer delete(result_coords, context.temp_allocator)
 
 		temp_idx := result_linear_idx
 		for dim := len(result.shape) - 1; dim >= 0; dim -= 1 {
@@ -493,7 +489,6 @@ tensor_reduce_single_axis :: proc(
 
 		// Map result coordinates to input tensor coordinates
 		input_coords := make([]uint, len(tensor.shape), context.temp_allocator)
-		defer delete(input_coords, context.temp_allocator)
 
 		map_coordinates(result_coords, input_coords, axis, keepdims)
 

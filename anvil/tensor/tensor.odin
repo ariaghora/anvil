@@ -826,8 +826,13 @@ gemm :: proc(
 	loc := #caller_location,
 ) -> ^Tensor(T) {
 	ensure(len(a.shape) == 2 && len(b.shape) == 2, "both inputs for gemm must be 2D tensors")
-	a := trans_a ? transpose(a, 0, 1, context.temp_allocator) : a
-	b := trans_b ? transpose(b, 0, 1, context.temp_allocator) : b
+	a := trans_a ? transpose(a, 0, 1, allocator) : a
+	b := trans_b ? transpose(b, 0, 1, allocator) : b
+
+	defer {
+		if trans_a do free_tensor(a, allocator)
+		if trans_b do free_tensor(b, allocator)
+	}
 
 	res := matmul(a, b, allocator)
 	if alpha != T(1) {
@@ -929,8 +934,8 @@ permute :: proc(
 	result := tensor_alloc(T, new_shape, true, allocator, loc)
 
 	// Get strided data with the permuted layout
-	data, allocated := get_strided_data(tensor, new_shape, new_strides, context.temp_allocator)
-	defer if allocated do delete(data, context.temp_allocator)
+	data, allocated := get_strided_data(tensor, new_shape, new_strides, allocator)
+	defer if allocated do delete(data, allocator)
 
 	copy(result.data, data)
 	return result
@@ -971,8 +976,8 @@ transpose :: proc(
 	result := tensor_alloc(T, new_shape, true, allocator, loc)
 
 	// Get strided data with the transposed layout
-	data, allocated := get_strided_data(tensor, new_shape, new_strides, context.temp_allocator)
-	defer if allocated do delete(data, context.temp_allocator)
+	data, allocated := get_strided_data(tensor, new_shape, new_strides, allocator)
+	defer if allocated do delete(data, allocator)
 
 	copy(result.data, data)
 	return result
@@ -1067,9 +1072,9 @@ chunk :: proc(
 			&Tensor(T){data = tensor.data[offset:], shape = chunk_shape, strides = chunk_strides},
 			chunk_shape,
 			chunk_strides,
-			context.temp_allocator,
+			allocator,
 		)
-		defer if allocated do delete(data, context.temp_allocator)
+		defer if allocated do delete(data, allocator)
 
 		copy(chunk_tensor.data, data)
 		chunks[i] = chunk_tensor
@@ -1392,7 +1397,8 @@ repeat :: proc(
 	result := tensor_alloc(T, new_shape, true, allocator)
 
 	// Get source data
-	src_data, _ := get_strided_data(tensor, allocator = context.temp_allocator)
+	src_data, src_allocated := get_strided_data(tensor, allocator = allocator)
+	defer if src_allocated do delete(src_data, allocator)
 
 	// Calculate strides for iterating through result
 	result_strides := make([]uint, len(new_shape), context.temp_allocator)
@@ -1594,7 +1600,8 @@ flatten_all :: proc(tensor: ^Tensor($T), allocator := context.allocator) -> ^Ten
 	total_size := shape_to_size(tensor.shape)
 	result := tensor_alloc(T, []uint{total_size}, true, allocator)
 
-	data, _ := get_strided_data(tensor, allocator = context.temp_allocator)
+	data, alloc := get_strided_data(tensor, allocator = allocator)
+	defer if alloc do delete(data, allocator)
 
 	copy(result.data, data)
 	return result

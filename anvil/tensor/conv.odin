@@ -35,8 +35,9 @@ im2col :: proc(
 	h_out, w_out := get_hw(h, w, h_k, w_k, stride, dilation, padding)
 
 	src := t.data
+	allocated := false
 	if !t.contiguous {
-		src, _ = get_strided_data(t, allocator = context.temp_allocator)
+		src, allocated = get_strided_data(t, allocator = allocator)
 	}
 
 	dst_size := b * h_out * w_out * c * h_k * w_k
@@ -111,6 +112,7 @@ im2col :: proc(
 		)
 	}
 	trace.end_scoped_trace(im2col_building)
+	if allocated do delete(src)
 
 	t_out := tensor_alloc(T, []uint{b, h_out * w_out, c * h_k * w_k}, false, allocator, loc)
 	t_out.data = dst

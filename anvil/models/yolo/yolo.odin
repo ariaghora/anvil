@@ -147,7 +147,8 @@ forward_conv_block :: proc(
 	defer trace.end_scoped_trace(conv_bn_trace)
 
 	conv_trace := trace.TRACE_SECTION("conv2d")
-	conv_out := nn.forward_conv2d(layer.conv, x, context.temp_allocator, loc)
+	conv_out := nn.forward_conv2d(layer.conv, x, allocator, loc)
+	defer tensor.free_tensor(conv_out, allocator = allocator)
 	trace.end_scoped_trace(conv_trace)
 
 	bn_trace := trace.TRACE_SECTION("batch_norm")
@@ -214,20 +215,15 @@ forward_bottleneck :: proc(
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
 	if bottleneck.residual {
-		ys := forward_conv_block(
-			bottleneck.cv2,
-			forward_conv_block(bottleneck.cv1, xs, context.temp_allocator, loc),
-			context.temp_allocator,
-			loc,
-		)
+		cb := forward_conv_block(bottleneck.cv1, xs, allocator, loc)
+		ys := forward_conv_block(bottleneck.cv2, cb, allocator, loc)
+		defer tensor.free_tensor(cb, ys, allocator = allocator)
+
 		return tensor.add(xs, ys, allocator)
 	} else {
-		return forward_conv_block(
-			bottleneck.cv2,
-			forward_conv_block(bottleneck.cv1, xs, context.temp_allocator, loc),
-			allocator,
-			loc,
-		)
+		cb := forward_conv_block(bottleneck.cv1, xs, allocator, loc)
+		defer tensor.free_tensor(cb, allocator = allocator)
+		return forward_conv_block(bottleneck.cv2, cb, allocator, loc)
 	}
 }
 
@@ -271,17 +267,23 @@ forward_c2f :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
-	ys := forward_conv_block(c2f.cv1, xs, context.temp_allocator)
-	ys_list := slice.to_dynamic(
-		tensor.chunk(ys, 2, 1, context.temp_allocator),
-		context.temp_allocator,
-	)
+	ys := forward_conv_block(c2f.cv1, xs, allocator)
+	ys_chunk := tensor.chunk(ys, 2, 1, allocator)
+	ys_list := slice.to_dynamic(ys_chunk, allocator)
+	defer {
+		tensor.free_tensor(ys, allocator = allocator)
+		for t in ys_chunk do tensor.free_tensor(t, allocator = allocator)
+	}
+
 	for m in c2f.bottleneck {
 		last := ys_list[len(ys_list) - 1]
-		b := forward_bottleneck(m, last, context.temp_allocator, loc)
+		b := forward_bottleneck(m, last, allocator, loc)
 		append(&ys_list, b)
 	}
-	zs := tensor.cat(ys_list[:], 1, context.temp_allocator, loc)
+	defer for t in ys_list do tensor.free_tensor(t, allocator = allocator)
+
+	zs := tensor.cat(ys_list[:], 1, allocator, loc)
+	defer tensor.free_tensor(zs, allocator = allocator)
 	return forward_conv_block(c2f.cv2, zs, allocator, loc)
 }
 
@@ -319,20 +321,23 @@ forward_sppf :: proc(
 	xs: ^tensor.Tensor(T),
 	allocator := context.allocator,
 ) -> ^tensor.Tensor(T) {
-	xs := forward_conv_block(sppf.cv1, xs, context.temp_allocator)
-	xs2 := tensor.pad_with_zero(xs, 2, sppf.k / 2, sppf.k / 2, context.temp_allocator)
-	xs2 = tensor.pad_with_zero(xs2, 3, sppf.k / 2, sppf.k / 2, context.temp_allocator)
-	xs2 = tensor.max_pool_2d(xs2, sppf.k, 1, 0, context.temp_allocator)
+	xs := forward_conv_block(sppf.cv1, xs, allocator)
+	xs2_pz1 := tensor.pad_with_zero(xs, 2, sppf.k / 2, sppf.k / 2, allocator)
+	xs2_pz2 := tensor.pad_with_zero(xs2_pz1, 3, sppf.k / 2, sppf.k / 2, allocator)
+	xs2 := tensor.max_pool_2d(xs2_pz2, sppf.k, 1, 0, allocator)
+	defer tensor.free_tensor(xs, xs2_pz1, xs2_pz2, allocator = allocator)
 
-	xs3 := tensor.pad_with_zero(xs2, 2, sppf.k / 2, sppf.k / 2, context.temp_allocator)
-	xs3 = tensor.pad_with_zero(xs3, 3, sppf.k / 2, sppf.k / 2, context.temp_allocator)
-	xs3 = tensor.max_pool_2d(xs3, sppf.k, 1, 0, context.temp_allocator)
+	xs3_pz1 := tensor.pad_with_zero(xs2, 2, sppf.k / 2, sppf.k / 2, allocator)
+	xs3_pz2 := tensor.pad_with_zero(xs3_pz1, 3, sppf.k / 2, sppf.k / 2, allocator)
+	xs3 := tensor.max_pool_2d(xs3_pz2, sppf.k, 1, 0, allocator)
+	defer tensor.free_tensor(xs3, xs3_pz1, xs3_pz2, allocator = allocator)
 
-	xs4 := tensor.pad_with_zero(xs3, 2, sppf.k / 2, sppf.k / 2, context.temp_allocator)
-	xs4 = tensor.pad_with_zero(xs4, 3, sppf.k / 2, sppf.k / 2, context.temp_allocator)
-	xs4 = tensor.max_pool_2d(xs4, sppf.k, 1, 0, context.temp_allocator)
+	xs4_pz1 := tensor.pad_with_zero(xs3, 2, sppf.k / 2, sppf.k / 2, allocator)
+	xs4_pz2 := tensor.pad_with_zero(xs4_pz1, 3, sppf.k / 2, sppf.k / 2, allocator)
+	xs4 := tensor.max_pool_2d(xs4_pz2, sppf.k, 1, 0, allocator)
 
-	xs_cat := tensor.cat([]^tensor.Tensor(T){xs, xs2, xs3, xs4}, 1, context.temp_allocator)
+	xs_cat := tensor.cat([]^tensor.Tensor(T){xs, xs2, xs3, xs4}, 1, allocator)
+	defer tensor.free_tensor(xs_cat, allocator = allocator)
 	return forward_conv_block(sppf.cv2, xs_cat, allocator)
 }
 

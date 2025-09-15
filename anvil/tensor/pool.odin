@@ -36,9 +36,9 @@ max_pool_2d :: proc(
 	src := input.data
 	allocated := false
 	if !input.contiguous {
-		src, allocated = get_strided_data(input, allocator = context.temp_allocator)
+		src, allocated = get_strided_data(input, allocator = allocator)
 	}
-	defer if allocated do delete(src, context.temp_allocator)
+	defer if allocated do delete(src, allocator)
 
 	// Perform max pooling
 	#no_bounds_check {

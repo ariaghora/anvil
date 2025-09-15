@@ -14,6 +14,7 @@ import "core:c"
 import "core:c/libc"
 import "core:fmt"
 import "core:mem"
+import vmem "core:mem/virtual"
 import "core:os"
 import "core:slice"
 import "core:strings"
@@ -173,6 +174,10 @@ main :: proc() {
 			}
 			mem.tracking_allocator_destroy(&track)
 		}
+	} else {
+		arena: vmem.Arena
+		assert(vmem.arena_init_growing(&arena) == nil)
+		context.allocator = vmem.arena_allocator(&arena)
 	}
 
 	ensure(

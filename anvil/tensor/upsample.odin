@@ -23,8 +23,9 @@ upsample_nearest_2d :: proc(
 	src := input.data
 	allocated := false
 	if !input.contiguous {
-		src, allocated = get_strided_data(input, allocator = context.temp_allocator)
+		src, allocated = get_strided_data(input, allocator = allocator)
 	}
+	defer if allocated do delete(src, allocator)
 
 	// Special case for 2x upsampling
 	if target_h == src_h * 2 && target_w == src_w * 2 {
