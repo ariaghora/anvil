@@ -8,6 +8,7 @@ import "core:math"
 import "core:mem"
 import "core:simd"
 import "core:slice"
+import "core:time"
 
 // Binary operations
 Binary_Op :: enum {
@@ -270,7 +271,8 @@ mul :: proc(
 		}
 	}
 
-	return elementwise_binary_op(a, b, .MULTIPLY, allocator, loc)
+	out := elementwise_binary_op(a, b, .MULTIPLY, allocator, loc)
+	return out
 }
 
 // Subtraction operation
@@ -279,7 +281,8 @@ sub :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
-	return elementwise_binary_op(a, b, .SUBTRACT, allocator, loc)
+	out := elementwise_binary_op(a, b, .SUBTRACT, allocator, loc)
+	return out
 }
 
 // Division operation
@@ -288,7 +291,8 @@ div :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
-	return elementwise_binary_op(a, b, .DIVIDE, allocator, loc)
+	out := elementwise_binary_op(a, b, .DIVIDE, allocator, loc)
+	return out
 }
 
 // Helper function for all-axis reduction
@@ -732,6 +736,14 @@ relu :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
+	relu_trace := trace.begin_scoped_trace("relu")
+	trace.end_scoped_trace(relu_trace)
+	when T == f32 && ODIN_OS == .Darwin { 	// currently only darwin has maxf_batch
+		// max(0, x), and out.data is initialized with 0
+		out := tensor_alloc(T, tensor.shape, true, allocator, loc)
+		simd_backend.maxf_batch(tensor.data, out.data, out.data)
+		return out
+	}
 	return elementwise_unary_op(tensor, .RELU, allocator, loc)
 }
 

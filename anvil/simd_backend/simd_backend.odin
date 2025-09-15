@@ -11,6 +11,7 @@ when ODIN_OS == .Darwin {
 		vvexpf :: proc(y: [^]f32, x: [^]f32, n: ^i32) ---
 		vDSP_vadd :: proc(A: [^]f32, IA: i32, B: [^]f32, IB: i32, C: [^]f32, IC: i32, N: u32) ---
 		vDSP_mtrans :: proc(A: [^]f32, IA: i32, C: [^]f32, IC: i32, M: u32, N: u32) ---
+		vDSP_vmax :: proc(A: [^]f32, IA: i32, B: [^]f32, IB: i32, C: [^]f32, IC: i32, N: u32) ---
 	}
 
 	expf_4 :: proc(dst: ^#simd[4]f32, src: ^#simd[4]f32) {
@@ -29,6 +30,11 @@ when ODIN_OS == .Darwin {
 		n := i32(len(src))
 		vvexpf(raw_data(dst), raw_data(src), &n)
 	}
+
+	maxf_batch :: proc(a, b, out: []f32) {
+		vDSP_vmax(raw_data(a), 1, raw_data(b), 1, raw_data(out), 1, u32(len(a)))
+	}
+
 	transposef :: proc(dst, src: []f32, rows, cols: uint) {
 		vDSP_mtrans(raw_data(src), i32(cols), raw_data(dst), i32(rows), u32(rows), u32(cols))
 	}
