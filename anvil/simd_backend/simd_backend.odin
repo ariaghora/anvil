@@ -13,6 +13,7 @@ when ODIN_OS == .Darwin {
 		vDSP_mtrans :: proc(A: [^]f32, IA: i32, C: [^]f32, IC: i32, M: u32, N: u32) ---
 		vDSP_vmax :: proc(A: [^]f32, IA: i32, B: [^]f32, IB: i32, C: [^]f32, IC: i32, N: u32) ---
 		vDSP_maximum :: proc(A: [^]f32) -> f32 ---
+		vDSP_sve :: proc(A: [^]f32, stride_A: i32, C: ^f32, n: u32) ---
 	}
 
 	expf_4 :: proc(dst: ^#simd[4]f32, src: ^#simd[4]f32) {

@@ -303,9 +303,9 @@ im2col_fast_3x3_padding1 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint)
 
 							// Unrolled 3x3 kernel
 							kernel_idx := 0
-							for kh in -1 ..< 2 {
+							#unroll for kh in -1 ..< 2 {
 								ih := int(oh) + kh
-								for kw in -1 ..< 2 {
+								#unroll for kw in -1 ..< 2 {
 									iw := int(ow) + kw
 
 									// Check bounds (padding behavior)
@@ -334,9 +334,9 @@ im2col_fast_3x3_padding1 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint)
 							dst_base := dst_idx + (oh * w_out + ow) * c * 9 + c_idx * 9
 
 							kernel_idx := 0
-							for kh in -1 ..< 2 {
+							#unroll for kh in -1 ..< 2 {
 								ih := int(oh) + kh
-								for kw in -1 ..< 2 {
+								#unroll for kw in -1 ..< 2 {
 									iw := int(ow) + kw
 
 									if ih >= 0 && ih < int(h) && iw >= 0 && iw < int(w) {
@@ -421,7 +421,7 @@ im2col_fast_3x3_padding1_simd :: proc(src, dst: []f32, b, c, h, w, h_out, w_out:
 					ow = 1
 					for ; ow + 4 <= w_out - 1; ow += 4 {
 						// Process 4 output positions at once
-						for i in 0 ..< 4 {
+						#unroll for i in 0 ..< 4 {
 							dst_base := dst_idx + (oh * w_out + ow + uint(i)) * c * 9 + c_idx * 9
 							base_idx := oh * w + ow + uint(i)
 

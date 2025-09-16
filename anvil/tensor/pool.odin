@@ -216,7 +216,7 @@ global_avg_pool_2d :: proc(
 	return output
 }
 
-@(private)
+@(private = "file")
 global_avg_pool_2d_f32_simd :: proc(src, dst: []f32, b, c, hw: uint) {
 	scale := f32(1.0) / f32(hw)
 
@@ -225,33 +225,39 @@ global_avg_pool_2d_f32_simd :: proc(src, dst: []f32, b, c, hw: uint) {
 			channel_offset := (b_idx * c + c_idx) * hw
 			src_channel := src[channel_offset:channel_offset + hw]
 
-			sum_vec := #simd[4]f32{0, 0, 0, 0}
-			i := uint(0)
+			when ODIN_OS == .Darwin {
+				sum: f32
+				simd_backend.vDSP_sve(&src_channel[0], 1, &sum, u32(hw))
+				dst[b_idx * c + c_idx] = sum * scale
+			} else {
+				sum_vec := #simd[4]f32{0, 0, 0, 0}
+				i := uint(0)
 
-			for ; i + 4 <= hw; i += 4 {
-				vals := #simd[4]f32 {
-					src_channel[i],
-					src_channel[i + 1],
-					src_channel[i + 2],
-					src_channel[i + 3],
+				for ; i + 4 <= hw; i += 4 {
+					vals := #simd[4]f32 {
+						src_channel[i],
+						src_channel[i + 1],
+						src_channel[i + 2],
+						src_channel[i + 3],
+					}
+					sum_vec += vals
 				}
-				sum_vec += vals
+
+				sum := simd.reduce_add_bisect(sum_vec)
+
+				// Handle remainder
+				for ; i < hw; i += 1 {
+					sum += src_channel[i]
+				}
+				// Store average
+				dst[b_idx * c + c_idx] = sum * scale
 			}
 
-			sum := simd.reduce_add_bisect(sum_vec)
-
-			// Handle remainder
-			for ; i < hw; i += 1 {
-				sum += src_channel[i]
-			}
-
-			// Store average
-			dst[b_idx * c + c_idx] = sum * scale
 		}
 	}
 }
 
-@(private)
+@(private = "file")
 global_avg_pool_2d_scalar :: proc(src, dst: []$T, b, c, hw: uint) {
 	scale := T(1.0) / T(hw)
 
