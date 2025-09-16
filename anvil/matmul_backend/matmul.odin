@@ -7,7 +7,7 @@ when ODIN_OS == .Darwin {
 } else when ODIN_OS == .Linux {
 	foreign import blas "system:openblas"
 } else when ODIN_OS == .Windows {
-	foreign import blas "../../OpenBLAS-0.3.30-x64/lib/libopenblass.lib"
+	foreign import blas "../../../OpenBLAS-0.3.30-x64/lib/libopenblas.lib"
 }
 
 CBLAS_ORDER :: enum i32 {
