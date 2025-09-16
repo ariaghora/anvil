@@ -21,7 +21,7 @@ No Python. No gigabytes of dependencies. Just compiled code running models.
 Download `mobile_sam-tiny-vitt.safetensors` from [here](https://huggingface.co/lmz/candle-sam/tree/main). Drop it in `weights/` and run:
 
 ```bash
-$ odin run examples/sam_raylib -o:speed
+$ odin run examples/sam_raylib -o:speed -no-bounds-check
 ```
 
 <p align="center">
@@ -32,11 +32,21 @@ $ odin run examples/sam_raylib -o:speed
 
 See `examples/yolo_simple`
 
+```bash
+$ odin build examples/yolo_simple -o:speed -no-bounds-check
+$ ./yolo_simple weights/yolov8m.safetensors /path/to/image.jpg m
+```
+
 ## ONNX Models
 > [!CAUTION]
 > Still at a very limited supported. Consult `anvil/onnx/execution.odin`'s `run` procedure for the currently supported ops. Yes, that large switch-case.
 
 ### ResNet-50
+
+```bash
+$ odin build examples/resnet50_onnx -o:speed -no-bounds-check
+$ ./resnet50_onnx /path/to/image.jpg
+```
 <p align="center">
   <img width="90%" src="assets/resnet.png" />
 </p>
