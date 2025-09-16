@@ -1654,7 +1654,12 @@ softmax_last_dim_inplace :: proc(t: ^Tensor($T)) {
 			}
 
 			for ; col + 4 <= last_dim; col += 4 {
-				vals := (^#simd[4]f32)(&row_data[col])^
+				vals := #simd[4]f32 {
+					row_data[col+0],
+					row_data[col+1],
+					row_data[col+2],
+					row_data[col+3]
+				}
 				max_vec = simd.max(max_vec, vals)
 			}
 
@@ -1669,14 +1674,26 @@ softmax_last_dim_inplace :: proc(t: ^Tensor($T)) {
 			sum_vec := #simd[4]f32{0, 0, 0, 0}
 
 			for ; col + 4 <= last_dim; col += 4 {
-				vals := (^#simd[4]f32)(&row_data[col])^
+				vals := #simd[4]f32 {
+					row_data[col+0],
+					row_data[col+1],
+					row_data[col+2],
+					row_data[col+3]
+				}
 				vals = simd.sub(vals, #simd[4]f32{max_val, max_val, max_val, max_val})
 
 				exp_vals: #simd[4]f32
 				simd_backend.expf_4(&exp_vals, &vals)
 
-				(^#simd[4]f32)(&row_data[col])^ = exp_vals
-				sum_vec = simd.add(sum_vec, exp_vals)
+				for i in 0..< 4 {
+					row_data[col+uint(i)] = simd.extract(exp_vals, i)
+				}
+				sum_vec = simd.add(sum_vec, #simd[4]f32 {
+					row_data[col+0],
+					row_data[col+1],
+					row_data[col+2],
+					row_data[col+3]
+				})
 			}
 
 			// Reduce by SIMD
@@ -1693,9 +1710,17 @@ softmax_last_dim_inplace :: proc(t: ^Tensor($T)) {
 
 			col = 0
 			for ; col + 4 <= last_dim; col += 4 {
-				vals := (^#simd[4]f32)(&row_data[col])^
+				// vals := (#simd[4]f32)(row_data[col])
+				vals := #simd[4]f32 {
+					row_data[col+0],
+					row_data[col+1],
+					row_data[col+2],
+					row_data[col+3]
+				}
 				vals = simd.mul(vals, inv_sum_vec)
-				(^#simd[4]f32)(&row_data[col])^ = vals
+				for i in 0..< 4 {
+					row_data[col+uint(i)] = simd.extract(vals, i)
+				}
 			}
 
 			for ; col < last_dim; col += 1 {
