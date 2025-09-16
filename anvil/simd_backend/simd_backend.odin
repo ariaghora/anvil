@@ -3,15 +3,16 @@ package simd_backend
 import "core:math"
 import "core:simd"
 
-// Platform-specific exp abstraction
 when ODIN_OS == .Darwin {
 	foreign import accelerate "system:Accelerate.framework"
 
 	foreign accelerate {
 		vvexpf :: proc(y: [^]f32, x: [^]f32, n: ^i32) ---
+		vDSP_vsadd :: proc(A: [^]f32, stride_A: i32, B: ^f32, C: [^]f32, stride_C: i32, n: u32) ---
 		vDSP_vadd :: proc(A: [^]f32, IA: i32, B: [^]f32, IB: i32, C: [^]f32, IC: i32, N: u32) ---
 		vDSP_mtrans :: proc(A: [^]f32, IA: i32, C: [^]f32, IC: i32, M: u32, N: u32) ---
 		vDSP_vmax :: proc(A: [^]f32, IA: i32, B: [^]f32, IB: i32, C: [^]f32, IC: i32, N: u32) ---
+		vDSP_maximum :: proc(A: [^]f32) -> f32 ---
 	}
 
 	expf_4 :: proc(dst: ^#simd[4]f32, src: ^#simd[4]f32) {
@@ -19,10 +20,12 @@ when ODIN_OS == .Darwin {
 		vvexpf(cast([^]f32)dst, cast([^]f32)src, &count)
 	}
 
-	//===================================================
-	// Blast em all
 	addf_batch :: proc(dst, a, b: []f32) {
 		vDSP_vadd(raw_data(a), 1, raw_data(b), 1, raw_data(dst), 1, u32(len(a)))
+	}
+
+	vsaddf_batch :: proc(dst, a: []f32, b: ^f32) {
+		vDSP_vsadd(raw_data(a), 1, b, raw_data(dst), 1, u32(len(a)))
 	}
 
 	expf_batch :: proc(dst, src: []f32) {

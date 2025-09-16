@@ -636,7 +636,7 @@ test_stack :: proc(t: ^testing.T) {
 	// Should be [1,2,3,4,5,6,7,8,9,10,11,12]
 	testing.expect(t, slice.equal(s0.data, []i32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}))
 
-	// Stack on axis 1 - should give (2,2,3)  
+	// Stack on axis 1 - should give (2,2,3)
 	s1 := stack([]^Tensor(i32){a, b}, 1, context.temp_allocator)
 	testing.expect(t, slice.equal(s1.shape, []uint{2, 2, 3}))
 	// Should be [1,2,3,7,8,9,4,5,6,10,11,12]

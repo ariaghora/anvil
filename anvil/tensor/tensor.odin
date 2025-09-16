@@ -853,17 +853,25 @@ gemm :: proc(
 			when T == f32 {
 				for i in 0 ..< batch_elements {
 					base_idx := i * out_features
-					j := uint(0)
+					when ODIN_OS == .Darwin {
+						simd_backend.addf_batch(
+							res.data[base_idx:base_idx + out_features],
+							res.data[base_idx:base_idx + out_features],
+							bias.data,
+						)
+					} else {
+						j := uint(0)
+						for ; j + 4 <= out_features; j += 4 {
+							b := (^#simd[4]f32)(&bias.data[j])^
+							o := (^#simd[4]f32)(&res.data[base_idx + j])^
+							(^#simd[4]f32)(&res.data[base_idx + j])^ = o + b
+						}
 
-					for ; j + 4 <= out_features; j += 4 {
-						b := (^#simd[4]f32)(&bias.data[j])^
-						o := (^#simd[4]f32)(&res.data[base_idx + j])^
-						(^#simd[4]f32)(&res.data[base_idx + j])^ = o + b
+						for ; j < out_features; j += 1 {
+							res.data[base_idx + j] += bias.data[j]
+						}
 					}
 
-					for ; j < out_features; j += 1 {
-						res.data[base_idx + j] += bias.data[j]
-					}
 				}
 			} else {
 				// Scalar fallback
@@ -955,6 +963,12 @@ transpose :: proc(
 ) -> ^Tensor(T) {
 	trace_transpose := trace.TRACE_FUNCTION(fmt.tprint("transpose", tensor.shape))
 	defer trace.end_scoped_trace(trace_transpose)
+
+	if dim0 == dim1 {
+		out := tensor_alloc(T, tensor.shape, false, allocator, loc)
+		out.data = tensor.data
+		return out
+	}
 
 	// Validate dimensions
 	if dim0 < 0 || dim0 >= len(tensor.shape) || dim1 < 0 || dim1 >= len(tensor.shape) {

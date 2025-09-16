@@ -264,7 +264,7 @@ run_conv :: proc(
 		strides = attributes["strides"].([]i64) or_else {1}
 		if !slice.all_of(strides, strides[0]) do return Malformed_Attribute{"Conv only support symmetrical strides"}
 
-		// Kernel shape is omitted since we don't use it directly and can just infer from
+		// NOTE(Aria): Kernel shape is omitted since we don't use it directly and can just infer from
 		// the kernel tensor itself.
 		// kernel_shape = ...
 

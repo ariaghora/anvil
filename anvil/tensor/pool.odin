@@ -1,10 +1,11 @@
 package tensor
 
+import "../simd_backend"
 import "../trace"
 import "core:math"
 import "core:simd"
 
-// Calculate output dimensions for pooling
+// Calculate output dimensions
 get_pool_hw :: proc(h_in, w_in, k_h, k_w, stride, padding: uint) -> (uint, uint) {
 	h_out := (h_in + 2 * padding - k_h) / stride + 1
 	w_out := (w_in + 2 * padding - k_w) / stride + 1
@@ -15,24 +16,19 @@ max_pool_2d :: proc(
 	input: ^Tensor($T), // (B, C, H, W)
 	kernel_size: [2]uint, // (K_h, K_w)
 	stride: uint = 1,
-	padding: uint = 0, // Added with default 0 to maintain backward compatibility
+	padding: uint = 0,
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
 	pool_trace := trace.TRACE_FUNCTION("max_pool_2d")
 	defer trace.end_scoped_trace(pool_trace)
 
-	// Extract dimensions
 	b, c, h, w := input.shape[0], input.shape[1], input.shape[2], input.shape[3]
 	k_h, k_w := kernel_size[0], kernel_size[1]
 
-	// Calculate output dimensions
 	h_out, w_out := get_pool_hw(h, w, k_h, k_w, stride, padding)
-
-	// Allocate output tensor
 	output := tensor_alloc(T, []uint{b, c, h_out, w_out}, true, allocator, loc)
 
-	// Get input data (handle non-contiguous case)
 	src := input.data
 	allocated := false
 	if !input.contiguous {
@@ -40,39 +36,10 @@ max_pool_2d :: proc(
 	}
 	defer if allocated do delete(src, allocator)
 
-	// Perform max pooling
-	#no_bounds_check {
-		when T == f32 {
-			max_pool_2d_f32_simd(
-				src,
-				output.data,
-				b,
-				c,
-				h,
-				w,
-				k_h,
-				k_w,
-				h_out,
-				w_out,
-				stride,
-				padding,
-			)
-		} else {
-			max_pool_2d_scalar(
-				src,
-				output.data,
-				b,
-				c,
-				h,
-				w,
-				k_h,
-				k_w,
-				h_out,
-				w_out,
-				stride,
-				padding,
-			)
-		}
+	when T == f32 {
+		max_pool_2d_f32_simd(src, output.data, b, c, h, w, k_h, k_w, h_out, w_out, stride, padding)
+	} else {
+		max_pool_2d_scalar(src, output.data, b, c, h, w, k_h, k_w, h_out, w_out, stride, padding)
 	}
 
 	return output
@@ -127,9 +94,7 @@ max_pool_2d_f32_simd :: proc(
 						x_end := min(x_start + int(k_w), int(w))
 						x_start_clamped := max(x_start, 0)
 
-						// Find max in window using SIMD where possible
 						max_val := math.inf_f32(-1)
-
 						for y in y_start_clamped ..< y_end {
 							row_start := uint(y) * w + uint(x_start_clamped)
 							window_width := uint(x_end - x_start_clamped)
@@ -142,7 +107,6 @@ max_pool_2d_f32_simd :: proc(
 								math.inf_f32(-1),
 							}
 
-							// SIMD processing for groups of 4
 							for ; x + 4 <= window_width; x += 4 {
 								vals := #simd[4]f32 {
 									src_channel[row_start + x],
@@ -153,9 +117,7 @@ max_pool_2d_f32_simd :: proc(
 								max_vec = simd.max(max_vec, vals)
 							}
 
-							// Reduce SIMD vector
 							max_val = max(max_val, simd.reduce_max(max_vec))
-
 							// Handle remainder
 							for ; x < window_width; x += 1 {
 								max_val = max(max_val, src_channel[row_start + x])
@@ -235,7 +197,6 @@ global_avg_pool_2d :: proc(
 	// Output is (B, C, 1, 1)
 	output := tensor_alloc(T, []uint{b, c, 1, 1}, true, allocator, loc)
 
-	// Get input data (handle non-contiguous case)
 	src := input.data
 	allocated := false
 	if !input.contiguous {
@@ -264,11 +225,9 @@ global_avg_pool_2d_f32_simd :: proc(src, dst: []f32, b, c, hw: uint) {
 			channel_offset := (b_idx * c + c_idx) * hw
 			src_channel := src[channel_offset:channel_offset + hw]
 
-			// Sum using SIMD
 			sum_vec := #simd[4]f32{0, 0, 0, 0}
 			i := uint(0)
 
-			// Process 4 elements at a time
 			for ; i + 4 <= hw; i += 4 {
 				vals := #simd[4]f32 {
 					src_channel[i],
@@ -279,7 +238,6 @@ global_avg_pool_2d_f32_simd :: proc(src, dst: []f32, b, c, hw: uint) {
 				sum_vec += vals
 			}
 
-			// Sum the vector components
 			sum := simd.reduce_add_bisect(sum_vec)
 
 			// Handle remainder

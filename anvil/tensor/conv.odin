@@ -1,5 +1,6 @@
 package tensor
 
+import "../simd_backend"
 import "../tensor"
 import "../trace"
 import "base:runtime"
@@ -9,8 +10,14 @@ import "core:simd"
 import "core:sync"
 import "core:thread"
 
+// This file contains implementation of convolution operations: for the general
+// case and special cases. Special cases are meant to handle convolution setups
+// commonly found in the popular arcitectures.
+//
+// The code are meant to be fast, NOT necessarily clean and readable
 
-// NOTE(Aria): tuned for M1 chips. Basically this depends on cache size
+
+// NOTE(Aria): initially tuned for M1 chips. Basically this depends on cache size.
 TILE_H :: 64
 TILE_W :: 64
 TILE_C :: 16
@@ -22,6 +29,7 @@ get_hw :: proc(h_im, w_im, h_k, w_k, stride, dilation, padding: uint) -> (uint, 
 	return h_out, w_out
 }
 
+@(private)
 im2col :: proc(
 	t: ^Tensor($T),
 	h_k, w_k, stride, dilation, padding: uint,
@@ -57,7 +65,6 @@ im2col :: proc(
 					im2col_fast_3x3_padding1(src, dst, b, c, h, w, h_out, w_out)
 				}
 			} else {
-				// Fall back to general for other padding values
 				im2col_general(
 					src,
 					dst,
@@ -120,6 +127,7 @@ im2col :: proc(
 	return t_out
 }
 
+@(private = "file")
 im2col_fast_1x1 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
 	im2col_trace := trace.TRACE_FUNCTION("im2col_1x1")
 	defer trace.end_scoped_trace(im2col_trace)
@@ -133,7 +141,7 @@ im2col_fast_1x1 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
 			dst_b := dst[b_idx * hw * c:]
 
 			when T == f32 {
-				// Process multiple spatial positions AND channels with SIMD
+				// Process multiple spatial positions AND channels.
 				// This processes a 4x4 block: 4 spatial positions × 4 channels
 				hw_idx := uint(0)
 
@@ -199,10 +207,7 @@ im2col_fast_1x1 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
 							src_b[(c_idx + 3) * hw + hw_idx],
 						}
 
-						dst_b[dst_offset + c_idx] = simd.extract(vals, 0)
-						dst_b[dst_offset + c_idx + 1] = simd.extract(vals, 1)
-						dst_b[dst_offset + c_idx + 2] = simd.extract(vals, 2)
-						dst_b[dst_offset + c_idx + 3] = simd.extract(vals, 3)
+						(^#simd[4]f32)(&dst_b[dst_offset + c_idx])^ = vals
 					}
 
 					for ; c_idx < c; c_idx += 1 {
@@ -210,7 +215,7 @@ im2col_fast_1x1 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
 					}
 				}
 			} else {
-				// Original tiled implementation for other types
+				// Tiled implementation for other cases
 				for hw_tile := uint(0); hw_tile < hw; hw_tile += TILE_SIZE * TILE_SIZE {
 					hw_tile_end := min(hw_tile + TILE_SIZE * TILE_SIZE, hw)
 
@@ -241,6 +246,7 @@ im2col_fast_1x1 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
 	}
 }
 
+@(private = "file")
 im2col_fast_3x3_padding0 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
 	im2col_trace := trace.TRACE_FUNCTION("im2col_3x3")
 	defer trace.end_scoped_trace(im2col_trace)
@@ -270,6 +276,7 @@ im2col_fast_3x3_padding0 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint)
 	}
 }
 
+@(private = "file")
 im2col_fast_3x3_padding1 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
 	im2col_trace := trace.TRACE_FUNCTION("im2col_3x3_padding1")
 	defer trace.end_scoped_trace(im2col_trace)
@@ -294,12 +301,12 @@ im2col_fast_3x3_padding1 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint)
 							// For each kernel position, check if it's within bounds
 							dst_base := dst_idx + (oh * w_out + ow) * c * 9 + c_idx * 9
 
-							// Unrolled 3x3 kernel with boundary checks
+							// Unrolled 3x3 kernel
 							kernel_idx := 0
 							for kh in -1 ..< 2 {
-								ih := int(oh) + kh // input height position
+								ih := int(oh) + kh
 								for kw in -1 ..< 2 {
-									iw := int(ow) + kw // input width position
+									iw := int(ow) + kw
 
 									// Check bounds (padding behavior)
 									if ih >= 0 && ih < int(h) && iw >= 0 && iw < int(w) {
@@ -348,6 +355,7 @@ im2col_fast_3x3_padding1 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint)
 	}
 }
 
+@(private = "file")
 im2col_fast_3x3_padding1_simd :: proc(src, dst: []f32, b, c, h, w, h_out, w_out: uint) {
 	im2col_trace := trace.TRACE_FUNCTION("im2col_3x3_padding1_simd")
 	defer trace.end_scoped_trace(im2col_trace)
@@ -417,7 +425,6 @@ im2col_fast_3x3_padding1_simd :: proc(src, dst: []f32, b, c, h, w, h_out, w_out:
 							dst_base := dst_idx + (oh * w_out + ow + uint(i)) * c * 9 + c_idx * 9
 							base_idx := oh * w + ow + uint(i)
 
-							// Use SIMD to load 3 consecutive values for each row
 							row0_vals := #simd[4]f32 {
 								src_c[base_idx - w - 1],
 								src_c[base_idx - w],
@@ -523,6 +530,7 @@ im2col_fast_3x3_padding1_simd :: proc(src, dst: []f32, b, c, h, w, h_out, w_out:
 	}
 }
 
+@(private = "file")
 im2col_general :: proc(
 	src, dst: []$T,
 	b, c, h, w, h_k, w_k, h_out, w_out: uint,
@@ -690,7 +698,7 @@ im2col_general :: proc(
 	}
 }
 
-@(private)
+@(private = "file")
 im2col_general_stride1_dilation1 :: proc(
 	src, dst: []$T,
 	b, c, h, w, h_k, w_k, h_out, w_out: uint,
@@ -723,13 +731,13 @@ im2col_general_stride1_dilation1 :: proc(
 
 						// Base destination offset
 						dst_base := dst_idx_b + c_idx * h_k * w_k + h_k_idx * w_k + w_k_idx
-
+						b_len := (c * h_k * w_k)
 						when T == f32 {
 							// SIMD optimized copy
 							for h_idx in h_start ..< h_end {
 								src_h := uint(h_idx + src_h_offset)
 								src_row_base := src_idx_c + src_h * src_s2
-								dst_row_base := dst_base + uint(h_idx) * w_out * (c * h_k * w_k)
+								dst_row_base := dst_base + uint(h_idx) * w_out * b_len
 
 								w_idx := uint(w_start)
 								w_end_u := uint(w_end)
@@ -738,7 +746,7 @@ im2col_general_stride1_dilation1 :: proc(
 								for ; w_idx + 8 <= w_end_u; w_idx += 8 {
 									src_offset :=
 										src_row_base + (w_idx + uint(src_w_offset)) * src_s3
-									dst_offset := dst_row_base + w_idx * (c * h_k * w_k)
+									dst_offset := dst_row_base + w_idx * b_len
 
 									// Gather 8 values (assuming src_s3 == 1 for contiguous case)
 									if src_s3 == 1 {
@@ -757,35 +765,17 @@ im2col_general_stride1_dilation1 :: proc(
 
 										// Store with stride
 										dst[dst_offset] = simd.extract(vals1, 0)
-										dst[dst_offset + (c * h_k * w_k)] = simd.extract(vals1, 1)
-										dst[dst_offset + 2 * (c * h_k * w_k)] = simd.extract(
-											vals1,
-											2,
-										)
-										dst[dst_offset + 3 * (c * h_k * w_k)] = simd.extract(
-											vals1,
-											3,
-										)
-										dst[dst_offset + 4 * (c * h_k * w_k)] = simd.extract(
-											vals2,
-											0,
-										)
-										dst[dst_offset + 5 * (c * h_k * w_k)] = simd.extract(
-											vals2,
-											1,
-										)
-										dst[dst_offset + 6 * (c * h_k * w_k)] = simd.extract(
-											vals2,
-											2,
-										)
-										dst[dst_offset + 7 * (c * h_k * w_k)] = simd.extract(
-											vals2,
-											3,
-										)
+										dst[dst_offset + b_len] = simd.extract(vals1, 1)
+										dst[dst_offset + 2 * b_len] = simd.extract(vals1, 2)
+										dst[dst_offset + 3 * b_len] = simd.extract(vals1, 3)
+										dst[dst_offset + 4 * b_len] = simd.extract(vals2, 0)
+										dst[dst_offset + 5 * b_len] = simd.extract(vals2, 1)
+										dst[dst_offset + 6 * b_len] = simd.extract(vals2, 2)
+										dst[dst_offset + 7 * b_len] = simd.extract(vals2, 3)
 									} else {
 										// Manual gather for non-contiguous source
 										#unroll for i in 0 ..< 8 {
-											dst[dst_offset + uint(i) * (c * h_k * w_k)] =
+											dst[dst_offset + uint(i) * b_len] =
 												src[src_offset + uint(i) * src_s3]
 										}
 									}
@@ -795,7 +785,7 @@ im2col_general_stride1_dilation1 :: proc(
 								for ; w_idx + 4 <= w_end_u; w_idx += 4 {
 									src_offset :=
 										src_row_base + (w_idx + uint(src_w_offset)) * src_s3
-									dst_offset := dst_row_base + w_idx * (c * h_k * w_k)
+									dst_offset := dst_row_base + w_idx * b_len
 
 									if src_s3 == 1 {
 										vals := #simd[4]f32 {
@@ -806,18 +796,12 @@ im2col_general_stride1_dilation1 :: proc(
 										}
 
 										dst[dst_offset] = simd.extract(vals, 0)
-										dst[dst_offset + (c * h_k * w_k)] = simd.extract(vals, 1)
-										dst[dst_offset + 2 * (c * h_k * w_k)] = simd.extract(
-											vals,
-											2,
-										)
-										dst[dst_offset + 3 * (c * h_k * w_k)] = simd.extract(
-											vals,
-											3,
-										)
+										dst[dst_offset + b_len] = simd.extract(vals, 1)
+										dst[dst_offset + 2 * b_len] = simd.extract(vals, 2)
+										dst[dst_offset + 3 * b_len] = simd.extract(vals, 3)
 									} else {
 										for i in 0 ..< 4 {
-											dst[dst_offset + uint(i) * (c * h_k * w_k)] =
+											dst[dst_offset + uint(i) * b_len] =
 												src[src_offset + uint(i) * src_s3]
 										}
 									}
@@ -827,7 +811,7 @@ im2col_general_stride1_dilation1 :: proc(
 								for ; w_idx < w_end_u; w_idx += 1 {
 									src_offset :=
 										src_row_base + (w_idx + uint(src_w_offset)) * src_s3
-									dst_offset := dst_row_base + w_idx * (c * h_k * w_k)
+									dst_offset := dst_row_base + w_idx * b_len
 									dst[dst_offset] = src[src_offset]
 								}
 							}
@@ -836,12 +820,12 @@ im2col_general_stride1_dilation1 :: proc(
 							for h_idx in h_start ..< h_end {
 								src_h := uint(h_idx + src_h_offset)
 								src_row_base := src_idx_c + src_h * src_s2
-								dst_row_base := dst_base + uint(h_idx) * w_out * (c * h_k * w_k)
+								dst_row_base := dst_base + uint(h_idx) * w_out * b_len
 
 								for w_idx in uint(w_start) ..< uint(w_end) {
 									src_w := w_idx + uint(src_w_offset)
 									src_idx := src_row_base + src_w * src_s3
-									dst_idx := dst_row_base + w_idx * (c * h_k * w_k)
+									dst_idx := dst_row_base + w_idx * b_len
 									dst[dst_idx] = src[src_idx]
 								}
 							}
@@ -853,8 +837,7 @@ im2col_general_stride1_dilation1 :: proc(
 	}
 }
 
-// SIMD-optimized inner loop for f32
-@(private)
+@(private = "file")
 im2col_general_inner_simd_f32 :: proc(
 	src, dst: []f32,
 	src_idx_c: uint,
@@ -869,17 +852,14 @@ im2col_general_inner_simd_f32 :: proc(
 	src_s2, src_s3: uint,
 ) {
 	#no_bounds_check {
+		b_len := (c * h_k * w_k)
 		for h_idx in h_idx_start ..< h_idx_end {
 			src_h := h_idx * stride + h_k_offset - padding
 			src_idx_h := src_idx_c + src_h * src_s2
 
 			// Pre-calculate destination base
 			dst_idx_h_base :=
-				dst_idx_b +
-				h_idx * w_out * (c * h_k * w_k) +
-				c_idx * h_k * w_k +
-				h_k_idx * w_k +
-				w_k_idx
+				dst_idx_b + h_idx * w_out * b_len + c_idx * h_k * w_k + h_k_idx * w_k + w_k_idx
 
 			w_idx := w_idx_start
 
@@ -898,11 +878,10 @@ im2col_general_inner_simd_f32 :: proc(
 						src[src_idx_h + (src_w_base + 6) * src_s3],
 					}
 
-					// Store to non-contiguous destinations
-					dst[dst_idx_h_base + w_idx * (c * h_k * w_k)] = simd.extract(vals, 0)
-					dst[dst_idx_h_base + (w_idx + 1) * (c * h_k * w_k)] = simd.extract(vals, 1)
-					dst[dst_idx_h_base + (w_idx + 2) * (c * h_k * w_k)] = simd.extract(vals, 2)
-					dst[dst_idx_h_base + (w_idx + 3) * (c * h_k * w_k)] = simd.extract(vals, 3)
+					dst[dst_idx_h_base + w_idx * b_len] = simd.extract(vals, 0)
+					dst[dst_idx_h_base + (w_idx + 1) * b_len] = simd.extract(vals, 1)
+					dst[dst_idx_h_base + (w_idx + 2) * b_len] = simd.extract(vals, 2)
+					dst[dst_idx_h_base + (w_idx + 3) * b_len] = simd.extract(vals, 3)
 				}
 			}
 
@@ -910,7 +889,7 @@ im2col_general_inner_simd_f32 :: proc(
 			for ; w_idx < w_idx_end; w_idx += 1 {
 				src_w := w_idx * stride + w_k_offset - padding
 				src_idx := src_idx_h + src_w * src_s3
-				dst_idx := dst_idx_h_base + w_idx * (c * h_k * w_k)
+				dst_idx := dst_idx_h_base + w_idx * b_len
 				dst[dst_idx] = src[src_idx]
 			}
 		}
@@ -918,7 +897,7 @@ im2col_general_inner_simd_f32 :: proc(
 }
 
 // Scalar inner loop for non-f32 types
-@(private)
+@(private = "file")
 im2col_general_inner_scalar :: proc(
 	src, dst: []$T,
 	src_idx_c: uint,
@@ -955,14 +934,13 @@ im2col_general_inner_scalar :: proc(
 }
 
 conv2d_grouped :: proc(
-	input: ^Tensor($T), // (B, C_in, H, W)
-	kernel: ^Tensor(T), // (C_out, C_in_per_group, K_h, K_w)
+	input: ^Tensor($T),
+	kernel: ^Tensor(T),
 	groups: uint,
 	stride, dilation, padding: uint,
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
-	// Extract dimensions
 	b, c_in, h, w := input.shape[0], input.shape[1], input.shape[2], input.shape[3]
 	c_out, c_in_k, k_h, k_w := kernel.shape[0], kernel.shape[1], kernel.shape[2], kernel.shape[3]
 
@@ -981,32 +959,25 @@ conv2d_grouped :: proc(
 		return conv2d_single(input, kernel, stride, dilation, padding, allocator, loc)
 	}
 
-	// Calculate output dimensions
 	h_out, w_out := get_hw(h, w, k_h, k_w, stride, dilation, padding)
 
-	// Allocate output tensor once
 	result := tensor_alloc(T, []uint{b, c_out, h_out, w_out}, true, allocator, loc)
 
 	c_in_per_group := c_in / groups
 	c_out_per_group := c_out / groups
 
-	// Decide whether to parallelize based on workload
-	work_per_group := c_in_per_group * c_out_per_group * h * w * k_h * k_w
-	// MIN_WORK_FOR_PARALLEL :: 100000 // Tune this threshold
-
-	if groups >= 4 {
+	// Only do parallelism when groups >= 4 (arbitrary) to avoid unnecessary overhead.
+	if groups >= 4 { 	// TODO(Aria): decide a clever way to determine this magic number
 		// Parallel path using thread pool
 		grouped_conv_trace := trace.TRACE_SECTION("grouped_conv_parallel")
 		defer trace.end_scoped_trace(grouped_conv_trace)
 
-		// Create a thread pool with optimal number of threads
 		num_threads := min(int(groups), 4)
 		pool: thread.Pool
 		thread.pool_init(&pool, context.allocator, num_threads)
 		defer thread.pool_destroy(&pool)
 		thread.pool_start(&pool)
 
-		// Work data for each group
 		Group_Work_Data :: struct {
 			input:                     ^Tensor(T),
 			kernel:                    ^Tensor(T),
@@ -1019,10 +990,8 @@ conv2d_grouped :: proc(
 			stride, dilation, padding: uint,
 		}
 
-		// Allocate work items
 		work_items := make([]Group_Work_Data, groups, context.temp_allocator)
 
-		// Process group function
 		process_group_task :: proc(t: thread.Task) {
 			work := cast(^Group_Work_Data)t.data
 
@@ -1058,7 +1027,6 @@ conv2d_grouped :: proc(
 				work.padding,
 				context.temp_allocator,
 			)
-			// defer tensor.free_tensor(group_output)
 
 			// Copy to result (thread-safe as each group writes to different channels)
 			copy_group_output_parallel(
@@ -1093,12 +1061,10 @@ conv2d_grouped :: proc(
 				padding         = padding,
 			}
 
-			// Add task to pool
 			thread.pool_add_task(&pool, context.temp_allocator, process_group_task, &work_items[g])
 
 		}
 
-		// Wait for all tasks to complete
 		thread.pool_finish(&pool)
 	} else {
 		// Sequential path for small workloads
@@ -1135,7 +1101,6 @@ conv2d_grouped :: proc(
 				padding,
 				context.temp_allocator,
 			)
-			// defer tensor.free_tensor(group_output)
 
 			copy_group_output_parallel(
 				result,
@@ -1152,7 +1117,8 @@ conv2d_grouped :: proc(
 	return result
 }
 
-@(private)
+// Copy spatial data
+@(private = "file")
 copy_group_output_parallel :: proc(
 	dst: ^Tensor($T),
 	src: ^Tensor(T),
@@ -1167,12 +1133,12 @@ copy_group_output_parallel :: proc(
 
 	#no_bounds_check {
 		when T == f32 {
+			// Fast path
 			for b in 0 ..< batch {
 				for c in 0 ..< channels_per_group {
 					src_offset := (b * channels_per_group + c) * hw_out
 					dst_offset := (b * dst_channels_total + channel_offset + c) * hw_out
 
-					// Copy spatial data
 					i := uint(0)
 					for ; i + 8 <= hw_out; i += 8 {
 						vals1 := #simd[4]f32 {
@@ -1189,14 +1155,8 @@ copy_group_output_parallel :: proc(
 							src.data[src_offset + i + 7],
 						}
 
-						dst.data[dst_offset + i + 0] = simd.extract(vals1, 0)
-						dst.data[dst_offset + i + 1] = simd.extract(vals1, 1)
-						dst.data[dst_offset + i + 2] = simd.extract(vals1, 2)
-						dst.data[dst_offset + i + 3] = simd.extract(vals1, 3)
-						dst.data[dst_offset + i + 4] = simd.extract(vals2, 0)
-						dst.data[dst_offset + i + 5] = simd.extract(vals2, 1)
-						dst.data[dst_offset + i + 6] = simd.extract(vals2, 2)
-						dst.data[dst_offset + i + 7] = simd.extract(vals2, 3)
+						(^#simd[4]f32)(&dst.data[dst_offset + i])^ = vals1
+						(^#simd[4]f32)(&dst.data[dst_offset + i + 4])^ = vals2
 					}
 
 					for ; i + 4 <= hw_out; i += 4 {
@@ -1206,10 +1166,7 @@ copy_group_output_parallel :: proc(
 							src.data[src_offset + i + 2],
 							src.data[src_offset + i + 3],
 						}
-						dst.data[dst_offset + i] = simd.extract(vals, 0)
-						dst.data[dst_offset + i + 1] = simd.extract(vals, 1)
-						dst.data[dst_offset + i + 2] = simd.extract(vals, 2)
-						dst.data[dst_offset + i + 3] = simd.extract(vals, 3)
+						(^#simd[4]f32)(&dst.data[dst_offset + i])^ = vals
 					}
 
 					for ; i < hw_out; i += 1 {
@@ -1218,7 +1175,7 @@ copy_group_output_parallel :: proc(
 				}
 			}
 		} else {
-			// Scalar copy for other types
+			// Slow path: scalar copy for other types
 			for b in 0 ..< batch {
 				for c in 0 ..< channels_per_group {
 					src_offset := (b * channels_per_group + c) * hw_out
@@ -1266,7 +1223,7 @@ reshape_bhwc_to_bchw :: proc(
 					// Process 4 channels at a time
 					c := uint(0)
 					for ; c + 4 <= channels; c += 4 {
-						// Load 4x4 block: 4 spatial × 4 channels
+						// Load 4x4 block, 4 spatial × 4 channels
 						// These are already consecutive, so use SIMD loads
 						row0 := (^#simd[4]f32)(&src_batch[src_base + c])^
 						row1 := (^#simd[4]f32)(&src_batch[src_base + channels + c])^
@@ -1286,7 +1243,6 @@ reshape_bhwc_to_bchw :: proc(
 						dst_c2 := simd.shuffle(tmp1, tmp3, 0, 2, 4, 6) // All channel 2s
 						dst_c3 := simd.shuffle(tmp1, tmp3, 1, 3, 5, 7) // All channel 3s
 
-						// SIMD stores - 4 consecutive values each
 						(^#simd[4]f32)(&dst_batch[c * hw + hw_idx])^ = dst_c0
 						(^#simd[4]f32)(&dst_batch[(c + 1) * hw + hw_idx])^ = dst_c1
 						(^#simd[4]f32)(&dst_batch[(c + 2) * hw + hw_idx])^ = dst_c2
@@ -1451,29 +1407,35 @@ conv2d_xwb :: proc(
 					base_idx := (b * out_channels + c) * spatial_size
 					bias_val := bias.data[c]
 
-					bias_vec := #simd[4]f32{bias_val, bias_val, bias_val, bias_val}
+					when ODIN_OS == .Darwin {
+						simd_backend.vsaddf_batch(
+							out.data[base_idx:base_idx + spatial_size],
+							out.data[base_idx:base_idx + spatial_size],
+							&bias_val,
+						)
+					} else {
+						bias_vec := #simd[4]f32{bias_val, bias_val, bias_val, bias_val}
+						i := uint(0)
+						for ; i + 8 <= spatial_size; i += 8 {
+							vals0 := (^#simd[4]f32)(&out.data[base_idx + i])^
+							vals1 := (^#simd[4]f32)(&out.data[base_idx + i + 4])^
 
-					i := uint(0)
-					for ; i + 8 <= spatial_size; i += 8 {
-						// Load, add, store - no extracts needed
-						vals0 := (^#simd[4]f32)(&out.data[base_idx + i])^
-						vals1 := (^#simd[4]f32)(&out.data[base_idx + i + 4])^
+							vals0 += bias_vec
+							vals1 += bias_vec
 
-						vals0 += bias_vec
-						vals1 += bias_vec
+							(^#simd[4]f32)(&out.data[base_idx + i])^ = vals0
+							(^#simd[4]f32)(&out.data[base_idx + i + 4])^ = vals1
+						}
 
-						(^#simd[4]f32)(&out.data[base_idx + i])^ = vals0
-						(^#simd[4]f32)(&out.data[base_idx + i + 4])^ = vals1
-					}
+						for ; i + 4 <= spatial_size; i += 4 {
+							vals := (^#simd[4]f32)(&out.data[base_idx + i])^
+							vals += bias_vec
+							(^#simd[4]f32)(&out.data[base_idx + i])^ = vals
+						}
 
-					for ; i + 4 <= spatial_size; i += 4 {
-						vals := (^#simd[4]f32)(&out.data[base_idx + i])^
-						vals += bias_vec
-						(^#simd[4]f32)(&out.data[base_idx + i])^ = vals
-					}
-
-					for ; i < spatial_size; i += 1 {
-						out.data[base_idx + i] += bias_val
+						for ; i < spatial_size; i += 1 {
+							out.data[base_idx + i] += bias_val
+						}
 					}
 				}
 			}

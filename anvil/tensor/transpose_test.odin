@@ -156,7 +156,7 @@ test_matrix_transpose_3d :: proc(t: ^testing.T) {
 	tensor := new_with_init(data, []uint{2, 3, 4}, context.temp_allocator)
 	defer free_tensor(tensor, context.temp_allocator)
 
-	result := matrix_transpose(tensor, context.temp_allocator)
+	result := transpose(tensor, 1, 2, context.temp_allocator)
 	defer free_tensor(result, context.temp_allocator)
 
 	// Should swap last two dimensions: (2,3,4) -> (2,4,3)

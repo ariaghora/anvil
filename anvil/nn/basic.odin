@@ -1,6 +1,8 @@
 package nn
 
+import "../simd_backend"
 import "../tensor"
+import "../trace"
 
 Linear :: struct($T: typeid) {
 	w: ^tensor.Tensor(T),
@@ -33,9 +35,6 @@ free_linear :: proc(l: ^Linear($T), allocator := context.allocator) {
 	free(l, allocator)
 }
 
-import "../trace"
-
-
 forward_linear :: proc(
 	l: ^Linear($T),
 	x: ^tensor.Tensor(T),
@@ -58,17 +57,25 @@ forward_linear :: proc(
 			when T == f32 {
 				for i in 0 ..< batch_elements {
 					base_idx := i * out_features
-					j := uint(0)
+					when ODIN_OS == .Darwin {
+						simd_backend.addf_batch(
+							out.data[base_idx:base_idx + out_features],
+							out.data[base_idx:base_idx + out_features],
+							bias.data,
+						)
+					} else {
+						j := uint(0)
+						for ; j + 4 <= out_features; j += 4 {
+							b := (^#simd[4]f32)(&bias.data[j])^
+							o := (^#simd[4]f32)(&out.data[base_idx + j])^
+							(^#simd[4]f32)(&out.data[base_idx + j])^ = o + b
+						}
 
-					for ; j + 4 <= out_features; j += 4 {
-						b := (^#simd[4]f32)(&bias.data[j])^
-						o := (^#simd[4]f32)(&out.data[base_idx + j])^
-						(^#simd[4]f32)(&out.data[base_idx + j])^ = o + b
+						for ; j < out_features; j += 1 {
+							out.data[base_idx + j] += bias.data[j]
+						}
 					}
 
-					for ; j < out_features; j += 1 {
-						out.data[base_idx + j] += bias.data[j]
-					}
 				}
 			} else {
 				// Scalar fallback
@@ -86,7 +93,6 @@ forward_linear :: proc(
 }
 
 import "core:testing"
-
 @(test)
 test_new_linear :: proc(t: ^testing.T) {
 	l := new_linear(f32, 10, 10, allocator = context.temp_allocator)
