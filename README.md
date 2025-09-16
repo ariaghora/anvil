@@ -8,11 +8,15 @@
 
 ## What this is
 
-Anvil runs neural networks without the typical ML stack. Load a safetensors file, run inference, get results. Currently implements enough operations to run vision models like SAM. Your deployment is just a binary.
-No Python. No gigabytes of dependencies. Just compiled code running models.
+Anvil runs neural networks without the typical ML stack.
+Load a safetensors or ONNX file, run inference, get results.
+Currently implements enough operations to run vision models such as ResNet, YOLOv8, SAM (TinyViT).
+Your deployment is just a binary.
+No Python, no gigabytes of dependencies.
+Just compiled code running models.
 
 > [!CAUTION]
-> This library is only tested on macOS (MacBook M1) and Ubuntu 22.04. It requires Accelerate framework on macOS and `openblas-dev` on Linux. 
+> This package is only tested on macOS (MacBook M1) and Ubuntu 22.04. It requires Accelerate framework on macOS and `openblas-dev` on Linux. 
 
 ## Safetensors Models
 
@@ -53,7 +57,7 @@ $ ./resnet50_onnx /path/to/image.jpg
 
 ## Notes on Memory Management
 
-This library uses `context.temp_allocator` for intermediate computations and uses the passed allocator argument for the function return values.
+This package uses `context.temp_allocator` for intermediate computations and uses the passed allocator argument for the function return values.
 If you're doing operations in a loop, just reset the temp allocator periodically:
 
 
