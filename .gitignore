@@ -16,4 +16,4 @@ tensorgen/safetensors
 odinfmt.json
 
 # windows' openblas lib
-anvil/lib/windows/*
+anvil/lib/windows/openblas/
