@@ -11,5 +11,9 @@ odin-simd
 *.tensor
 tensorgen/safetensors
 *.bin
+*.o
 
 odinfmt.json
+
+# windows' openblas lib
+anvil/lib/windows/*
