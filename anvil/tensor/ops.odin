@@ -612,6 +612,7 @@ UnaryOp :: enum {
 	SIGMOID,
 	SIN,
 	COS,
+	EXP,
 }
 
 // Individual operation implementations - forced inline for zero overhead
@@ -655,6 +656,11 @@ unary_sin :: #force_inline proc($T: typeid, x: T) -> T where T == f32 || T == f6
 @(private)
 unary_cos :: #force_inline proc($T: typeid, x: T) -> T where T == f32 || T == f64 || T == f16 {
 	return math.cos(x)
+}
+
+@(private)
+unary_exp :: #force_inline proc($T: typeid, x: T) -> T where T == f32 || T == f64 || T == f16 {
+	return math.exp(x)
 }
 
 // Generic elementwise unary operation with compile-time specialization
@@ -708,6 +714,12 @@ elementwise_unary_op :: proc(
 			} else {
 				panic("COS only supports floating point types")
 			}
+		case .EXP:
+			when T == f32 || T == f64 || T == f16 {
+				result.data[i] = unary_exp(T, tensor.data[i])
+			} else {
+				panic("COS only supports floating point types")
+			}
 		}
 	}
 
@@ -758,6 +770,15 @@ cos :: proc(
 	T == f64 ||
 	T == f16 {
 	return elementwise_unary_op(tensor, .COS, allocator)
+}
+
+exp :: proc(
+	tensor: ^Tensor($T),
+	allocator := context.allocator,
+) -> ^Tensor(T) where T == f32 ||
+	T == f64 ||
+	T == f16 {
+	return elementwise_unary_op(tensor, .EXP, allocator)
 }
 
 gelu :: proc(
