@@ -244,7 +244,7 @@ add :: proc(
 	defer trace.end_scoped_trace(trace_mul)
 
 	if slice.equal(a.shape, b.shape) && a.contiguous && b.contiguous {
-		when T == f32 {
+		when T == f32 && ODIN_OS == .Darwin {
 			res := tensor_alloc(T, a.shape, true, allocator, loc)
 			simd_backend.addf_batch(res.data, a.data, b.data)
 			return res
