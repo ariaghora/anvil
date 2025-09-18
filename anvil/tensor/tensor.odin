@@ -527,6 +527,15 @@ new_with_init :: proc(
 	return res
 }
 
+// Create a new tensor with a given shape, and fill it with a constant value
+full :: proc($T: typeid, value: T, shape: []uint, allocator := context.allocator) -> ^Tensor(T) {
+	t := tensor_alloc(T, shape, true, allocator)
+	for i in 0 ..< len(t.data) {
+		t.data[i] = value
+	}
+	return t
+}
+
 @(private = "package")
 compute_linear_index :: proc(indices: []uint, strides: []uint, loc := #caller_location) -> uint {
 	index: uint = 0
@@ -1362,8 +1371,9 @@ slice :: proc(input: ^Tensor($T), ranges: []Range, allocator := context.allocato
 				}
 				// remainder
 				for i := 0; i < contiguous_elements; i += 1 {
-					(^f32)(uintptr(&output.data[output_base]) + uintptr(i * 4))^ =
-					(^f32)(uintptr(&input.data[input_base]) + uintptr(i * 4))^
+					(^f32)(uintptr(&output.data[output_base]) + uintptr(i * 4))^ = (^f32)(
+						uintptr(&input.data[input_base]) + uintptr(i * 4),
+					)^
 				}
 			}
 			return output

@@ -1,6 +1,7 @@
 package libs
 
-import "matmul"
+import "linear_algebra"
+import "matmul_backend"
 import "models"
 import "nn"
 import "onnx"
