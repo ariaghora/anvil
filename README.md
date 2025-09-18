@@ -15,8 +15,9 @@ Your deployment is just a binary.
 No Python, no gigabytes of dependencies.
 Just compiled code running models.
 
-> [!CAUTION]
-> This package is only tested on macOS (MacBook M1) and Ubuntu 22.04. It requires Accelerate framework on macOS and `openblas-dev` on Linux. 
+> [!WARNING]
+> This package is only tested (in the order of comprehensiveness) on macOS (MacBook M1), Ubuntu 22.04, and Windows 11. It requires Accelerate framework on macOS and `openblas-dev` on Linux. 
+> Windows users can get precompiled [OpenBLAS](https://github.com/OpenMathLib/OpenBLAS) `.lib` file from their release page and drop it on `lib/windows` directory. So far that's the easiest way to get this running.
 
 ## Safetensors Models
 
@@ -77,6 +78,6 @@ Early development, APIs are unstable. More models coming as operations get imple
 ## Requirements
 
 - Odin compiler
-- A safetensors file
-- OpenBLAS development package (`libopenblas-dev` on Ubuntu)
+- A safetensors or ONNX file: skip this if you only care about using the tensor data structure.
+- OpenBLAS (`libopenblas-dev` on Ubuntu, precompiled `.lib` for Windows)
 - That's it
