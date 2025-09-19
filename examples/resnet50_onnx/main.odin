@@ -44,9 +44,9 @@ main :: proc() {
 	defer onnx.free_onnx(model)
 
 	ensure(err == nil, fmt.tprint(err))
-	// fmt.println("Producer Name    : ", model.producer_name)
-	// fmt.println("Producer Version : ", model.producer_version)
-	// fmt.println("Opset Version    : ", model.opset_version)
+	fmt.println("Producer Name    : ", model.producer_name)
+	fmt.println("Producer Version : ", model.producer_version)
+	fmt.println("Opset Version    : ", model.opset_version)
 
 	f := libc.fopen(strings.clone_to_cstring(image_file_path, context.temp_allocator), "rb")
 	ensure(f != nil, "cannot open image file")
