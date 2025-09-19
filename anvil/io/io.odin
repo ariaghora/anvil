@@ -50,9 +50,9 @@ NPY_Not_Implemented :: struct {
 }
 
 NPY_Parse_Error :: enum {
-	Invalid_Descriptor,
-	Malformed_Header,
-	Shape_Parse_Failed,
+	NPY_Invalid_Descriptor,
+	NPY_Malformed_Header,
+	NPY_Shape_Parse_Failed,
 }
 
 NPY_Read_Array_Error :: struct {}
