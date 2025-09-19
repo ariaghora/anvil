@@ -449,3 +449,10 @@ parse_npy_header :: proc(
 import "core:fmt"
 import "core:testing"
 
+@(test)
+read_numpy_array_from_file_test :: proc(t: ^testing.T) {
+	header, np_tensor, err := read_numpy_array_from_file(f32, "assets/test_np_arrays/longdouble_5x5.npy")
+	testing.expect(t, err == nil, fmt.tprint(err))
+	defer tensor.free_tensor(np_tensor)
+	testing.expect(t, slice.equal(np_tensor.shape, []uint{5, 5}))
+}
