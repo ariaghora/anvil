@@ -6,6 +6,9 @@ import "core:fmt"
 import "core:slice"
 import "core:strconv"
 
+// Parses a CSV string into a 2D tensor of type T.
+// Assumes all rows have the same number of columns as the first row.
+// This uses temp_allocator for CSV parsing, specified allocator for output tensor.
 read_csv :: proc(
 	$T: typeid,
 	csv_string: string,

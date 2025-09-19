@@ -1,3 +1,5 @@
+// package io is a collection of utilities to aid with basic file reading and its conversion to
+// anvil tensor.
 package file_io
 
 import "core:encoding/csv"
