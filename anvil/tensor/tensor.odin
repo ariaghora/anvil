@@ -1110,7 +1110,36 @@ chunk :: proc(
 	return chunks
 }
 
-// Concatenate tensors along specified dimension
+/*
+	Concatenates tensors along an existing dimension.
+	
+	All tensors must have identical shapes except in the concatenation dimension.
+	The result has the sum of sizes in the concatenation dimension.
+	
+	Parameters:
+	  tensors: Array of tensors to concatenate
+	  dim: Dimension along which to concatenate (0 to rank-1)
+	
+	Returns tensor with combined data along specified dimension.
+	
+	Example:
+	  // Create two 2x3 tensors
+	  a := new_with_init([]f32{1,2,3,4,5,6}, {2,3})
+	  b := new_with_init([]f32{7,8,9,10,11,12}, {2,3})
+	
+	  // Concatenate along dim 0 (rows): shape [4, 3]
+	  // Result: [[1,2,3], [4,5,6], [7,8,9], [10,11,12]]
+	  c0 := cat({a, b}, 0)
+	
+	  // Concatenate along dim 1 (cols): shape [2, 6]
+	  // Result: [[1,2,3,7,8,9], [4,5,6,10,11,12]]
+	  c1 := cat({a, b}, 1)
+	
+	  // Concatenating tensors with different sizes in concat dim
+	  x := new_with_init([]f32{1,2,3,4}, {2,2})     // shape [2,2]
+	  y := new_with_init([]f32{5,6,7,8,9,10}, {2,3}) // shape [2,3]
+	  z := cat({x, y}, 1)  // shape [2,5]: [[1,2,5,6,7], [3,4,8,9,10]]
+*/
 cat :: proc(
 	tensors: []^Tensor($T),
 	dim: uint,
@@ -1194,6 +1223,36 @@ arange :: proc($T: typeid, n: uint, allocator := context.allocator) -> ^Tensor(T
 	return result
 }
 
+/*
+	Stacks tensors along a new dimension.
+
+	Creates a new tensor with an additional dimension at the specified axis.
+	All input tensors must have identical shapes.
+
+	Parameters:
+	  tensors: Array of tensors to stack (must all have same shape)
+	  axis: Position where new dimension is inserted (0 to rank inclusive)
+
+	Returns tensor with shape [...dims_before, len(tensors), ...dims_after].
+
+	Example:
+	  // Create three 2x3 tensors
+	  a := new_with_init([]f32{1,2,3,4,5,6}, {2,3})
+	  b := new_with_init([]f32{7,8,9,10,11,12}, {2,3})
+	  c := new_with_init([]f32{13,14,15,16,17,18}, {2,3})
+
+	  // Stack along axis 0: shape [3, 2, 3]
+	  // Result: [[[1,2,3],[4,5,6]], [[7,8,9],[10,11,12]], [[13,14,15],[16,17,18]]]
+	  s0 := stack({a, b, c}, 0)
+
+	  // Stack along axis 1: shape [2, 3, 3]
+	  // Result: [[[1,2,3],[7,8,9],[13,14,15]], [[4,5,6],[10,11,12],[16,17,18]]]
+	  s1 := stack({a, b, c}, 1)
+
+	  // Stack along axis 2: shape [2, 3, 3]
+	  // Result: [[[1,7,13],[2,8,14],[3,9,15]], [[4,10,16],[5,11,17],[6,12,18]]]
+	  s2 := stack({a, b, c}, 2)
+*/
 stack :: proc(tensors: []^Tensor($T), axis: int, allocator := context.allocator) -> ^Tensor(T) {
 	if len(tensors) == 0 {
 		panic("Cannot stack empty tensor list")
