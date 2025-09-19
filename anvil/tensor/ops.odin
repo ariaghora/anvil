@@ -580,6 +580,23 @@ tensor_mean :: proc(
 	return tensor_reduce(tensor, .MEAN, axis, keepdims, allocator, loc)
 }
 
+tensor_std :: proc(
+	tensor: ^Tensor($T),
+	axis: int,
+	keepdims: bool = false,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	ensure(len(tensor.shape) == 2, "Tensor must be 2D")
+
+	mu_cols := tensor_mean(tensor, axis, true, allocator = allocator)
+	tdiff := sub(tensor, mu_cols, allocator)
+	tdiff2 := mul(tdiff, tdiff, allocator)
+	tmean := tensor_mean(tdiff2, axis, keepdims, allocator)
+	defer free_tensor(mu_cols, tdiff, tdiff2, tmean, allocator = allocator)
+	return sqrt(tmean, allocator)
+}
+
 // Max reduction - reduce along all axes or specific axis
 tensor_max :: proc(
 	tensor: ^Tensor($T),
