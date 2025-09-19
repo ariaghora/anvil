@@ -55,7 +55,9 @@ NPY_Parse_Error :: enum {
 	NPY_Shape_Parse_Failed,
 }
 
-NPY_Read_Array_Error :: struct {}
+NPY_Read_Array_Error :: struct {
+	message: string
+}
 
 IO_Error :: union {
 	CSV_Read_Error,
@@ -65,8 +67,8 @@ IO_Error :: union {
 	Image_Load_Error,
 	NPY_Open_Error,
 
-	// NOTE (Rey): allocation error for bufio in numpy parser
-	// TODO (Rey): maybe alias this one?
+	// NOTE(Rey): allocation error for bufio in numpy parser
+	// TODO(Rey): maybe alias this one?
 	mem.Allocator_Error,
 
 	NPY_Reader_Creation_Error,
