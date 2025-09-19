@@ -451,8 +451,29 @@ import "core:testing"
 
 @(test)
 read_numpy_array_from_file_test :: proc(t: ^testing.T) {
+	// creation of assets/test_np_arrays/longdouble_5x5.npy
+	// ```
+	// import numpy as np
+	// clongdouble      = np.arange(1, 6, 1).astype(np.clongdouble)
+	// clongdouble_5x5  = np.array(list(clongdouble + x for x in range(5)))
+	// np.save("assets/test_np_arrays/longdouble_5x5.npy", clongdouble_5x5)
+	// ```
+
 	header, np_tensor, err := read_numpy_array_from_file(f32, "assets/test_np_arrays/longdouble_5x5.npy")
 	testing.expect(t, err == nil, fmt.tprint(err))
 	defer tensor.free_tensor(np_tensor)
 	testing.expect(t, slice.equal(np_tensor.shape, []uint{5, 5}))
+	testing.expect(
+		t,
+		slice.equal(
+			np_tensor.data,
+			[]f32{
+				1, 2, 3, 4, 5,
+				2, 3, 4, 5, 6,
+				3, 4, 5, 6, 7,
+				4, 5, 6, 7, 8,
+				5, 6, 7, 8, 9
+			}
+		)
+	)
 }
