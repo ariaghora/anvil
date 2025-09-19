@@ -14,7 +14,6 @@ import "core:os/os2"
 import "core:slice"
 import "core:strings"
 import "core:time"
-import "vendor:stb/image"
 
 T :: f32
 

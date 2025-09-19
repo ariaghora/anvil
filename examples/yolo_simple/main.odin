@@ -5,6 +5,8 @@ Obtain the safetensors model here: https://huggingface.co/lmz/candle-yolo-v8/tre
 */
 package main
 
+import "../../anvil/imageops"
+import "../../anvil/io"
 import "../../anvil/models/yolo"
 import "../../anvil/plot"
 import st "../../anvil/safetensors/"
@@ -19,7 +21,6 @@ import "core:os"
 import "core:slice"
 import "core:strings"
 import "core:time"
-import "vendor:stb/image"
 
 // Adjust to your liking
 THRESHOLD_NMS :: 0.45
@@ -116,14 +117,10 @@ load_image :: proc(
 	uint,
 	uint,
 ) {
-	f := libc.fopen(strings.clone_to_cstring(image_path, context.temp_allocator), "rb")
-	ensure(f != nil, "cannot open file")
-	defer libc.fclose(f)
+	img_ori, err := io.read_image_from_file(f32, image_path, context.temp_allocator)
+	ensure(err == nil)
 
-	orig_w, orig_h, orig_chan: i32
-	image_data := image.loadf_from_file(f, &orig_w, &orig_h, &orig_chan, 0)
-	defer image.image_free(image_data)
-	ensure(orig_chan == 3, "can only support RGB")
+	orig_w, orig_h, orig_chan := img_ori.shape[1], img_ori.shape[0], img_ori.shape[2]
 
 	// Sizes have to be divisible by 32.
 	target_w, target_h: uint
@@ -135,26 +132,13 @@ load_image :: proc(
 		target_w, target_h = 640, uint(h) / 32 * 32
 	}
 
-	image_data_resized := make([]f32, orig_chan * i32(target_w * target_h), allocator)
-	image.resize_float(
-		image_data,
-		orig_w,
-		orig_h,
-		0,
-		raw_data(image_data_resized),
-		i32(target_w),
-		i32(target_h),
-		0,
-		orig_chan,
-	)
-
-	input_t := tensor.permute(
-		tensor.new_with_init(
-			image_data_resized,
-			{1, target_h, target_w, uint(orig_chan)},
-			allocator,
+	input_t := tensor.unsqueeze(
+		tensor.permute(
+			imageops.resize(img_ori, target_h, target_w, .Bilinear, context.temp_allocator),
+			{2, 0, 1},
+			context.temp_allocator,
 		),
-		{0, 3, 1, 2},
+		0,
 		allocator,
 	)
 	return input_t, uint(orig_w), uint(orig_h), target_w, target_h
