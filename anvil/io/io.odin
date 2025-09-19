@@ -45,6 +45,10 @@ NPY_Invalid_Header_Length_Error :: struct {
 	length: [2]u8,
 }
 
+NPY_Not_Implemented :: struct {
+	message: string
+}
+
 NPY_Parse_Error :: enum {
 	Invalid_Descriptor,
 	Malformed_Header,
@@ -71,5 +75,6 @@ IO_Error :: union {
 	NPY_Invalid_Version_Error,
 	NPY_Invalid_Header_Length_Error,
 	NPY_Parse_Error,
-	NPY_Read_Array_Error
+	NPY_Read_Array_Error,
+	NPY_Not_Implemented
 }
