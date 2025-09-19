@@ -17,13 +17,16 @@ visualize_tensor :: proc(
 ) {
 	ensure(
 		len(tensor_chw.shape) == 3 || len(tensor_chw.shape) == 2,
-		"input tensor must have 3 or 2 dimensions",
+		fmt.tprintf("input tensor must have 3 or 2 dimensions, got %d", len(tensor_chw.shape)),
 	)
 
 	C, H, W: uint
 	if len(tensor_chw.shape) == 3 {
 		C, H, W = tensor_chw.shape[0], tensor_chw.shape[1], tensor_chw.shape[2]
-		ensure(C == 1 || C == 3, "3D input tensor must have 1 or 3 color channels")
+		ensure(
+			C == 1 || C == 3,
+			fmt.tprintf("3D input tensor must have 1 or 3 color channels, got %d", C),
+		)
 	} else {
 		C, H, W = 1, tensor_chw.shape[0], tensor_chw.shape[1]
 	}

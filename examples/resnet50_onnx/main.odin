@@ -1,8 +1,11 @@
 package main
 
+import "../../anvil/imageops"
+import "../../anvil/io"
 import "../../anvil/onnx"
 import "../../anvil/tensor"
 import "../../anvil/trace"
+
 import "core:c/libc"
 import "core:fmt"
 import "core:mem"
@@ -11,7 +14,6 @@ import "core:os/os2"
 import "core:slice"
 import "core:strings"
 import "core:time"
-import "vendor:stb/image"
 
 T :: f32
 
@@ -48,45 +50,20 @@ main :: proc() {
 	fmt.println("Producer Version : ", model.producer_version)
 	fmt.println("Opset Version    : ", model.opset_version)
 
-	f := libc.fopen(strings.clone_to_cstring(image_file_path, context.temp_allocator), "rb")
-	ensure(f != nil, "cannot open image file")
-	defer libc.fclose(f)
-
-	orig_w, orig_h, orig_chan: i32
-	image_data := image.loadf_from_file(f, &orig_w, &orig_h, &orig_chan, 0)
-	defer image.image_free(image_data)
-	ensure(orig_chan == 3, "can only support RGB")
-	// Resize to 224x224, i.e., the standard imagenet dataset sizes, via stb image resize
-	image_data_resized := make([]T, orig_chan * 224 * 224, context.temp_allocator)
-	image.resize_float(
-		image_data,
-		orig_w,
-		orig_h,
-		0,
-		raw_data(image_data_resized),
-		224,
-		224,
-		0,
-		orig_chan,
-	)
+	img, err_im := io.read_image_from_file(T, image_file_path)
+	ensure(err_im == nil, fmt.tprint(err_im))
+	img_resized := imageops.resize(img, 224, 224, .Bilinear)
+	defer tensor.free_tensor(img, img_resized)
 
 	// The means and stdevs for normalization
 	// https://github.com/pytorch/examples/blob/97304e232807082c2e7b54c597615dc0ad8f6173/imagenet/main.py#L197-L198
 	means := tensor.new_with_init([]T{0.485, 0.456, 0.406}, {3}, context.temp_allocator)
 	std := tensor.new_with_init([]T{0.229, 0.224, 0.225}, {3}, context.temp_allocator)
-	// Image raw data to tensor and standardize
-	input_t := tensor.new_with_init(
-		image_data_resized,
-		{1, 224, 224, uint(orig_chan)},
-		context.temp_allocator,
-	)
-	input_t = tensor.div(
-		tensor.sub(input_t, means, context.temp_allocator),
-		std,
-		context.temp_allocator,
-	)
-	// NHWC -> NCHW
-	input_t = tensor.permute(input_t, {0, 3, 1, 2})
+	img_norm := tensor.div(tensor.sub(img_resized, means, context.temp_allocator), std)
+	defer tensor.free_tensor(img_norm)
+
+	// HWC -> NHW, then unsqueeze to make a singleton batch
+	input_t := tensor.unsqueeze(tensor.permute(img_resized, {2, 0, 1}, context.temp_allocator), 0)
 	defer tensor.free_tensor(input_t)
 
 	// Set input for inference

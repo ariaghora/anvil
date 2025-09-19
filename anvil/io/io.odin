@@ -15,6 +15,8 @@ CSV_Empty_Row :: struct {}
 CSV_Inconsistent_Column_Count :: struct {}
 
 Image_Load_Error :: image.Error
+Cannot_Read_File :: struct {}
+Invalid_Image_Format :: struct {}
 
 NPY_Open_Error :: struct {
 	file_name: string,
@@ -65,6 +67,7 @@ IO_Error :: union {
 	CSV_Empty_Row,
 	CSV_Inconsistent_Column_Count,
 	Image_Load_Error,
+
 	NPY_Open_Error,
 
 	// NOTE(Rey): allocation error for bufio in numpy parser
@@ -79,4 +82,8 @@ IO_Error :: union {
 	NPY_Parse_Error,
 	NPY_Read_Array_Error,
 	NPY_Not_Implemented
+
+	Cannot_Read_File,
+	Invalid_Image_Format,
+
 }
