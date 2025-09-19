@@ -1,14 +1,11 @@
 package file_io
 
 import "../tensor"
-import "core:fmt"
 import "core:image"
 import "core:image/bmp"
 import "core:image/netpbm"
 import "core:image/png"
 import "core:image/qoi"
-import "core:log"
-import "core:slice"
 
 // Read image from file as a 3D tensor. The output shape will be [height, width, channel].
 // The purpose of channel dimension as the innermost is for convenience, e.g., normalization.
@@ -41,7 +38,10 @@ read_image_from_file :: proc(
 	return res, nil
 }
 
+import "core:fmt"
+import "core:slice"
 import "core:testing"
+
 @(test)
 read_image_from_file_test :: proc(t: ^testing.T) {
 	img, err := read_image_from_file(f32, "assets/test_images/mandrill.png")
