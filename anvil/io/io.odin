@@ -11,6 +11,8 @@ CSV_Empty_Row :: struct {}
 CSV_Inconsistent_Column_Count :: struct {}
 
 Image_Load_Error :: image.Error
+Cannot_Read_File :: struct {}
+Invalid_Image_Format :: struct {}
 
 IO_Error :: union {
 	CSV_Read_Error,
@@ -18,4 +20,6 @@ IO_Error :: union {
 	CSV_Empty_Row,
 	CSV_Inconsistent_Column_Count,
 	Image_Load_Error,
+	Cannot_Read_File,
+	Invalid_Image_Format,
 }

@@ -1,11 +1,8 @@
 package file_io
 
 import "../tensor"
-import "core:image"
-import "core:image/bmp"
-import "core:image/netpbm"
-import "core:image/png"
-import "core:image/qoi"
+import "core:os"
+import "vendor:stb/image"
 
 // Read image from file as a 3D tensor. The output shape will be [height, width, channel].
 // The purpose of channel dimension as the innermost is for convenience, e.g., normalization.
@@ -19,20 +16,32 @@ read_image_from_file :: proc(
 	res: ^tensor.Tensor(T),
 	err: IO_Error,
 ) where (T == f16 || T == f32 || T == f64) {
-	img := image.load_from_file(file_name, {}, allocator) or_return
-	defer image.destroy(img, allocator)
+	data, ok := os.read_entire_file(file_name, allocator)
+	if !ok do return nil, Cannot_Read_File{}
+	defer delete(data, allocator)
 
-	height, width, channels := uint(img.height), uint(img.width), uint(img.channels)
+	width, height, channels_in_file: i32
+	desired_channels: i32 = 0 // 0 = use image's native channel count
 
-	res = tensor.tensor_alloc(T, {height, width, channels}, true, allocator, loc)
-	for h in 0 ..< height {
-		for w in 0 ..< width {
-			for c in 0 ..< channels {
-				pixel_idx := (h * width + w) * channels + c
-				tensor_idx := h * width * channels + w * channels + c
-				res.data[tensor_idx] = T(img.pixels.buf[pixel_idx]) / 255.0
-			}
-		}
+	pixels := image.load_from_memory(
+		raw_data(data),
+		i32(len(data)),
+		&width,
+		&height,
+		&channels_in_file,
+		desired_channels,
+	)
+	if pixels == nil do return nil, Invalid_Image_Format{}
+	defer image.image_free(pixels)
+
+	// Actual channels we got (if desired_channels was 0, this equals channels_in_file)
+	channels := channels_in_file if desired_channels == 0 else desired_channels
+	res = tensor.tensor_alloc(T, {uint(height), uint(width), uint(channels)}, true, allocator, loc)
+
+	// Copy and normalize pixels
+	// stb returns data in row-major order: [height][width][channels]
+	for i in 0 ..< int(height * width * channels) {
+		res.data[i] = T(pixels[i]) / 255.0
 	}
 
 	return res, nil
