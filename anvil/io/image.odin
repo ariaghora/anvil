@@ -48,5 +48,4 @@ read_image_from_file_test :: proc(t: ^testing.T) {
 	testing.expect(t, err == nil, fmt.tprint(err))
 	defer tensor.free_tensor(img)
 	testing.expect(t, slice.equal(img.shape, []uint{288, 288, 3}))
-
 }
