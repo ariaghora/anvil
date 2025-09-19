@@ -1110,6 +1110,12 @@ chunk :: proc(
 	return chunks
 }
 
+tensor_cast :: proc(x: ^Tensor($T), $U: typeid, allocator := context.allocator) -> ^Tensor(U) {
+	out := tensor_alloc(U, x.shape, true, allocator)
+	for v, i in x.data do out.data[i] = U(v)
+	return out
+}
+
 /*
 	Concatenates tensors along an existing dimension.
 	
@@ -1372,6 +1378,16 @@ R_lower_upper :: proc(lower, upper: int) -> Range {
 @(private = "file")
 R_lower_upper_step :: proc(lower, upper, step: int) -> Range {
 	return Range{lower, upper, step}
+}
+
+scalar :: proc(v: $T, allocator := context.allocator) -> ^Tensor(T) {
+	return full(T, v, {}, allocator)
+}
+
+scale :: proc(x: ^Tensor($T), v: T) {
+	for v, i in x.data {
+		x.data[i] *= v
+	}
 }
 
 /*
