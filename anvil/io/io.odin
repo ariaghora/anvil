@@ -81,7 +81,7 @@ IO_Error :: union {
 	NPY_Invalid_Header_Length_Error,
 	NPY_Parse_Error,
 	NPY_Read_Array_Error,
-	NPY_Not_Implemented
+	NPY_Not_Implemented,
 
 	Cannot_Read_File,
 	Invalid_Image_Format,

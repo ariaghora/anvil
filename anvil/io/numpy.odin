@@ -164,6 +164,7 @@ read_numpy_array_from_file :: proc(
 	// parsed_header : Descriptor
 	parr_err := parse_npy_header(&npy_header, string( header_desc ))
 	if parr_err != nil do return npy_header, nil, parr_err
+	if npy_header.fortran_order do return npy_header, nil, NPY_Not_Implemented{"Array with fortran order is not supported yet"}
 
 	out := tensor.tensor_alloc(T, npy_header.shape[:], true, allocator, loc)
 
@@ -461,6 +462,7 @@ read_numpy_array_from_file_test :: proc(t: ^testing.T) {
 
 	header, np_tensor, err := read_numpy_array_from_file(f32, "assets/test_np_arrays/longdouble_5x5.npy")
 	testing.expect(t, err == nil, fmt.tprint(err))
+	testing.expect(t, !header.fortran_order)
 	defer tensor.free_tensor(np_tensor)
 	testing.expect(t, slice.equal(np_tensor.shape, []uint{5, 5}))
 	testing.expect(
