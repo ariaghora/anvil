@@ -1337,7 +1337,7 @@ R_lower_upper_step :: proc(lower, upper, step: int) -> Range {
 
 	Example:
 	  // Create 3x4 tensor: [[1,2,3,4], [5,6,7,8], [9,10,11,12]]
-	  t := tensor_from_array(f32, {1,2,3,4,5,6,7,8,9,10,11,12}, {3, 4})
+	  t := new_with_init([]f32{1,2,3,4,5,6,7,8,9,10,11,12}, {3, 4})
 	
 	  // Get row 1 (second row): [5,6,7,8]
 	  row := slice(t, {1})                    // shape [4] - first dim squeezed
