@@ -8,6 +8,8 @@ import "core:fmt"
 import "core:math"
 import "core:terminal"
 
+R :: tensor.R
+
 Attention_Mask_Decoder :: struct($T: typeid) {
 	q_proj:    ^nn.Linear(T),
 	k_proj:    ^nn.Linear(T),
@@ -602,8 +604,12 @@ predict_mask :: proc(
 	b, c, h, w := src.shape[0], src.shape[1], src.shape[2], src.shape[3]
 	hs: ^tensor.Tensor(T)
 	hs, src = forward_two_way_transformer(md.transformer, src, pos_src, tokens, talloc)
-	iou_token_out := tensor.flatten(tensor.slice(hs, {{}, {0, 1, 1}, {}}, talloc), 1, talloc)
-	mask_tokens_out := tensor.slice(hs, {{}, {1, 1 + int(md.num_mask_tokens), 1}, {}}, talloc)
+	iou_token_out := tensor.flatten(tensor.slice(hs, {{}, R(1)}, allocator = talloc), 1, talloc)
+	mask_tokens_out := tensor.slice(
+		hs,
+		{{}, R(1, 1 + int(md.num_mask_tokens))},
+		allocator = talloc,
+	)
 
 	// Upscale mask embeddings
 	src = tensor.reshape(tensor.transpose(src, 1, 2, talloc), {b, c, h, w}, talloc)
@@ -616,8 +622,7 @@ predict_mask :: proc(
 	h_list := make([dynamic]^tensor.Tensor(T), talloc)
 	hyper_in_list := make([dynamic]^tensor.Tensor(T), talloc)
 	for mlp, i in md.output_hypernetworks_mlps {
-		h := tensor.slice(mask_tokens_out, {{}, {i, i + 1, 1}, {}}, talloc)
-		h = tensor.flatten(h, 1, talloc)
+		h := tensor.slice(mask_tokens_out, {{}, i, {}}, keepdims = false, allocator = talloc)
 		append(&h_list, h)
 		h = forward_mlp_mask_decoder(mlp, h, talloc)
 		append(&hyper_in_list, h)
@@ -668,8 +673,8 @@ forward_mask_decoder :: proc(
 
 	// When multimask is false, just take the first channel from masks and iou_pred
 	// TODO(Aria): implement multimask output
-	masks = tensor.slice(masks, {{}, {0, 1, 1}, {}, {}}, allocator)
-	iou_pred = tensor.slice(iou_pred, {{}, {0, 1, 1}}, allocator)
+	masks = tensor.slice(masks, {{}, R(1)}, allocator = allocator)
+	iou_pred = tensor.slice(iou_pred, {{}, R(1)}, allocator = allocator)
 	return masks, iou_pred
 }
 

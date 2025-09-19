@@ -32,6 +32,8 @@ BBox :: struct {
 	conf:                   f32,
 }
 
+R :: tensor.R
+
 // Given raw model prediction, extract all bounding boxes with confidence exceeding
 // some threshold.
 extract_bboxes :: proc(
@@ -47,8 +49,7 @@ extract_bboxes :: proc(
 	for _, i in bboxes do bboxes[i] = make([dynamic]BBox, allocator)
 
 	for index in 0 ..< n_preds {
-		pred :=
-			tensor.slice(pred, {{}, {int(index), int(index + 1), 1}}, context.temp_allocator).data
+		pred := tensor.slice(pred, {{}, int(index)}, allocator = context.temp_allocator).data
 		confidence := slice.max(pred[4:])
 		if confidence > conf_thresh {
 			class_idx: uint = 0

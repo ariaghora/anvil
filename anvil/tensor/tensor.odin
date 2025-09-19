@@ -1291,14 +1291,89 @@ Range :: struct {
 	step:  int,
 }
 
-slice :: proc(input: ^Tensor($T), ranges: []Range, allocator := context.allocator) -> ^Tensor(T) {
+Slice :: union {
+	int,
+	Range,
+}
+
+// Procedure group to help constructing ranges to be used for tensor slicing
+R :: proc {
+	R_upper,
+	R_lower_upper,
+	R_lower_upper_step,
+}
+@(private = "file")
+R_upper :: proc(upper: int) -> Range {
+	return Range{0, upper, 1}
+}
+@(private = "file")
+R_lower_upper :: proc(lower, upper: int) -> Range {
+	return Range{lower, upper, 1}
+}
+@(private = "file")
+R_lower_upper_step :: proc(lower, upper, step: int) -> Range {
+	return Range{lower, upper, step}
+}
+
+/*
+	Extracts a sub-tensor by slicing along each dimension.
+
+	Supports two slice types per dimension:
+	  - Range{start, end, step}: Preserves dimension, selects elements [start:end:step).
+	    NOTE: use `{}` to slice the entire dimension.
+	  - int: Selects single index and squeezes dimension (unless keepdims=true)
+
+	Negative indices count from the end (-1 is last element).
+	Range.end=0 means slice to the end of that dimension.
+	Fewer slices than tensor rank will slice only leading dimensions.
+
+	Parameters:
+	  input: Source tensor to slice
+	  slices: Array of Range or int values for each dimension
+	  keepdims: If true, dimensions indexed with int retain size 1 instead of being squeezed
+	  allocator: Memory allocator for output tensor
+
+	Returns new tensor containing the sliced data.
+
+	Example:
+	  // Create 3x4 tensor: [[1,2,3,4], [5,6,7,8], [9,10,11,12]]
+	  t := new_with_init([]f32{1,2,3,4,5,6,7,8,9,10,11,12}, {3, 4})
+	
+	  // Get row 1 (second row): [5,6,7,8]
+	  row := slice(t, {1})                    // shape [4] - first dim squeezed
+	
+	  // Get column 2 (third column): [3,7,11]
+	  col := slice(t, {{}, 2})                // shape [3] - second dim squeezed
+	
+	  // Get 2x2 submatrix from rows 1:3, cols 1:3: [[6,7], [10,11]]
+	  sub := slice(t, {R(1, 3), R(1, 3)})     // shape [2, 2]
+	
+	  // Get last 2 rows: [[5,6,7,8], [9,10,11,12]]
+	  last := slice(t, {R(-2, 0)})            // shape [2, 4]
+	
+	  // Every other column: [[1,3], [5,7], [9,11]]
+	  skip := slice(t, {{}, R(0, 0, 2)})      // shape [3, 2]
+*/
+slice :: proc(
+	input: ^Tensor($T),
+	slices: []Slice,
+	keepdims := false,
+	allocator := context.allocator,
+) -> ^Tensor(T) {
 	trace_slice := trace.TRACE_FUNCTION("slice")
 	defer trace.end_scoped_trace(trace_slice)
 
 	rank := len(input.shape)
-	assert(len(ranges) == rank, "ranges must match tensor rank")
+	assert(len(slices) <= rank, "ranges exceeding tensor rank")
+
+	slices_dyn := slice.to_dynamic(slices, context.temp_allocator)
+	// We add trailing slices with ranges covering the entire dimension
+	for len(slices_dyn) < rank {
+		append(&slices_dyn, Range{})
+	}
 
 	output_shape: [16]uint
+	squeezed_mask: [16]bool
 	starts: [16]int
 	steps: [16]int
 	input_strides := input.strides
@@ -1306,14 +1381,24 @@ slice :: proc(input: ^Tensor($T), ranges: []Range, allocator := context.allocato
 	assert(rank <= 16, "rank too high")
 
 	// Normalize ranges and calculate output shape
+	out_rank := rank
 	for i in 0 ..< rank {
-		r := ranges[i]
-		dim_size := int(input.shape[i])
+		slice := slices_dyn[i]
+		range: Range
+		switch s in slice {
+		case Range:
+			range = s
+		case int:
+			squeezed_mask[i] = true
+			out_rank -= 1
+			range = Range{s, s + 1, 1}
+		}
 
-		start := r.start if r.start >= 0 else r.start + dim_size
-		end := r.end if r.end != 0 else dim_size
+		dim_size := int(input.shape[i])
+		start := range.start if range.start >= 0 else range.start + dim_size
+		end := range.end if range.end != 0 else dim_size
 		if end < 0 do end += dim_size
-		step := r.step if r.step != 0 else 1
+		step := range.step if range.step != 0 else 1
 
 		start = clamp(start, 0, dim_size)
 		end = clamp(end, 0, dim_size)
@@ -1322,8 +1407,13 @@ slice :: proc(input: ^Tensor($T), ranges: []Range, allocator := context.allocato
 		starts[i] = start
 		steps[i] = step
 	}
+	output_shape_squeezed := make([dynamic]uint, context.temp_allocator)
+	for must_squeeze, i in squeezed_mask {
+		if !must_squeeze do append(&output_shape_squeezed, output_shape[i])
+	}
+	final_output_shape := keepdims ? output_shape[:rank] : output_shape_squeezed[:out_rank]
 
-	output := tensor_alloc(T, output_shape[:rank], true, allocator)
+	output := tensor_alloc(T, final_output_shape, true, allocator)
 
 	// Find innermost contiguous dimensions
 	contiguous_from := rank
@@ -1667,10 +1757,10 @@ softmax_last_dim_inplace :: proc(t: ^Tensor($T)) {
 			// Pass 1: Find max
 			for ; col + 4 <= last_dim; col += 4 {
 				vals := #simd[4]f32 {
-					row_data[col+0*dim_stride],
-					row_data[col+1*dim_stride],
-					row_data[col+2*dim_stride],
-					row_data[col+3*dim_stride]
+					row_data[col + 0 * dim_stride],
+					row_data[col + 1 * dim_stride],
+					row_data[col + 2 * dim_stride],
+					row_data[col + 3 * dim_stride],
 				}
 				max_vec = simd.max(max_vec, vals)
 			}
@@ -1691,25 +1781,28 @@ softmax_last_dim_inplace :: proc(t: ^Tensor($T)) {
 
 			for ; col + 4 <= last_dim; col += 4 {
 				vals := #simd[4]f32 {
-					row_data[col+0*dim_stride],
-					row_data[col+1*dim_stride],
-					row_data[col+2*dim_stride],
-					row_data[col+3*dim_stride]
+					row_data[col + 0 * dim_stride],
+					row_data[col + 1 * dim_stride],
+					row_data[col + 2 * dim_stride],
+					row_data[col + 3 * dim_stride],
 				}
 				vals = simd.sub(vals, #simd[4]f32{max_val, max_val, max_val, max_val})
 
 				exp_vals: #simd[4]f32
 				simd_backend.expf_4(&exp_vals, &vals)
 
-				#unroll for i in 0..< 4 {
-					row_data[col+uint(i)] = simd.extract(exp_vals, i)
+				#unroll for i in 0 ..< 4 {
+					row_data[col + uint(i)] = simd.extract(exp_vals, i)
 				}
-				sum_vec = simd.add(sum_vec, #simd[4]f32 {
-					row_data[col+0*dim_stride],
-					row_data[col+1*dim_stride],
-					row_data[col+2*dim_stride],
-					row_data[col+3*dim_stride]
-				})
+				sum_vec = simd.add(
+					sum_vec,
+					#simd[4]f32 {
+						row_data[col + 0 * dim_stride],
+						row_data[col + 1 * dim_stride],
+						row_data[col + 2 * dim_stride],
+						row_data[col + 3 * dim_stride],
+					},
+				)
 			}
 
 			// Reduce by SIMD
@@ -1728,14 +1821,14 @@ softmax_last_dim_inplace :: proc(t: ^Tensor($T)) {
 			for ; col + 4 <= last_dim; col += 4 {
 				// vals := (#simd[4]f32)(row_data[col])
 				vals := #simd[4]f32 {
-					row_data[col+0*dim_stride],
-					row_data[col+1*dim_stride],
-					row_data[col+2*dim_stride],
-					row_data[col+3*dim_stride]
+					row_data[col + 0 * dim_stride],
+					row_data[col + 1 * dim_stride],
+					row_data[col + 2 * dim_stride],
+					row_data[col + 3 * dim_stride],
 				}
 				vals = simd.mul(vals, inv_sum_vec)
-				#unroll for i in 0..< 4 {
-					row_data[col+uint(i)] = simd.extract(vals, i)
+				#unroll for i in 0 ..< 4 {
+					row_data[col + uint(i)] = simd.extract(vals, i)
 				}
 			}
 

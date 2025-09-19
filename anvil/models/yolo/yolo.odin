@@ -10,6 +10,8 @@ import "core:fmt"
 import "core:math"
 import "core:slice"
 
+R :: tensor.R
+
 make_anchors :: proc(
 	xs0, xs1, xs2: ^tensor.Tensor($T),
 	strides: [3]uint,
@@ -866,8 +868,8 @@ forward_head :: proc(
 	chan_mid := int(dn.ch * 4)
 	chan_end := int(x_cat.shape[1])
 
-	box := tensor.slice(x_cat, {{}, {0, chan_mid, 1}, {}}, allocator)
-	cls := tensor.slice(x_cat, {{}, {chan_mid, chan_end, 1}, {}}, allocator)
+	box := tensor.slice(x_cat, {{}, R(chan_mid)}, allocator = allocator)
+	cls := tensor.slice(x_cat, {{}, R(chan_mid, chan_end)}, allocator = allocator)
 	defer tensor.free_tensor(box, cls, allocator = allocator)
 
 	box_dfl := forward_dfl(dn.dfl, box, allocator)

@@ -7,6 +7,8 @@ import vb "../var_builder"
 import "core:fmt"
 import "core:math"
 
+R :: tensor.R
+
 NUM_POINTS_EMBEDDINGS :: 4
 
 Position_Embedding_Random :: struct($T: typeid) {
@@ -89,9 +91,9 @@ forward_position_embedding_with_coords :: proc(
 	image_w, image_h: uint,
 	allocator := context.allocator,
 ) -> ^tensor.Tensor(T) {
-	coords0 := tensor.slice(coords_input, {{}, {}, {0, 1, 1}}, context.temp_allocator)
+	coords0 := tensor.slice(coords_input, {{}, {}, R(0, 1)}, allocator = context.temp_allocator)
 	for v, i in coords0.data do coords0.data[i] /= T(image_h)
-	coords1 := tensor.slice(coords_input, {{}, {}, {1, 2, 1}}, context.temp_allocator)
+	coords1 := tensor.slice(coords_input, {{}, {}, R(1, 2)}, allocator = context.temp_allocator)
 	for v, i in coords1.data do coords1.data[i] /= T(image_w)
 	c := len(coords_input.shape) - 1
 	coords := tensor.cat([]^tensor.Tensor(T){coords0, coords1}, uint(c))
