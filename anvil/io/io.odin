@@ -18,47 +18,17 @@ Image_Load_Error :: image.Error
 Cannot_Read_File :: struct {}
 Invalid_Image_Format :: struct {}
 
-NPY_Open_Error :: struct {
-	file_name: string,
-	error: os.Errno,
-}
-
-NPY_Reader_Creation_Error :: struct {
-	file_name: string,
-	stream: io.Stream,
-}
-
-NPY_Reader_Read_Byte_Error :: struct {
-	file_name: string,
-	reader: bufio.Reader,
-}
-
-NPY_Invalid_Header_Error :: struct {
-	message: string,
-}
-
-NPY_Invalid_Version_Error :: struct {
-	message: string,
-	version: [2]u8,
-}
-
-NPY_Invalid_Header_Length :: struct {
-	length: [2]u8
-}
-
-NPY_Not_Implemented :: struct {
-	message: string
-}
-
-NPY_Parse_Error :: enum {
-	NPY_Invalid_Descriptor,
-	NPY_Malformed_Header,
-	NPY_Shape_Parse_Failed,
-}
-
-NPY_Read_Array_Error :: struct {
-	message: string
-}
+NPY_Open_Error             :: struct { file_name: string, error: os.Errno, }
+NPY_Reader_Creation_Error  :: struct { file_name: string, stream: io.Stream, }
+NPY_Reader_Read_Byte_Error :: struct { file_name: string, reader: bufio.Reader, }
+NPY_Invalid_Header_Error   :: struct { message: string, }
+NPY_Invalid_Version_Error  :: struct { message: string, version: [2]u8, }
+NPY_Invalid_Header_Length  :: struct { length: [2]u8 }
+NPY_Not_Implemented        :: struct { message: string }
+NPY_Invalid_Descriptor     :: struct { }
+NPY_Malformed_Header       :: struct { }
+NPY_Shape_Parse_Failed     :: struct { }
+NPY_Read_Array_Error       :: struct { message: string }
 
 IO_Error :: union {
 	mem.Allocator_Error,
@@ -75,7 +45,9 @@ IO_Error :: union {
 	NPY_Invalid_Header_Error,
 	NPY_Invalid_Version_Error,
 	NPY_Invalid_Header_Length,
-	NPY_Parse_Error,
+	NPY_Invalid_Descriptor,
+	NPY_Malformed_Header,
+	NPY_Shape_Parse_Failed,
 	NPY_Read_Array_Error,
 	NPY_Not_Implemented,
 

@@ -112,21 +112,23 @@ read_numpy_array_from_file :: proc(
 	allocator:= context.allocator,
 	loc := #caller_location,
 ) -> (
-	^tensor.Tensor(T),
-	IO_Error,
+	out : ^tensor.Tensor(T),
+	parse_numpy_npy_error : IO_Error,
 ) where intrinsics.type_is_numeric(T) || T == b8 {
 
-	// define bufio_reader, and io.Stream
-	bufio_reader : bufio.Reader
-	reader       : io.Stream
-	ok           : bool
-	// create an handler
-	npy_header   := NPY_Array_Header{}
+	// define bufio, os, and io objects
+	bufio_reader     : bufio.Reader
+	handle           : os.Handle
+	os_open_error    : os.Error
+	reader           : io.Stream
+	ok               : bool             // general usage
+	npy_header       : NPY_Array_Header // numpy npy file header
+	// NOTE: npy is NOT an abreviation for NumPy it is referring exactly to `.npy` file format
 	defer delete_np_header(&npy_header)
 
 	{ // scoping the stream and readers
-		handle, open_error := os.open(file_name, os.O_RDONLY)
-		if open_error != os.ERROR_NONE do return nil, NPY_Open_Error{file_name, open_error}
+		handle, os_open_error = os.open(file_name, os.O_RDONLY)
+		if os_open_error != os.ERROR_NONE do return nil, NPY_Open_Error{file_name, os_open_error}
 
 		// create a stream
 		stream := os.stream_from_handle(handle)
@@ -134,48 +136,17 @@ read_numpy_array_from_file :: proc(
 		// create a reader
 		reader, ok = io.to_reader(stream)
 		if !ok do return nil, NPY_Reader_Creation_Error{file_name, stream}
-
 		bufio.reader_init(&bufio_reader, reader, bufreader_size, allocator)
+		// guard the reader to stop early when there is no progress when reading file
 		bufio_reader.max_consecutive_empty_reads = 1
 	}
 
-	magic : [6]u8
-	// read magic magic
-	read, rerr := io.read(reader, magic[:], &MAGIC_NPY_LEN)
-	if rerr != nil || read != 6 do return nil, NPY_Invalid_Header_Error{"Invalid magic number"}
-	if !slice.equal(magic[:], MAGIC_NPY) do return nil, NPY_Invalid_Header_Error{"Invalid magic number"}
+	// read and validate header section
+	parse_numpy_npy_error = parse_and_validate_npy_header(&reader, &npy_header)
+	if parse_numpy_npy_error != nil do return nil, parse_numpy_npy_error
 
-	clone_err : mem.Allocator_Error
-	npy_header.magic, clone_err = strings.clone_from_bytes(magic[:])
-	if clone_err != nil do return nil, nil
-
-	// read version
-	version : [2]u8
-	read, rerr = io.read(reader, version[:])
-	if rerr != nil || read != 2 do return nil, NPY_Invalid_Version_Error{"Invalid version", version}
-	npy_header.version = version
-
-	header_lenght : [2]u8
-	// read header length
-	read, rerr = io.read(reader, header_lenght[:])
-	if rerr != nil || read != 2 do return nil, NPY_Invalid_Header_Length{header_lenght}
-	npy_header.header_length = transmute(u16le)header_lenght
-
-	// TODO(Rey): not sure about keeping this len_header thingy
-	len_header := cast(int)transmute(u16le)header_lenght
-	header_desc := make([]u8, len_header)
-	read, rerr = io.read(reader, header_desc[:])
-	if rerr != nil || read != len_header do return nil, NPY_Invalid_Header_Length{header_lenght}
-
-	// parsed_header : Descriptor
-	parr_err := parse_npy_header(&npy_header, string( header_desc ))
-	if parr_err != nil do return nil, parr_err
-	if npy_header.fortran_order do return nil, NPY_Not_Implemented{"Array with fortran order is not supported yet"}
-
-	out := tensor.tensor_alloc(T, npy_header.shape[:], true, allocator, loc)
-
-	type_char := npy_header.descr[1:]
-	npy_header.alignment = get_alignment(type_char)
+	// tensor allocation
+	out = tensor.tensor_alloc(T, npy_header.shape[:], true, allocator, loc)
 
 	n_elem : uint
 	if len(npy_header.shape) > 1 {
@@ -193,7 +164,9 @@ read_numpy_array_from_file :: proc(
 		n_elem,
 		allocator = allocator
 	)
-	if !ok do return nil, NPY_Read_Array_Error{"Cannot parse data array, possible curropted data type is not supported yet"}
+	if !ok do return nil, NPY_Read_Array_Error{
+		"Cannot parse array values, possible curropted data, or data saved with type that is not supported yet"
+	}
 	return out, nil
 }
 
@@ -218,10 +191,7 @@ recreate_npy_array :: proc(
 	read_bytes_err : io.Error
 	raw_bytes_pos  : int
 
-	// TODO(Rey) : should we defer delet this and copy the content to
-	// the tensor.data instead? NEED advice.
 	raw_bytes_container := make([]u8, n_elem, allocator=allocator, loc=loc)
-
 	raw_bytes_pos, read_bytes_err = bufio.reader_read(reader, raw_bytes_container[:])
 
     switch np_header.descr[1:] {
@@ -372,11 +342,58 @@ recreate_npy_array :: proc(
 
 // parse_npy_header
 @(private = "file")
-parse_npy_header :: proc(
-	h: ^NPY_Array_Header,
-	header: string,
-	allocator := context.allocator
-) -> (err: NPY_Parse_Error) {
+parse_and_validate_npy_header :: proc(
+	reader     : ^io.Stream,
+	npy_header : ^NPY_Array_Header,
+	allocator  := context.allocator,
+	loc        := #caller_location,
+) -> (err: IO_Error) {
+
+	// header's layout.
+	// ...         TODO(Rey) : Add brief explanation about the header layout
+	//                         will be taken from
+	//                         https://numpy.org/neps/nep-0001-npy-format.html
+
+	// read the first six bytes of the header, it should be equal to `MAGIC_NPY`
+	// otherwise the file is not valid numpy's npy file.
+	magic : [6]u8
+	read, rerr := io.read(reader^, magic[:], &MAGIC_NPY_LEN)
+	if (rerr != nil || read != 6 || !slice.equal(magic[:], MAGIC_NPY)) {
+		return NPY_Invalid_Header_Error{"Invalid NumPy's npy file."}
+	}
+	clone_err : mem.Allocator_Error
+	npy_header.magic, clone_err = strings.clone_from_bytes(magic[:])
+	if clone_err != nil do return clone_err
+
+	// read version
+	// Version info is exactly 2 bytes right after magic header (MAGIC_NPY)
+	// it should be either one of these
+	//   - {1, 0}
+	//   - {2, 0}
+	//   - {3, 0}
+	// otherwise the file is not
+	// a valid numpy's npy file.
+	version : [2]u8
+	read, rerr = io.read(reader^, version[:])
+	if rerr != nil || read != 2 do return NPY_Invalid_Header_Error{"Invalid NumPy's npy file"}
+	if (version[1] >= version[0]) || (version[0] > 4 || version[1] != 0) {
+		return NPY_Invalid_Header_Error{"Invalid NumPy's npy file. Version is not supported"}
+	}
+	npy_header.version = version
+
+	header_lenght : [2]u8
+	// read header length
+	read, rerr = io.read(reader^, header_lenght[:])
+	if rerr != nil || read != 2 do return NPY_Invalid_Header_Length{header_lenght}
+
+	npy_header.header_length = transmute(u16le)header_lenght
+	len_header := cast(int)npy_header.header_length
+	header_desc := make([]u8, len_header)
+
+	read, rerr = io.read(reader^, header_desc[:])
+	if rerr != nil || read != len_header do return NPY_Invalid_Header_Length{header_lenght}
+
+	header := string(header_desc)
 
 	// Clean up header string
 	clean_header := strings.trim_space(header)
@@ -386,47 +403,52 @@ parse_npy_header :: proc(
 	clean_header, is_alloc = strings.replace(clean_header, "(", "[", -1)
 	clean_header, is_alloc = strings.replace(clean_header, ")", "]", -1)
 
-	// Enhanced descriptor parsing
+	// Parse the byte order and type char
 	if descr_start := strings.index(clean_header, "\"descr\":"); descr_start != -1 {
 		descr_start += 8 // offset exactly the length of ` "descr": `
 		descr_end := strings.index_byte(clean_header[descr_start:], ',')
-		if descr_end == -1 do return .NPY_Malformed_Header
+		if descr_end == -1 do return NPY_Malformed_Header{}
 		descr_str := strings.trim(clean_header[descr_start:descr_start+descr_end], " \"")
 		// Handle native/byte-order-agnostic types
 		switch {
 		case strings.has_prefix(descr_str, "|"):
-			h.endianess = endian.PLATFORM_BYTE_ORDER
+			npy_header.endianess = endian.PLATFORM_BYTE_ORDER
 			descr, clone_err := strings.clone(descr_str[:])
-			h.descr = descr
+			npy_header.descr = descr
 		case strings.has_prefix(descr_str, "<") :
 			// Existing endian-sensitive types
-			h.endianess = endian.Byte_Order.Little
+			npy_header.endianess = endian.Byte_Order.Little
 			descr, clone_err := strings.clone(descr_str[:])
-			h.descr = descr
+			npy_header.descr = descr
 		case strings.has_prefix(descr_str, ">") :
 			// Existing endian-sensitive types
-			h.endianess = endian.Byte_Order.Big
+			npy_header.endianess = endian.Byte_Order.Big
 			descr, clone_err := strings.clone(descr_str[:])
-			h.descr = descr
+			npy_header.descr = descr
 		case: // Handle non-byte-ordered types
-			h.endianess = endian.PLATFORM_BYTE_ORDER
+			npy_header.endianess = endian.PLATFORM_BYTE_ORDER
 			descr, clone_err := strings.clone(descr_str[:])
-			h.descr = descr
+			npy_header.descr = descr
 		}
+		// take the type char only, e.g. take f8 from <f8
+		npy_header.alignment = get_alignment(npy_header.descr[1:])
 	}
 
 	// Parse fortran_order
+	npy_header.fortran_order = true // first assumption
 	if fo_start := strings.index(clean_header, "\"fortran_order\":"); fo_start != -1 {
 		fo_start += 16  // Skip `"fortran_order": `
 		fo_str := clean_header[fo_start:]
-		h.fortran_order = strings.has_prefix(fo_str, "True")
+		is_fortran := strings.has_prefix(fo_str, "True")
+		if is_fortran do return NPY_Not_Implemented{"Array with fortran order is not supported yet"}
 	}
+	
 
 	// Parse shape tuple
 	if shape_start := strings.index(clean_header, "\"shape\":"); shape_start != -1 {
 		shape_start += 8  // Skip ` "shape": `
 		shape_end := strings.index_byte(clean_header[shape_start:], ']')
-		if shape_end == -1 do return .NPY_Shape_Parse_Failed
+		if shape_end == -1 do return NPY_Shape_Parse_Failed{}
 
 		shape_str := clean_header[shape_start:shape_start+shape_end]
 		shape_str = strings.trim_space(shape_str)
@@ -435,21 +457,19 @@ parse_npy_header :: proc(
 		// Split and parse integers
 		parts := strings.split(shape_str, ",", allocator)
 		defer delete(parts)
-		h.shape = make([]uint, len(parts), allocator)
+		npy_header.shape = make([]uint, len(parts), allocator)
 
 		count := uint(0)
 		for part in parts {
 			trimmed := strings.trim_space(part)
 			if trimmed == "" { continue }
 			value, ok := strconv.parse_int(trimmed)
-			if !ok do return .NPY_Shape_Parse_Failed
-			h.shape[count] = cast(uint)value
+			if !ok do return NPY_Shape_Parse_Failed{}
+			npy_header.shape[count] = cast(uint)value
 			count += 1
         }
-		h.shape = h.shape[:count]
-
+		npy_header.shape = npy_header.shape[:count]
     }
-
     return nil
 }
 
