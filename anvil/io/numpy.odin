@@ -442,7 +442,7 @@ import "core:fmt"
 import "core:testing"
 
 @(test)
-read_numpy_array_from_file_test :: proc(t: ^testing.T) {
+read_numpy_array_from_file_longdouble_test :: proc(t: ^testing.T) {
 	// creation of assets/test_np_arrays/longdouble_5x5.npy
 	// ```
 	// import numpy as np
@@ -468,4 +468,19 @@ read_numpy_array_from_file_test :: proc(t: ^testing.T) {
 			}
 		)
 	)
+}
+
+@(test)
+read_numpy_array_from_file_boolean_test :: proc(t: ^testing.T) {
+	// creation of assets/test_np_arrays/boolean_5x5.npy
+	// ```
+	// import numpy as np;
+	// b_5     = np.array([1, 0, 1, 0, 1]).astype(np.bool_)
+	// b_5x5   = np.array([b_5 for _ in range(5)])
+	// np.save("assets/test_np_arrays/boolean_5x5.npy", clongdouble_5x5)
+	// ```
+
+	np_tensor, err := read_numpy_array_from_file(f32, "assets/test_np_arrays/boolean_5x5.npy")
+	testing.expect(t, err != nil, fmt.tprint(err))
+
 }
