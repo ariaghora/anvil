@@ -152,14 +152,14 @@ read_numpy_array_from_file :: proc(
 	header_lenght : [2]u8
 	// read header length
 	read, rerr = io.read(reader, header_lenght[:])
-	if rerr != nil || read != 2 do return npy_header, nil, NPY_Invalid_Header_Length_Error{"Broken header length", header_lenght}
+	if rerr != nil || read != 2 do return npy_header, nil, NPY_Invalid_Header_Length{header_lenght}
 	npy_header.header_length = transmute(u16le)header_lenght
 
 	// TODO(Rey): not sure about keeping this len_header thingy
 	len_header := cast(int)transmute(u16le)header_lenght
 	header_desc := make([]u8, len_header)
 	read, rerr = io.read(reader, header_desc[:])
-	if rerr != nil || read != len_header do return npy_header, nil, NPY_Invalid_Header_Length_Error{"Broken header length", header_lenght}
+	if rerr != nil || read != len_header do return npy_header, nil, NPY_Invalid_Header_Length{header_lenght}
 
 	// parsed_header : Descriptor
 	parr_err := parse_npy_header(&npy_header, string( header_desc ))

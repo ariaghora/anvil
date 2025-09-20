@@ -42,9 +42,8 @@ NPY_Invalid_Version_Error :: struct {
 	version: [2]u8,
 }
 
-NPY_Invalid_Header_Length_Error :: struct {
-	message: string,
-	length: [2]u8,
+NPY_Invalid_Header_Length :: struct {
+	length: [2]u8
 }
 
 NPY_Not_Implemented :: struct {
@@ -62,6 +61,8 @@ NPY_Read_Array_Error :: struct {
 }
 
 IO_Error :: union {
+	mem.Allocator_Error,
+
 	CSV_Read_Error,
 	CSV_Format_Conversion_Error,
 	CSV_Empty_Row,
@@ -69,16 +70,11 @@ IO_Error :: union {
 	Image_Load_Error,
 
 	NPY_Open_Error,
-
-	// NOTE(Rey): allocation error for bufio in numpy parser
-	// TODO(Rey): maybe alias this one?
-	mem.Allocator_Error,
-
 	NPY_Reader_Creation_Error,
 	NPY_Reader_Read_Byte_Error,
 	NPY_Invalid_Header_Error,
 	NPY_Invalid_Version_Error,
-	NPY_Invalid_Header_Length_Error,
+	NPY_Invalid_Header_Length,
 	NPY_Parse_Error,
 	NPY_Read_Array_Error,
 	NPY_Not_Implemented,
