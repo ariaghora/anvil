@@ -112,60 +112,65 @@ read_numpy_array_from_file :: proc(
 	allocator:= context.allocator,
 	loc := #caller_location,
 ) -> (
-	NPY_Array_Header,
 	^tensor.Tensor(T),
 	IO_Error,
 ) where intrinsics.type_is_numeric(T) || T == b8 {
-	// create an handler
-	npy_header: NumpyArrayHeader
-	handle, open_error := os.open(file_name, os.O_RDONLY)
-	if open_error != os.ERROR_NONE do return npy_header, nil, NPY_Open_Error{file_name, open_error}
-	npy_header   : NPY_Array_Header
 
-	// create a stream
-	stream := os.stream_from_handle(handle)
-
-	// create a reader
-	reader, ok := io.to_reader(stream)
-	if !ok do return npy_header, nil, NPY_Reader_Creation_Error{file_name, stream}
-
-	// define bufio_reader
+	// define bufio_reader, and io.Stream
 	bufio_reader : bufio.Reader
-	bufio.reader_init(&bufio_reader, reader, bufreader_size, allocator)
-	bufio_reader.max_consecutive_empty_reads = 1
+	reader       : io.Stream
+	ok           : bool
+	// create an handler
+	npy_header   := NPY_Array_Header{}
+	defer delete_np_header(&npy_header)
+
+	{ // scoping the stream and readers
+		handle, open_error := os.open(file_name, os.O_RDONLY)
+		if open_error != os.ERROR_NONE do return nil, NPY_Open_Error{file_name, open_error}
+
+		// create a stream
+		stream := os.stream_from_handle(handle)
+
+		// create a reader
+		reader, ok = io.to_reader(stream)
+		if !ok do return nil, NPY_Reader_Creation_Error{file_name, stream}
+
+		bufio.reader_init(&bufio_reader, reader, bufreader_size, allocator)
+		bufio_reader.max_consecutive_empty_reads = 1
+	}
 
 	magic : [6]u8
 	// read magic magic
 	read, rerr := io.read(reader, magic[:], &MAGIC_NPY_LEN)
-	if rerr != nil || read != 6 do return npy_header, nil, NPY_Invalid_Header_Error{"Invalid magic number"}
-	if !slice.equal(magic[:], MAGIC_NPY) do return npy_header, nil, NPY_Invalid_Header_Error{"Invalid magic number"}
+	if rerr != nil || read != 6 do return nil, NPY_Invalid_Header_Error{"Invalid magic number"}
+	if !slice.equal(magic[:], MAGIC_NPY) do return nil, NPY_Invalid_Header_Error{"Invalid magic number"}
 
 	clone_err : mem.Allocator_Error
 	npy_header.magic, clone_err = strings.clone_from_bytes(magic[:])
-	if clone_err != nil do return npy_header, nil, nil
+	if clone_err != nil do return nil, nil
 
 	// read version
 	version : [2]u8
 	read, rerr = io.read(reader, version[:])
-	if rerr != nil || read != 2 do return npy_header, nil, NPY_Invalid_Version_Error{"Invalid version", version}
+	if rerr != nil || read != 2 do return nil, NPY_Invalid_Version_Error{"Invalid version", version}
 	npy_header.version = version
 
 	header_lenght : [2]u8
 	// read header length
 	read, rerr = io.read(reader, header_lenght[:])
-	if rerr != nil || read != 2 do return npy_header, nil, NPY_Invalid_Header_Length{header_lenght}
+	if rerr != nil || read != 2 do return nil, NPY_Invalid_Header_Length{header_lenght}
 	npy_header.header_length = transmute(u16le)header_lenght
 
 	// TODO(Rey): not sure about keeping this len_header thingy
 	len_header := cast(int)transmute(u16le)header_lenght
 	header_desc := make([]u8, len_header)
 	read, rerr = io.read(reader, header_desc[:])
-	if rerr != nil || read != len_header do return npy_header, nil, NPY_Invalid_Header_Length{header_lenght}
+	if rerr != nil || read != len_header do return nil, NPY_Invalid_Header_Length{header_lenght}
 
 	// parsed_header : Descriptor
 	parr_err := parse_npy_header(&npy_header, string( header_desc ))
-	if parr_err != nil do return npy_header, nil, parr_err
-	if npy_header.fortran_order do return npy_header, nil, NPY_Not_Implemented{"Array with fortran order is not supported yet"}
+	if parr_err != nil do return nil, parr_err
+	if npy_header.fortran_order do return nil, NPY_Not_Implemented{"Array with fortran order is not supported yet"}
 
 	out := tensor.tensor_alloc(T, npy_header.shape[:], true, allocator, loc)
 
@@ -188,8 +193,8 @@ read_numpy_array_from_file :: proc(
 		n_elem,
 		allocator = allocator
 	)
-	if !ok do return npy_header, nil, NPY_Read_Array_Error{"Cannot parse data array, possible curropted data type is not supported yet"}
-	return npy_header, out, nil
+	if !ok do return nil, NPY_Read_Array_Error{"Cannot parse data array, possible curropted data type is not supported yet"}
+	return out, nil
 }
 
 @(private = "file")
@@ -461,9 +466,8 @@ read_numpy_array_from_file_test :: proc(t: ^testing.T) {
 	// np.save("assets/test_np_arrays/longdouble_5x5.npy", clongdouble_5x5)
 	// ```
 
-	header, np_tensor, err := read_numpy_array_from_file(f32, "assets/test_np_arrays/longdouble_5x5.npy")
+	np_tensor, err := read_numpy_array_from_file(f32, "assets/test_np_arrays/longdouble_5x5.npy")
 	testing.expect(t, err == nil, fmt.tprint(err))
-	testing.expect(t, !header.fortran_order)
 	defer tensor.free_tensor(np_tensor)
 	testing.expect(t, slice.equal(np_tensor.shape, []uint{5, 5}))
 	testing.expect(
