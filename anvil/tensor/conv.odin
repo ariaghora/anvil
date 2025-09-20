@@ -1195,129 +1195,6 @@ conv2d :: proc {
 	conv2d_grouped,
 }
 
-
-// Specialized for conv2d: (B*H*W, C) -> (B, C, H, W)
-@(private = "file")
-reshape_bhwc_to_bchw :: proc(
-	tensor: ^Tensor($T),
-	batch, height, width, channels: uint,
-	allocator := context.allocator,
-) -> ^Tensor(T) {
-	result := tensor_alloc(T, []uint{batch, channels, height, width}, true, allocator)
-
-	src := tensor.data
-	dst := result.data
-	hw := height * width
-
-	#no_bounds_check {
-		when T == f32 {
-			for b in 0 ..< batch {
-				src_batch := src[b * hw * channels:]
-				dst_batch := dst[b * channels * hw:]
-
-				// Process 4 spatial positions at once
-				hw_idx := uint(0)
-				for ; hw_idx + 4 <= hw; hw_idx += 4 {
-					src_base := hw_idx * channels
-
-					// Process 4 channels at a time
-					c := uint(0)
-					for ; c + 4 <= channels; c += 4 {
-						// Load 4x4 block, 4 spatial × 4 channels
-						// These are already consecutive, so use SIMD loads
-						row0 := (^#simd[4]f32)(&src_batch[src_base + c])^
-						row1 := (^#simd[4]f32)(&src_batch[src_base + channels + c])^
-						row2 := (^#simd[4]f32)(&src_batch[src_base + 2 * channels + c])^
-						row3 := (^#simd[4]f32)(&src_batch[src_base + 3 * channels + c])^
-
-						// Transpose 4x4 matrix using shuffles
-						// Step 1: Interleave pairs
-						tmp0 := simd.shuffle(row0, row1, 0, 1, 4, 5) // [r0[0], r0[1], r1[0], r1[1]]
-						tmp1 := simd.shuffle(row0, row1, 2, 3, 6, 7) // [r0[2], r0[3], r1[2], r1[3]]
-						tmp2 := simd.shuffle(row2, row3, 0, 1, 4, 5) // [r2[0], r2[1], r3[0], r3[1]]
-						tmp3 := simd.shuffle(row2, row3, 2, 3, 6, 7) // [r2[2], r2[3], r3[2], r3[3]]
-
-						// Step 2: Final shuffle to get transposed vectors
-						dst_c0 := simd.shuffle(tmp0, tmp2, 0, 2, 4, 6) // All channel 0s
-						dst_c1 := simd.shuffle(tmp0, tmp2, 1, 3, 5, 7) // All channel 1s
-						dst_c2 := simd.shuffle(tmp1, tmp3, 0, 2, 4, 6) // All channel 2s
-						dst_c3 := simd.shuffle(tmp1, tmp3, 1, 3, 5, 7) // All channel 3s
-
-						(^#simd[4]f32)(&dst_batch[c * hw + hw_idx])^ = dst_c0
-						(^#simd[4]f32)(&dst_batch[(c + 1) * hw + hw_idx])^ = dst_c1
-						(^#simd[4]f32)(&dst_batch[(c + 2) * hw + hw_idx])^ = dst_c2
-						(^#simd[4]f32)(&dst_batch[(c + 3) * hw + hw_idx])^ = dst_c3
-					}
-
-					// Handle remainder channels
-					for ; c < channels; c += 1 {
-						vals := #simd[4]f32 {
-							src_batch[src_base + c],
-							src_batch[src_base + channels + c],
-							src_batch[src_base + 2 * channels + c],
-							src_batch[src_base + 3 * channels + c],
-						}
-						(^#simd[4]f32)(&dst_batch[c * hw + hw_idx])^ = vals
-					}
-				}
-
-				// Handle remainder spatial positions
-				for ; hw_idx < hw; hw_idx += 1 {
-					src_offset := hw_idx * channels
-
-					c := uint(0)
-					for ; c + 4 <= channels; c += 4 {
-						vals := #simd[4]f32 {
-							src_batch[src_offset + c],
-							src_batch[src_offset + c + 1],
-							src_batch[src_offset + c + 2],
-							src_batch[src_offset + c + 3],
-						}
-
-						// Destinations are NOT consecutive (strided by hw),
-						// so we're stuck with scalar stores  ¯\_(ツ)_/¯
-						dst_batch[c * hw + hw_idx] = simd.extract(vals, 0)
-						dst_batch[(c + 1) * hw + hw_idx] = simd.extract(vals, 1)
-						dst_batch[(c + 2) * hw + hw_idx] = simd.extract(vals, 2)
-						dst_batch[(c + 3) * hw + hw_idx] = simd.extract(vals, 3)
-					}
-
-					for ; c < channels; c += 1 {
-						dst_batch[c * hw + hw_idx] = src_batch[src_offset + c]
-					}
-				}
-			}
-		} else {
-			// Non-SIMD, tiled
-			for b in 0 ..< batch {
-				for c_tile := uint(0); c_tile < channels; c_tile += TILE_SIZE {
-					c_end := min(c_tile + TILE_SIZE, channels)
-
-					for h in 0 ..< height {
-						for w in 0 ..< width {
-							src_base := b * height * width * channels + (h * width + w) * channels
-							dst_base := b * channels * height * width + h * width + w
-
-							if c_end - c_tile == TILE_SIZE {
-								#unroll for i in 0 ..< TILE_SIZE {
-									dst[dst_base + (c_tile + uint(i)) * height * width] =
-										src[src_base + c_tile + uint(i)]
-								}
-							} else {
-								for c := c_tile; c < c_end; c += 1 {
-									dst[dst_base + c * height * width] = src[src_base + c]
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	return result
-}
-
 conv2d_single :: proc(
 	input: ^Tensor($T), // (B, C_in, H, W)
 	kernel: ^Tensor(T), // (C_out, C_in, K_h, K_w)
@@ -1402,6 +1279,8 @@ conv2d_xwb :: proc(
 		spatial_size := out.shape[2] * out.shape[3]
 
 		#no_bounds_check when T == f32 {
+			spatial_aligned := spatial_size % 4 == 0
+
 			for b in 0 ..< batch_size {
 				for c in 0 ..< out_channels {
 					base_idx := (b * out_channels + c) * spatial_size
@@ -1414,27 +1293,35 @@ conv2d_xwb :: proc(
 							&bias_val,
 						)
 					} else {
-						bias_vec := #simd[4]f32{bias_val, bias_val, bias_val, bias_val}
-						i := uint(0)
-						for ; i + 8 <= spatial_size; i += 8 {
-							vals0 := (^#simd[4]f32)(&out.data[base_idx + i])^
-							vals1 := (^#simd[4]f32)(&out.data[base_idx + i + 4])^
+						if spatial_aligned {
+							// Fast path: can use SIMD stores
+							bias_vec := #simd[4]f32{bias_val, bias_val, bias_val, bias_val}
+							i := uint(0)
+							for ; i + 8 <= spatial_size; i += 8 {
+								vals0 := (^#simd[4]f32)(&out.data[base_idx + i])^
+								vals1 := (^#simd[4]f32)(&out.data[base_idx + i + 4])^
 
-							vals0 += bias_vec
-							vals1 += bias_vec
+								vals0 += bias_vec
+								vals1 += bias_vec
 
-							(^#simd[4]f32)(&out.data[base_idx + i])^ = vals0
-							(^#simd[4]f32)(&out.data[base_idx + i + 4])^ = vals1
-						}
+								(^#simd[4]f32)(&out.data[base_idx + i])^ = vals0
+								(^#simd[4]f32)(&out.data[base_idx + i + 4])^ = vals1
+							}
 
-						for ; i + 4 <= spatial_size; i += 4 {
-							vals := (^#simd[4]f32)(&out.data[base_idx + i])^
-							vals += bias_vec
-							(^#simd[4]f32)(&out.data[base_idx + i])^ = vals
-						}
+							for ; i + 4 <= spatial_size; i += 4 {
+								vals := (^#simd[4]f32)(&out.data[base_idx + i])^
+								vals += bias_vec
+								(^#simd[4]f32)(&out.data[base_idx + i])^ = vals
+							}
 
-						for ; i < spatial_size; i += 1 {
-							out.data[base_idx + i] += bias_val
+							for ; i < spatial_size; i += 1 {
+								out.data[base_idx + i] += bias_val
+							}
+						} else {
+							// Slow path: scalar only to avoid alignment issues
+							for i in 0 ..< spatial_size {
+								out.data[base_idx + i] += bias_val
+							}
 						}
 					}
 				}
@@ -1453,4 +1340,189 @@ conv2d_xwb :: proc(
 		}
 	}
 	return
+}
+
+@(private = "file")
+transpose_4x4_f32 :: #force_inline proc(
+	row0, row1, row2, row3: #simd[4]f32,
+) -> (
+	dst_c0, dst_c1, dst_c2, dst_c3: #simd[4]f32,
+) {
+	tmp0 := simd.shuffle(row0, row1, 0, 1, 4, 5)
+	tmp1 := simd.shuffle(row0, row1, 2, 3, 6, 7)
+	tmp2 := simd.shuffle(row2, row3, 0, 1, 4, 5)
+	tmp3 := simd.shuffle(row2, row3, 2, 3, 6, 7)
+
+	dst_c0 = simd.shuffle(tmp0, tmp2, 0, 2, 4, 6)
+	dst_c1 = simd.shuffle(tmp0, tmp2, 1, 3, 5, 7)
+	dst_c2 = simd.shuffle(tmp1, tmp3, 0, 2, 4, 6)
+	dst_c3 = simd.shuffle(tmp1, tmp3, 1, 3, 5, 7)
+	return
+}
+
+@(private = "file")
+store_4x4_aligned :: #force_inline proc(
+	dst: []$T,
+	c: uint,
+	hw: uint,
+	hw_idx: uint,
+	dst_c0, dst_c1, dst_c2, dst_c3: #simd[4]f32,
+) {
+	(^#simd[4]f32)(&dst[c * hw + hw_idx])^ = dst_c0
+	(^#simd[4]f32)(&dst[(c + 1) * hw + hw_idx])^ = dst_c1
+	(^#simd[4]f32)(&dst[(c + 2) * hw + hw_idx])^ = dst_c2
+	(^#simd[4]f32)(&dst[(c + 3) * hw + hw_idx])^ = dst_c3
+}
+
+@(private = "file")
+store_4x4_scalar :: #force_inline proc(
+	dst: []$T,
+	c: uint,
+	hw: uint,
+	hw_idx: uint,
+	dst_c0, dst_c1, dst_c2, dst_c3: #simd[4]f32,
+) {
+	#no_bounds_check {
+		dst[c * hw + hw_idx] = simd.extract(dst_c0, 0)
+		dst[c * hw + hw_idx + 1] = simd.extract(dst_c0, 1)
+		dst[c * hw + hw_idx + 2] = simd.extract(dst_c0, 2)
+		dst[c * hw + hw_idx + 3] = simd.extract(dst_c0, 3)
+
+		dst[(c + 1) * hw + hw_idx] = simd.extract(dst_c1, 0)
+		dst[(c + 1) * hw + hw_idx + 1] = simd.extract(dst_c1, 1)
+		dst[(c + 1) * hw + hw_idx + 2] = simd.extract(dst_c1, 2)
+		dst[(c + 1) * hw + hw_idx + 3] = simd.extract(dst_c1, 3)
+
+		dst[(c + 2) * hw + hw_idx] = simd.extract(dst_c2, 0)
+		dst[(c + 2) * hw + hw_idx + 1] = simd.extract(dst_c2, 1)
+		dst[(c + 2) * hw + hw_idx + 2] = simd.extract(dst_c2, 2)
+		dst[(c + 2) * hw + hw_idx + 3] = simd.extract(dst_c2, 3)
+
+		dst[(c + 3) * hw + hw_idx] = simd.extract(dst_c3, 0)
+		dst[(c + 3) * hw + hw_idx + 1] = simd.extract(dst_c3, 1)
+		dst[(c + 3) * hw + hw_idx + 2] = simd.extract(dst_c3, 2)
+		dst[(c + 3) * hw + hw_idx + 3] = simd.extract(dst_c3, 3)
+	}
+}
+
+// Specialized for conv2d: (B*H*W, C) -> (B, C, H, W)
+@(private = "file")
+reshape_bhwc_to_bchw :: proc(
+	tensor: ^Tensor($T),
+	batch, height, width, channels: uint,
+	allocator := context.allocator,
+) -> ^Tensor(T) {
+	result := tensor_alloc(T, []uint{batch, channels, height, width}, true, allocator)
+
+	src := tensor.data
+	dst := result.data
+	hw := height * width
+
+	#no_bounds_check {
+		when T == f32 {
+			hw_aligned := hw % 4 == 0
+
+			for b in 0 ..< batch {
+				src_batch := src[b * hw * channels:]
+				dst_batch := dst[b * channels * hw:]
+
+				// Process 4 spatial positions at once
+				hw_idx := uint(0)
+				for ; hw_idx + 4 <= hw; hw_idx += 4 {
+					src_base := hw_idx * channels
+
+					// Process 4 channels at a time
+					c := uint(0)
+					for ; c + 4 <= channels; c += 4 {
+						// Load 4x4 block
+						row0 := (^#simd[4]f32)(&src_batch[src_base + c])^
+						row1 := (^#simd[4]f32)(&src_batch[src_base + channels + c])^
+						row2 := (^#simd[4]f32)(&src_batch[src_base + 2 * channels + c])^
+						row3 := (^#simd[4]f32)(&src_batch[src_base + 3 * channels + c])^
+
+						// Transpose
+						dst_c0, dst_c1, dst_c2, dst_c3 := transpose_4x4_f32(row0, row1, row2, row3)
+
+						// Store based on alignment
+						if hw_aligned {
+							store_4x4_aligned(
+								dst_batch,
+								c,
+								hw,
+								hw_idx,
+								dst_c0,
+								dst_c1,
+								dst_c2,
+								dst_c3,
+							)
+						} else {
+							store_4x4_scalar(
+								dst_batch,
+								c,
+								hw,
+								hw_idx,
+								dst_c0,
+								dst_c1,
+								dst_c2,
+								dst_c3,
+							)
+						}
+					}
+
+					// Handle remainder channels
+					for ; c < channels; c += 1 {
+						if hw_aligned {
+							vals := #simd[4]f32 {
+								src_batch[src_base + c],
+								src_batch[src_base + channels + c],
+								src_batch[src_base + 2 * channels + c],
+								src_batch[src_base + 3 * channels + c],
+							}
+							(^#simd[4]f32)(&dst_batch[c * hw + hw_idx])^ = vals
+						} else {
+							dst_batch[c * hw + hw_idx] = src_batch[src_base + c]
+							dst_batch[c * hw + hw_idx + 1] = src_batch[src_base + channels + c]
+							dst_batch[c * hw + hw_idx + 2] = src_batch[src_base + 2 * channels + c]
+							dst_batch[c * hw + hw_idx + 3] = src_batch[src_base + 3 * channels + c]
+						}
+					}
+				}
+
+				// Handle remainder spatial positions
+				for ; hw_idx < hw; hw_idx += 1 {
+					src_offset := hw_idx * channels
+					for c := uint(0); c < channels; c += 1 {
+						dst_batch[c * hw + hw_idx] = src_batch[src_offset + c]
+					}
+				}
+			}
+		} else {
+			// Non-SIMD, tiled
+			for b in 0 ..< batch {
+				for c_tile := uint(0); c_tile < channels; c_tile += TILE_SIZE {
+					c_end := min(c_tile + TILE_SIZE, channels)
+
+					for h in 0 ..< height {
+						for w in 0 ..< width {
+							src_base := b * height * width * channels + (h * width + w) * channels
+							dst_base := b * channels * height * width + h * width + w
+
+							if c_end - c_tile == TILE_SIZE {
+								#unroll for i in 0 ..< TILE_SIZE {
+									dst[dst_base + (c_tile + uint(i)) * height * width] =
+										src[src_base + c_tile + uint(i)]
+								}
+							} else {
+								for c := c_tile; c < c_end; c += 1 {
+									dst[dst_base + c * height * width] = src[src_base + c]
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return result
 }
