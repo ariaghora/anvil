@@ -24,6 +24,7 @@ NPY_Reader_Read_Byte_Error :: struct { file_name: string, reader: bufio.Reader, 
 NPY_Invalid_Header_Error   :: struct { message: string, }
 NPY_Invalid_Version_Error  :: struct { message: string, version: [2]u8, }
 NPY_Invalid_Header_Length  :: struct { length: [2]u8 }
+// NOTE(Rey) : maybe `NPY_Not_Implemented` should be an enum instead of struct
 NPY_Not_Implemented        :: struct { message: string }
 NPY_Invalid_Descriptor     :: struct { }
 NPY_Malformed_Header       :: struct { }
@@ -31,7 +32,7 @@ NPY_Shape_Parse_Failed     :: struct { }
 NPY_Read_Array_Error       :: struct { message: string }
 
 IO_Error :: union {
-	mem.Allocator_Error,
+	mem.Allocator_Error, // same as runtime.Allocator_Error, for `string.clone` return
 
 	CSV_Read_Error,
 	CSV_Format_Conversion_Error,

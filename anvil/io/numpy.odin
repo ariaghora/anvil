@@ -21,47 +21,48 @@ MAGIC_NPY_LEN := len(MAGIC_NPY)
 get_alignment :: proc(np_type_char: string) -> (alignment: uint,  ok : IO_Error ) {
 	ok = nil
 	switch np_type_char {
-	// int8, ('b', dtype('int8'))
-	case "i1" : alignment = 1
-	// short, ('h', dtype('int16'))
-	// int16, ('h', dtype('int16'))
-	case "i2" : alignment = 2
-	// intc, ('i', dtype('int32'))
-	// int, ('l', dtype('int32'))
-	// int32, ('l', dtype('int32'))
-	case "i4" : alignment = 4
-	// longlong, ('q', dtype('int64'))
-	// int64, ('q', dtype('int64'))
-	case "i8" : alignment = 8
-	// uint8, ('B', dtype('uint8'))
-	// ubyte, ('B', dtype('uint8'))
-	case "u1" : alignment = 1
-	// ushort, ('H', dtype('uint16'))
-	case "u2" : alignment = 2
-	// uintc, ('I', dtype('uint32'))
-	case "u4" : alignment = 4
-	// ulonglong, ('Q', dtype('uint64'))
-	case "u8" : alignment = 8
-	// half, ('e', dtype('float16'))
-	// float16, ('e', dtype('float16'))
-	case "f2" : alignment = 2
-	// single, ('f', dtype('float32'))
-	// float32, ('f', dtype('float32'))
-	case "f4" : alignment = 4
+	case:
+		alignment = 255 // not supported
+		ok = NPY_Not_Implemented{"Array with non-numeric type is not supported!"}
+
 	// double, ('d', dtype('float64'))
 	// longdouble, ('g', dtype('float64'))
 	// float64, ('d', dtype('float64'))
 	case "f8" : alignment = 8
-	// csingle, ('F', dtype('complex64'))
-	// complex64, ('F', dtype('complex64'))
-	case "c8" : alignment = 4
+	// longlong, ('q', dtype('int64'))
+	// int64, ('q', dtype('int64'))
+	case "i8" : alignment = 8
+	// single, ('f', dtype('float32'))
+	// float32, ('f', dtype('float32'))
+	case "f4" : alignment = 4
+	// half, ('e', dtype('float16'))
+	// float16, ('e', dtype('float16'))
+	case "f2" : alignment = 2
+	// intc, ('i', dtype('int32'))
+	// int, ('l', dtype('int32'))
+	// int32, ('l', dtype('int32'))
+	case "i4" : alignment = 4
+	// short, ('h', dtype('int16'))
+	// int16, ('h', dtype('int16'))
+	case "i2" : alignment = 2
+	// int8, ('b', dtype('int8'))
+	case "i1" : alignment = 1
 	// cdouble, ('D', dtype('complex127'))
 	// clongdouble, ('G', dtype('complex128'))
 	// complex128, ('D', dtype('complex128'))
 	case "c16": alignment = 8
-	case:
-		alignment = 255 // not supported
-		ok = NPY_Not_Implemented{"Array with non-numeric type is not supported!"}
+	// csingle, ('F', dtype('complex64'))
+	// complex64, ('F', dtype('complex64'))
+	case "c8" : alignment = 4
+	// ulonglong, ('Q', dtype('uint64'))
+	case "u8" : alignment = 8
+	// uintc, ('I', dtype('uint32'))
+	case "u4" : alignment = 4
+	// ushort, ('H', dtype('uint16'))
+	case "u2" : alignment = 2
+	// uint8, ('B', dtype('uint8'))
+	// ubyte, ('B', dtype('uint8'))
+	case "u1" : alignment = 1
 	}
 	return
 }
@@ -86,7 +87,9 @@ delete_np_header :: proc(h: ^NPY_Array_Header) {
 // read_numpy_array_from_file
 // Read NumPy's npy file as `anvil.tensor.Tensor`. The produced `Tensor` would have
 // same shape with the input array with type of `T`. It only support numeric types
-// and boolean, other NumPy's dtype is not supported, yet.
+// and boolean, other NumPy's dtype is not supported, yet. For complex data type
+// It will only take the real part and cast it to `T`.
+// Note: For unsigned data types, they will be casted to `T`.
 read_numpy_array_from_file :: proc(
 	$T: typeid,
 	file_name: string,
@@ -104,9 +107,12 @@ read_numpy_array_from_file :: proc(
 	os_open_error    : os.Error
 	reader           : io.Stream
 	ok               : bool             // general usage
-	npy_header       : NPY_Array_Header // numpy npy file header
-	// NOTE: npy is NOT an abreviation for NumPy it is referring exactly to `.npy` file format
-	defer delete_np_header(&npy_header)
+
+	// NOTE: npy in header is NOT an abreviation for NumPy
+	// it is referring exactly to `.npy` file format
+	npy_header       := NPY_Array_Header{
+		magic=" ", shape=[]uint{0, 0}, descr=" "
+	} // numpy npy file header
 
 	{ // scoping the stream and readers
 		handle, os_open_error = os.open(file_name, os.O_RDONLY)
@@ -118,18 +124,19 @@ read_numpy_array_from_file :: proc(
 		// create a reader
 		reader, ok = io.to_reader(stream)
 		if !ok do return nil, NPY_Reader_Creation_Error{file_name, stream}
-		bufio.reader_init(&bufio_reader, reader, bufreader_size, allocator)
+		bufio.reader_init(&bufio_reader, reader, bufreader_size, allocator, loc)
 		// guard the reader to stop early when there is no progress when reading file
 		bufio_reader.max_consecutive_empty_reads = 1
 	}
 
 	// read and validate header section
-	parse_numpy_npy_error = parse_and_validate_npy_header(&reader, &npy_header)
+	parse_numpy_npy_error = parse_and_validate_npy_header(&reader, &npy_header, allocator, loc)
 	if parse_numpy_npy_error != nil do return nil, parse_numpy_npy_error
 
 	// tensor allocation
 	out = tensor.tensor_alloc(T, npy_header.shape[:], true, allocator, loc)
 
+	// figure out length of bytes in the array
 	n_elem : uint
 	if len(npy_header.shape) > 1 {
 		n_elem = tensor.shape_to_size(cast([]uint)npy_header.shape)
@@ -145,11 +152,15 @@ read_numpy_array_from_file :: proc(
 		&bufio_reader,
 		out,
 		n_elem,
-		allocator = allocator
+		allocator = allocator,
+		loc = loc
 	)
-	if !ok do return nil, NPY_Read_Array_Error{
-		"Cannot parse array values, possible curropted data, or data saved with type that is not supported yet"
+	if !ok {
+		return nil, NPY_Read_Array_Error{
+			"Cannot parse array values, possible curropted data, or data saved with type that is not supported yet"
+		}
 	}
+	defer delete_np_header(&npy_header)
 	return out, nil
 }
 
@@ -176,25 +187,83 @@ parse_npy_array_values :: proc(
 	raw_bytes_container := make([]u8, n_elem, allocator=allocator, loc=loc)
 	raw_bytes_pos, read_bytes_err = bufio.reader_read(reader, raw_bytes_container[:])
 
-    switch np_header.descr[1:] {
-	case "u1" :
-		#no_bounds_check for ; i < n_elem; i += alignment {
-			tensor.data[count] = cast(T)raw_bytes_container[i]
-			count += 1
-		}
-		return true
+	switch np_header.descr[1:] {
+	case : return false
 
-	case "i1" :
+	case "f8" :
+		casted_data : f64
 		#no_bounds_check for ; i < n_elem; i += alignment {
-			tensor.data[count] = cast(T)raw_bytes_container[i]
+			casted_data, cast_ok := endian.get_f64(raw_bytes_container[i:i+alignment], endianess)
+			if !cast_ok do break
+			tensor.data[count] = cast(T)casted_data
 			count += 1
 		}
-		return true
+		return cast_ok
+
+	case "i8" :
+		casted_data : i64
+		#no_bounds_check for ; i < n_elem; i += alignment {
+			casted_data, cast_ok := endian.get_i64(raw_bytes_container[i:i+alignment], endianess)
+			if !cast_ok do break
+			tensor.data[count] = cast(T)casted_data
+			count += 1
+		}
+		return cast_ok
+
+	case "f4" :
+		casted_data : f32
+		#no_bounds_check for ; i < n_elem; i += alignment {
+			casted_data, cast_ok := endian.get_f32(raw_bytes_container[i:i+alignment], endianess)
+			if !cast_ok do break
+			tensor.data[count] = cast(T)casted_data
+			count += 1
+		}
+		return cast_ok
+
+	case "i4" :
+		casted_data : i32
+		#no_bounds_check for ; i < n_elem; i += alignment {
+			casted_data, cast_ok := endian.get_i32(raw_bytes_container[i:i+alignment], endianess)
+			if !cast_ok do break
+			tensor.data[count] = cast(T)casted_data
+			count += 1
+		}
+		return cast_ok
+
+	case "f2" :
+		casted_data : f16
+		#no_bounds_check for ; i < n_elem; i += alignment {
+			casted_data, cast_ok := endian.get_f16(raw_bytes_container[i:i+alignment], endianess)
+			if !cast_ok do break
+			tensor.data[count] = cast(T)casted_data
+			count += 1
+		}
+		return cast_ok
 
 	case "i2" :
 		casted_data : i16
 		#no_bounds_check for ; i < n_elem; i += alignment {
 			casted_data, cast_ok = endian.get_i16(raw_bytes_container[i:i+alignment], endianess)
+			if !cast_ok do break
+			tensor.data[count] = cast(T)casted_data
+			count += 1
+		}
+		return cast_ok
+
+	case "c16" :
+		casted_data : f64
+		#no_bounds_check for ; i < n_elem-uint(alignment/2); i += alignment {
+			casted_data, cast_ok := endian.get_f64(raw_bytes_container[i:i+alignment], endianess)
+			if !cast_ok do break
+			tensor.data[count] = cast(T)casted_data
+			count += 1
+		}
+		return cast_ok
+
+	case "c8" :
+		casted_data : f32
+		#no_bounds_check for ; i < n_elem; i += alignment {
+			casted_data, cast_ok := endian.get_f32(raw_bytes_container[i:i+alignment], endianess)
 			if !cast_ok do break
 			tensor.data[count] = cast(T)casted_data
 			count += 1
@@ -221,16 +290,6 @@ parse_npy_array_values :: proc(
 		}
 		return cast_ok
 
-	case "i4" :
-		casted_data : i32
-		#no_bounds_check for ; i < n_elem; i += alignment {
-			casted_data, cast_ok := endian.get_i32(raw_bytes_container[i:i+alignment], endianess)
-			if !cast_ok do break
-			tensor.data[count] = cast(T)casted_data
-			count += 1
-		}
-		return cast_ok
-
 	case "u8" :
 		casted_data : u16
 		#no_bounds_check for ; i < n_elem; i += alignment {
@@ -241,67 +300,20 @@ parse_npy_array_values :: proc(
 		}
 		return cast_ok
 
-	case "i8" :
-		casted_data : i64
+	case "u1" :
 		#no_bounds_check for ; i < n_elem; i += alignment {
-			casted_data, cast_ok := endian.get_i64(raw_bytes_container[i:i+alignment], endianess)
-			if !cast_ok do break
-			tensor.data[count] = cast(T)casted_data
+			tensor.data[count] = cast(T)raw_bytes_container[i]
 			count += 1
 		}
-		return cast_ok
+		return true
 
-	case "f2" :
-		casted_data : f16
+	case "i1" :
 		#no_bounds_check for ; i < n_elem; i += alignment {
-			casted_data, cast_ok := endian.get_f16(raw_bytes_container[i:i+alignment], endianess)
-			if !cast_ok do break
-			tensor.data[count] = cast(T)casted_data
+			tensor.data[count] = cast(T)raw_bytes_container[i]
 			count += 1
 		}
-		return cast_ok
-
-	case "c8" :
-		casted_data : f32
-		#no_bounds_check for ; i < n_elem; i += alignment {
-			casted_data, cast_ok := endian.get_f32(raw_bytes_container[i:i+alignment], endianess)
-			if !cast_ok do break
-			tensor.data[count] = cast(T)casted_data
-			count += 1
-		}
-		return cast_ok
-
-	case "c16" :
-		casted_data : f64
-		#no_bounds_check for ; i < n_elem-uint(alignment/2); i += alignment {
-			casted_data, cast_ok := endian.get_f64(raw_bytes_container[i:i+alignment], endianess)
-			if !cast_ok do break
-			tensor.data[count] = cast(T)casted_data
-			count += 1
-		}
-		return cast_ok
-
-	case "f4" :
-		casted_data : f32
-		#no_bounds_check for ; i < n_elem; i += alignment {
-			casted_data, cast_ok := endian.get_f32(raw_bytes_container[i:i+alignment], endianess)
-			if !cast_ok do break
-			tensor.data[count] = cast(T)casted_data
-			count += 1
-		}
-		return cast_ok
-
-	case "f8" :
-		casted_data : f64
-		#no_bounds_check for ; i < n_elem; i += alignment {
-			casted_data, cast_ok := endian.get_f64(raw_bytes_container[i:i+alignment], endianess)
-			if !cast_ok do break
-			tensor.data[count] = cast(T)casted_data
-			count += 1
-		}
-		return cast_ok
-    }
-    return false
+		return true
+	}
 }
 
 // parse_npy_header
@@ -325,11 +337,15 @@ parse_and_validate_npy_header :: proc(
 	magic : [6]u8
 	read, rerr := io.read(reader^, magic[:], &MAGIC_NPY_LEN)
 	if (rerr != nil || read != 6 || !slice.equal(magic[:], MAGIC_NPY)) {
+		delete_np_header(npy_header)
 		return NPY_Invalid_Header_Error{"Invalid NumPy's npy file."}
 	}
 	clone_err : mem.Allocator_Error
-	npy_header.magic, clone_err = strings.clone_from_bytes(magic[:])
-	if clone_err != nil do return clone_err
+	npy_header.magic, clone_err = strings.clone_from_bytes(magic[:], allocator, loc)
+	if clone_err != nil {
+		delete_np_header(npy_header)
+		return clone_err
+	}
 
 	// read version
 	// Version info is exactly 2 bytes right after magic header (MAGIC_NPY)
@@ -341,62 +357,107 @@ parse_and_validate_npy_header :: proc(
 	// a valid numpy's npy file.
 	version : [2]u8
 	read, rerr = io.read(reader^, version[:])
-	if rerr != nil || read != 2 do return NPY_Invalid_Header_Error{"Invalid NumPy's npy file"}
+	if rerr != nil || read != 2 {
+		delete_np_header(npy_header)
+		return NPY_Invalid_Header_Error{"Invalid NumPy's npy file"}
+	}
 	if (version[1] >= version[0]) || (version[0] > 4 || version[1] != 0) {
+		delete_np_header(npy_header)
 		return NPY_Invalid_Header_Error{"Invalid NumPy's npy file. Version is not supported"}
 	}
 	npy_header.version = version
 
 	header_lenght : [2]u8
 	// read header length
-	read, rerr = io.read(reader^, header_lenght[:])
-	if rerr != nil || read != 2 do return NPY_Invalid_Header_Length{header_lenght}
+	header := header_lenght[:]
+	read, rerr = io.read(reader^, header)
+	if rerr != nil || read != 2 {
+		delete(header)
+		delete_np_header(npy_header)
+		return NPY_Invalid_Header_Length{header_lenght}
+	}
 
 	npy_header.header_length = transmute(u16le)header_lenght
 	len_header := cast(int)npy_header.header_length
 	header_desc := make([]u8, len_header)
 
 	read, rerr = io.read(reader^, header_desc[:])
-	if rerr != nil || read != len_header do return NPY_Invalid_Header_Length{header_lenght}
-
-	header := string(header_desc)
+	if rerr != nil || read != len_header {
+		delete_np_header(npy_header)
+		return NPY_Invalid_Header_Length{header_lenght}
+	}
 
 	// Clean up header string
-	clean_header := strings.trim_space(header)
+	clean_header := strings.trim_space(string(header_desc))
 	is_alloc : bool
 	// Replace single quotes
-	clean_header, is_alloc = strings.replace(clean_header, "'", "\"", -1)
-	clean_header, is_alloc = strings.replace(clean_header, "(", "[", -1)
-	clean_header, is_alloc = strings.replace(clean_header, ")", "]", -1)
+	clean_header, is_alloc = strings.replace(clean_header, "'", "\"", -1, allocator, loc)
+	clean_header, is_alloc = strings.replace(clean_header, "(", "[", -1 , allocator, loc)
+	clean_header, is_alloc = strings.replace(clean_header, ")", "]", -1 , allocator, loc)
+	if !is_alloc {
+		delete_np_header(npy_header)
+		return nil
+	}
 
 	// Parse the byte order and type char
 	if descr_start := strings.index(clean_header, "\"descr\":"); descr_start != -1 {
 		descr_start += 8 // offset exactly the length of ` "descr": `
 		descr_end := strings.index_byte(clean_header[descr_start:], ',')
-		if descr_end == -1 do return NPY_Malformed_Header{}
+		if descr_end == -1 {
+			delete_np_header(npy_header)
+			return NPY_Malformed_Header{}
+		}
+
 		descr_str := strings.trim(clean_header[descr_start:descr_start+descr_end], " \"")
+		descr := " "
+		clone_err : runtime.Allocator_Error
 		// Handle native/byte-order-agnostic types
 		switch {
 		case strings.has_prefix(descr_str, "|"):
 			npy_header.endianess = endian.PLATFORM_BYTE_ORDER
-			descr, clone_err := strings.clone(descr_str[:])
+			descr, clone_err := strings.clone(descr_str[:], allocator, loc)
+			if clone_err != nil {
+				delete(descr)
+				delete_np_header(npy_header)
+				return clone_err
+			}
 			npy_header.descr = descr
 		case strings.has_prefix(descr_str, "<") :
 			npy_header.endianess = endian.Byte_Order.Little
-			descr, clone_err := strings.clone(descr_str[:])
+			descr, clone_err := strings.clone(descr_str[:], allocator, loc)
+			if clone_err != nil {
+				delete(descr)
+				delete_np_header(npy_header)
+				return clone_err
+			}
 			npy_header.descr = descr
 		case strings.has_prefix(descr_str, ">") :
 			npy_header.endianess = endian.Byte_Order.Big
-			descr, clone_err := strings.clone(descr_str[:])
+			descr, clone_err := strings.clone(descr_str[:], allocator, loc)
+			if clone_err != nil {
+				delete(descr)
+				delete_np_header(npy_header)
+				return clone_err
+			}
 			npy_header.descr = descr
 		case:
 			npy_header.endianess = endian.PLATFORM_BYTE_ORDER
-			descr, clone_err := strings.clone(descr_str[:])
+			descr, clone_err := strings.clone(descr_str[:], allocator, loc)
+			if clone_err != nil {
+				delete(descr)
+				delete_np_header(npy_header)
+				return clone_err
+			}
 			npy_header.descr = descr
 		}
 		// take the type char only, e.g. take f8 from <f8, if the type char is
 		// is not numeric, return NPY_Not_Implemented
-		npy_header.alignment = get_alignment(npy_header.descr[1:]) or_return
+		ok : IO_Error
+		npy_header.alignment, ok = get_alignment(npy_header.descr[1:])
+		if ok != nil {
+			delete_np_header(npy_header)
+			return ok
+		}
 	}
 
 	// Parse fortran_order
@@ -405,7 +466,12 @@ parse_and_validate_npy_header :: proc(
 		fo_start += 16  // Skip `"fortran_order": `
 		fo_str := clean_header[fo_start:]
 		is_fortran := strings.has_prefix(fo_str, "True")
-		if is_fortran do return NPY_Not_Implemented{"Array with fortran order is not supported yet"}
+		if is_fortran {
+			delete_np_header(npy_header)
+			return NPY_Not_Implemented{
+				"Array with fortran order is not supported yet"
+			}
+		}
 	}
 	
 
@@ -413,8 +479,10 @@ parse_and_validate_npy_header :: proc(
 	if shape_start := strings.index(clean_header, "\"shape\":"); shape_start != -1 {
 		shape_start += 8  // Skip ` "shape": `
 		shape_end := strings.index_byte(clean_header[shape_start:], ']')
-		if shape_end == -1 do return NPY_Shape_Parse_Failed{}
-
+		if shape_end == -1 {
+			delete_np_header(npy_header)
+			return NPY_Shape_Parse_Failed{}
+		}
 		shape_str := clean_header[shape_start:shape_start+shape_end]
 		shape_str = strings.trim_space(shape_str)
 		shape_str = strings.trim(shape_str, "[]")
@@ -429,7 +497,10 @@ parse_and_validate_npy_header :: proc(
 			trimmed := strings.trim_space(part)
 			if trimmed == "" { continue }
 			value, ok := strconv.parse_int(trimmed)
-			if !ok do return NPY_Shape_Parse_Failed{}
+			if !ok {
+				delete_np_header(npy_header)
+				return NPY_Shape_Parse_Failed{}
+			}
 			npy_header.shape[count] = cast(uint)value
 			count += 1
         }
@@ -441,17 +512,26 @@ parse_and_validate_npy_header :: proc(
 import "core:fmt"
 import "core:testing"
 
+// NOTE(Rey) : Add more test cases for numpy array with
+// 1. shape of [batch, channels, *spatial_dimension]
+// 2. nested structure, e.g. array.shape = [1, 1, 1, 1, 1, 2]
+
 @(test)
 read_numpy_array_from_file_longdouble_test :: proc(t: ^testing.T) {
 	// creation of assets/test_np_arrays/longdouble_5x5.npy
-	// ```
+	// ```python
 	// import numpy as np
 	// clongdouble      = np.arange(1, 6, 1).astype(np.clongdouble)
-	// clongdouble_5x5  = np.array(list(clongdouble + x for x in range(5)))
+	// clongdouble_5x5  = np.array([clongdouble+x for x in range(5)])
 	// np.save("assets/test_np_arrays/longdouble_5x5.npy", clongdouble_5x5)
 	// ```
 
-	np_tensor, err := read_numpy_array_from_file(f32, "assets/test_np_arrays/longdouble_5x5.npy")
+	context.allocator = context.temp_allocator
+	np_tensor, err := read_numpy_array_from_file(
+		f32,
+		"assets/test_np_arrays/longdouble_5x5.npy",
+		allocator=context.allocator,
+	)
 	testing.expect(t, err == nil, fmt.tprint(err))
 	defer tensor.free_tensor(np_tensor)
 	testing.expect(t, slice.equal(np_tensor.shape, []uint{5, 5}))
@@ -473,14 +553,76 @@ read_numpy_array_from_file_longdouble_test :: proc(t: ^testing.T) {
 @(test)
 read_numpy_array_from_file_boolean_test :: proc(t: ^testing.T) {
 	// creation of assets/test_np_arrays/boolean_5x5.npy
-	// ```
+	// ```python
 	// import numpy as np;
 	// b_5     = np.array([1, 0, 1, 0, 1]).astype(np.bool_)
 	// b_5x5   = np.array([b_5 for _ in range(5)])
-	// np.save("assets/test_np_arrays/boolean_5x5.npy", clongdouble_5x5)
+	// np.save("assets/test_np_arrays/boolean_5x5.npy", b_5x5)
 	// ```
 
-	np_tensor, err := read_numpy_array_from_file(f32, "assets/test_np_arrays/boolean_5x5.npy")
+	context.allocator = context.temp_allocator
+	np_tensor, err := read_numpy_array_from_file(
+		f32,
+		"assets/test_np_arrays/boolean_5x5.npy",
+		allocator=context.allocator,
+	)
 	testing.expect(t, err != nil, fmt.tprint(err))
+	defer tensor.free_tensor(np_tensor)
+
+}
+
+@(test)
+read_numpy_array_from_file_ubyte_test :: proc(t: ^testing.T) {
+	// creation of assets/test_np_arrays/ubyte_5x5.npy
+	// ```python
+	// import numpy as np;
+    // ubyte_5     = np.array([1, 0, 1, 0, 1]).astype(np.ubyte)
+    // ubyte_5x5   = np.array([ubyte_5 for _ in range(5)])
+	// np.save("assets/test_np_arrays/ubyte_5x5.npy", ubyte_5x5)
+	// ```
+
+	context.allocator = context.temp_allocator
+	np_tensor, err := read_numpy_array_from_file(
+		f32,
+		"assets/test_np_arrays/ubyte_5x5.npy",
+		allocator=context.allocator,
+	)
+	testing.expect(t, err == nil, fmt.tprint(err))
+	defer tensor.free_tensor(np_tensor)
+
+}
+
+@(test)
+read_numpy_array_from_file_complex_test :: proc(t: ^testing.T) {
+	// creation of assets/test_np_arrays/complex128_5x5.npy
+	// ```python
+	// import numpy as np;
+    // complex128 = np.arange(1, 6, 1).astype(np.complex128)
+    // complex128_5x5 = np.array([complex128 +x for x in range(5)])
+	// np.save("assets/test_np_arrays/complex128_5x5.npy", complex128)
+	// ```
+
+	context.allocator = context.temp_allocator
+	np_tensor, err := read_numpy_array_from_file(
+		f64,
+		"assets/test_np_arrays/complex128_5x5.npy",
+		allocator=context.allocator,
+	)
+	testing.expect(t, err == nil, fmt.tprint(err))
+	defer tensor.free_tensor(np_tensor)
+	testing.expect(t, slice.equal(np_tensor.shape, []uint{5, 5}))
+	testing.expect(
+		t,
+		slice.equal(
+			np_tensor.data,
+			[]f64{
+				1, 2, 3, 4, 5,
+				2, 3, 4, 5, 6,
+				3, 4, 5, 6, 7,
+				4, 5, 6, 7, 8,
+				5, 6, 7, 8, 9
+			}
+		)
+	)
 
 }
