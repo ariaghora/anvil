@@ -65,7 +65,7 @@ get_alignment :: proc(np_type_char: string) -> uint {
 	return alignment
 }
 
-ArrayTypes :: union {
+Array_Type :: union {
 	b8,
 	u8,
 	i8,
@@ -84,7 +84,7 @@ ArrayTypes :: union {
 	complex64,
 }
 
-NumpyArrayHeader :: struct #packed {
+NPY_Array_Header :: struct #packed {
 	magic         : string,
 	version       : [2]u8, // [major, minor]
 	header_length : u16le,
@@ -95,7 +95,7 @@ NumpyArrayHeader :: struct #packed {
 	alignment     : uint
 }
 
-delete_np_header :: proc(h: ^NumpyArrayHeader) {
+delete_np_header :: proc(h: ^NPY_Array_Header) {
 	delete(h.magic)
 	delete(h.shape)
 	delete(h.descr)
@@ -112,7 +112,7 @@ read_numpy_array_from_file :: proc(
 	allocator:= context.allocator,
 	loc := #caller_location,
 ) -> (
-	NumpyArrayHeader,
+	NPY_Array_Header,
 	^tensor.Tensor(T),
 	IO_Error,
 ) where intrinsics.type_is_numeric(T) || T == b8 {
@@ -120,6 +120,7 @@ read_numpy_array_from_file :: proc(
 	npy_header: NumpyArrayHeader
 	handle, open_error := os.open(file_name, os.O_RDONLY)
 	if open_error != os.ERROR_NONE do return npy_header, nil, NPY_Open_Error{file_name, open_error}
+	npy_header   : NPY_Array_Header
 
 	// create a stream
 	stream := os.stream_from_handle(handle)
@@ -194,7 +195,7 @@ read_numpy_array_from_file :: proc(
 @(private = "file")
 recreate_npy_array :: proc(
 	$T: typeid,
-	np_header: ^NumpyArrayHeader,
+	np_header: ^NPY_Array_Header,
 	reader: ^bufio.Reader,
 	tensor : ^tensor.Tensor(T),
 	n_elem : uint,
@@ -367,7 +368,7 @@ recreate_npy_array :: proc(
 // parse_npy_header
 @(private = "file")
 parse_npy_header :: proc(
-	h: ^NumpyArrayHeader,
+	h: ^NPY_Array_Header,
 	header: string,
 	allocator := context.allocator
 ) -> (err: NPY_Parse_Error) {
