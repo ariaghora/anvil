@@ -18,75 +18,57 @@ NPY_BUFFER_READER_SIZE :: 1024
 MAGIC_NPY_LEN := len(MAGIC_NPY)
 
 @(private = "file")
-get_alignment :: proc(np_type_char: string) -> uint {
-	alignment : uint
+get_alignment :: proc(np_type_char: string) -> (alignment: uint,  ok : IO_Error ) {
+	ok = nil
 	switch np_type_char {
-		// bool, ('?', dtype('bool'))
-		// byte, ('b', dtype('int8'))
-		// int8, ('b', dtype('int8'))
-		case "i1" : alignment = 1
-		// short, ('h', dtype('int16'))
-		// int16, ('h', dtype('int16'))
-		case "i2" : alignment = 2
-		// intc, ('i', dtype('int32'))
-		// int, ('l', dtype('int32'))
-		// int32, ('l', dtype('int32'))
-		case "i4" : alignment = 4
-		// longlong, ('q', dtype('int64'))
-		// int64, ('q', dtype('int64'))
-		case "i8" : alignment = 8
-		// uint8, ('B', dtype('uint8'))
-		// ubyte, ('B', dtype('uint8'))
-		case "u1" : alignment = 1
-		// ushort, ('H', dtype('uint16'))
-		case "u2" : alignment = 2
-		// uintc, ('I', dtype('uint32'))
-		case "u4" : alignment = 4
-		// ulonglong, ('Q', dtype('uint64'))
-		case "u8" : alignment = 8
-		// half, ('e', dtype('float16'))
-		// float16, ('e', dtype('float16'))
-		case "f2" : alignment = 2
-		// single, ('f', dtype('float32'))
-		// float32, ('f', dtype('float32'))
-		case "f4" : alignment = 4
-		// double, ('d', dtype('float64'))
-		// longdouble, ('g', dtype('float64'))
-		// float64, ('d', dtype('float64'))
-		case "f8" : alignment = 8
-		// csingle, ('F', dtype('complex64'))
-		// complex64, ('F', dtype('complex64'))
-		case "c8" : alignment = 4
-		// cdouble, ('D', dtype('complex127'))
-		// clongdouble, ('G', dtype('complex128'))
-		// complex128, ('D', dtype('complex128'))
-		case "c16": alignment = 8
+	// int8, ('b', dtype('int8'))
+	case "i1" : alignment = 1
+	// short, ('h', dtype('int16'))
+	// int16, ('h', dtype('int16'))
+	case "i2" : alignment = 2
+	// intc, ('i', dtype('int32'))
+	// int, ('l', dtype('int32'))
+	// int32, ('l', dtype('int32'))
+	case "i4" : alignment = 4
+	// longlong, ('q', dtype('int64'))
+	// int64, ('q', dtype('int64'))
+	case "i8" : alignment = 8
+	// uint8, ('B', dtype('uint8'))
+	// ubyte, ('B', dtype('uint8'))
+	case "u1" : alignment = 1
+	// ushort, ('H', dtype('uint16'))
+	case "u2" : alignment = 2
+	// uintc, ('I', dtype('uint32'))
+	case "u4" : alignment = 4
+	// ulonglong, ('Q', dtype('uint64'))
+	case "u8" : alignment = 8
+	// half, ('e', dtype('float16'))
+	// float16, ('e', dtype('float16'))
+	case "f2" : alignment = 2
+	// single, ('f', dtype('float32'))
+	// float32, ('f', dtype('float32'))
+	case "f4" : alignment = 4
+	// double, ('d', dtype('float64'))
+	// longdouble, ('g', dtype('float64'))
+	// float64, ('d', dtype('float64'))
+	case "f8" : alignment = 8
+	// csingle, ('F', dtype('complex64'))
+	// complex64, ('F', dtype('complex64'))
+	case "c8" : alignment = 4
+	// cdouble, ('D', dtype('complex127'))
+	// clongdouble, ('G', dtype('complex128'))
+	// complex128, ('D', dtype('complex128'))
+	case "c16": alignment = 8
+	case:
+		alignment = 255 // not supported
+		ok = NPY_Not_Implemented{"Array with non-numeric type is not supported!"}
 	}
-	return alignment
-}
-
-Array_Type :: union {
-	b8,
-	u8,
-	i8,
-	i16,
-	u16,
-	i32,
-	u32,
-	i64,
-	u64,
-	f16,
-	f32,
-	f64,
-	f16be,
-	f16le,
-	complex32,
-	complex64,
+	return
 }
 
 NPY_Array_Header :: struct #packed {
 	magic         : string,
-	version       : [2]u8, // [major, minor]
+	version       : [2]u8,  // [major, minor]
 	header_length : u16le,
 	descr         : string, // 'endian'+type-char, e.g. "<f8"
 	fortran_order : bool,
@@ -114,7 +96,7 @@ read_numpy_array_from_file :: proc(
 ) -> (
 	out : ^tensor.Tensor(T),
 	parse_numpy_npy_error : IO_Error,
-) where intrinsics.type_is_numeric(T) || T == b8 {
+) where intrinsics.type_is_numeric(T) {
 
 	// define bufio, os, and io objects
 	bufio_reader     : bufio.Reader
@@ -156,7 +138,8 @@ read_numpy_array_from_file :: proc(
 	}
 	n_elem *= npy_header.alignment
 
-	ok = recreate_npy_array(
+	// start numpy array parsing
+	ok = parse_npy_array_values(
 		T,
 		&npy_header,
 		&bufio_reader,
@@ -171,17 +154,15 @@ read_numpy_array_from_file :: proc(
 }
 
 @(private = "file")
-recreate_npy_array :: proc(
-	$T: typeid,
-	np_header: ^NPY_Array_Header,
-	reader: ^bufio.Reader,
-	tensor : ^tensor.Tensor(T),
-	n_elem : uint,
+parse_npy_array_values :: proc(
+	$T        : typeid,
+	np_header : ^NPY_Array_Header,
+	reader    : ^bufio.Reader,
+	tensor    : ^tensor.Tensor(T),
+	n_elem    : uint,
 	allocator := context.allocator,
-	loc := #caller_location,
-) -> (
-	bool
-) where intrinsics.type_is_numeric(T) || T == b8 {
+	loc       := #caller_location,
+) -> ( bool ) where intrinsics.type_is_numeric(T) {
 
 	count     := uint(0)
 	i         := uint(0)
@@ -190,18 +171,12 @@ recreate_npy_array :: proc(
 
 	read_bytes_err : io.Error
 	raw_bytes_pos  : int
+	cast_ok : bool = true
 
 	raw_bytes_container := make([]u8, n_elem, allocator=allocator, loc=loc)
 	raw_bytes_pos, read_bytes_err = bufio.reader_read(reader, raw_bytes_container[:])
 
     switch np_header.descr[1:] {
-	case "b1" :
-		#no_bounds_check for ; i < n_elem; i += alignment {
-			tensor.data[count] = cast(T)raw_bytes_container[i]
-			count += 1
-		}
-		return true
-
 	case "u1" :
 		#no_bounds_check for ; i < n_elem; i += alignment {
 			tensor.data[count] = cast(T)raw_bytes_container[i]
@@ -218,7 +193,6 @@ recreate_npy_array :: proc(
 
 	case "i2" :
 		casted_data : i16
-		cast_ok : bool = true
 		#no_bounds_check for ; i < n_elem; i += alignment {
 			casted_data, cast_ok = endian.get_i16(raw_bytes_container[i:i+alignment], endianess)
 			if !cast_ok do break
@@ -229,7 +203,6 @@ recreate_npy_array :: proc(
 
 	case "u2" :
 		casted_data : u16
-		cast_ok : bool = true
 		#no_bounds_check for ; i < n_elem; i += alignment {
 			casted_data, cast_ok = endian.get_u16(raw_bytes_container[i:i+alignment], endianess)
 			if !cast_ok do break
@@ -240,7 +213,6 @@ recreate_npy_array :: proc(
 
 	case "u4" :
 		casted_data : u32
-		cast_ok : bool = true
 		#no_bounds_check for ; i < n_elem; i += alignment {
 			casted_data, cast_ok = endian.get_u32(raw_bytes_container[i:i+alignment], endianess)
 			if !cast_ok do break
@@ -251,7 +223,6 @@ recreate_npy_array :: proc(
 
 	case "i4" :
 		casted_data : i32
-		cast_ok : bool = true
 		#no_bounds_check for ; i < n_elem; i += alignment {
 			casted_data, cast_ok := endian.get_i32(raw_bytes_container[i:i+alignment], endianess)
 			if !cast_ok do break
@@ -262,7 +233,6 @@ recreate_npy_array :: proc(
 
 	case "u8" :
 		casted_data : u16
-		cast_ok : bool = true
 		#no_bounds_check for ; i < n_elem; i += alignment {
 			casted_data, cast_ok = endian.get_u16(raw_bytes_container[i:i+alignment], endianess)
 			if !cast_ok do break
@@ -273,7 +243,6 @@ recreate_npy_array :: proc(
 
 	case "i8" :
 		casted_data : i64
-		cast_ok : bool = true
 		#no_bounds_check for ; i < n_elem; i += alignment {
 			casted_data, cast_ok := endian.get_i64(raw_bytes_container[i:i+alignment], endianess)
 			if !cast_ok do break
@@ -284,7 +253,6 @@ recreate_npy_array :: proc(
 
 	case "f2" :
 		casted_data : f16
-		cast_ok : bool = true
 		#no_bounds_check for ; i < n_elem; i += alignment {
 			casted_data, cast_ok := endian.get_f16(raw_bytes_container[i:i+alignment], endianess)
 			if !cast_ok do break
@@ -295,7 +263,6 @@ recreate_npy_array :: proc(
 
 	case "c8" :
 		casted_data : f32
-		cast_ok : bool = true
 		#no_bounds_check for ; i < n_elem; i += alignment {
 			casted_data, cast_ok := endian.get_f32(raw_bytes_container[i:i+alignment], endianess)
 			if !cast_ok do break
@@ -306,7 +273,6 @@ recreate_npy_array :: proc(
 
 	case "c16" :
 		casted_data : f64
-		cast_ok : bool = true
 		#no_bounds_check for ; i < n_elem-uint(alignment/2); i += alignment {
 			casted_data, cast_ok := endian.get_f64(raw_bytes_container[i:i+alignment], endianess)
 			if !cast_ok do break
@@ -317,7 +283,6 @@ recreate_npy_array :: proc(
 
 	case "f4" :
 		casted_data : f32
-		cast_ok : bool = true
 		#no_bounds_check for ; i < n_elem; i += alignment {
 			casted_data, cast_ok := endian.get_f32(raw_bytes_container[i:i+alignment], endianess)
 			if !cast_ok do break
@@ -328,7 +293,6 @@ recreate_npy_array :: proc(
 
 	case "f8" :
 		casted_data : f64
-		cast_ok : bool = true
 		#no_bounds_check for ; i < n_elem; i += alignment {
 			casted_data, cast_ok := endian.get_f64(raw_bytes_container[i:i+alignment], endianess)
 			if !cast_ok do break
@@ -354,6 +318,8 @@ parse_and_validate_npy_header :: proc(
 	//                         will be taken from
 	//                         https://numpy.org/neps/nep-0001-npy-format.html
 
+	// read magic header (6 first bytes)
+	// these bytes indicating whether the file is produced by NumPy or not.
 	// read the first six bytes of the header, it should be equal to `MAGIC_NPY`
 	// otherwise the file is not valid numpy's npy file.
 	magic : [6]u8
@@ -416,22 +382,21 @@ parse_and_validate_npy_header :: proc(
 			descr, clone_err := strings.clone(descr_str[:])
 			npy_header.descr = descr
 		case strings.has_prefix(descr_str, "<") :
-			// Existing endian-sensitive types
 			npy_header.endianess = endian.Byte_Order.Little
 			descr, clone_err := strings.clone(descr_str[:])
 			npy_header.descr = descr
 		case strings.has_prefix(descr_str, ">") :
-			// Existing endian-sensitive types
 			npy_header.endianess = endian.Byte_Order.Big
 			descr, clone_err := strings.clone(descr_str[:])
 			npy_header.descr = descr
-		case: // Handle non-byte-ordered types
+		case:
 			npy_header.endianess = endian.PLATFORM_BYTE_ORDER
 			descr, clone_err := strings.clone(descr_str[:])
 			npy_header.descr = descr
 		}
-		// take the type char only, e.g. take f8 from <f8
-		npy_header.alignment = get_alignment(npy_header.descr[1:])
+		// take the type char only, e.g. take f8 from <f8, if the type char is
+		// is not numeric, return NPY_Not_Implemented
+		npy_header.alignment = get_alignment(npy_header.descr[1:]) or_return
 	}
 
 	// Parse fortran_order
