@@ -21,10 +21,6 @@ MAGIC_NPY_LEN := len(MAGIC_NPY)
 get_alignment :: proc(np_type_char: string) -> (alignment: uint,  ok : IO_Error ) {
 	ok = nil
 	switch np_type_char {
-	case:
-		alignment = 255 // not supported
-		ok = NPY_Not_Implemented{"Array with non-numeric type is not supported!"}
-
 	// double, ('d', dtype('float64'))
 	// longdouble, ('g', dtype('float64'))
 	// float64, ('d', dtype('float64'))
@@ -47,13 +43,13 @@ get_alignment :: proc(np_type_char: string) -> (alignment: uint,  ok : IO_Error 
 	case "i2" : alignment = 2
 	// int8, ('b', dtype('int8'))
 	case "i1" : alignment = 1
-	// cdouble, ('D', dtype('complex127'))
-	// clongdouble, ('G', dtype('complex128'))
-	// complex128, ('D', dtype('complex128'))
-	case "c16": alignment = 8
-	// csingle, ('F', dtype('complex64'))
-	// complex64, ('F', dtype('complex64'))
-	case "c8" : alignment = 4
+	// // cdouble, ('D', dtype('complex127'))
+	// // clongdouble, ('G', dtype('complex128'))
+	// // complex128, ('D', dtype('complex128'))
+	// case "c16": alignment = 8
+	// // csingle, ('F', dtype('complex64'))
+	// // complex64, ('F', dtype('complex64'))
+	// case "c8" : alignment = 4
 	// ulonglong, ('Q', dtype('uint64'))
 	case "u8" : alignment = 8
 	// uintc, ('I', dtype('uint32'))
@@ -63,6 +59,10 @@ get_alignment :: proc(np_type_char: string) -> (alignment: uint,  ok : IO_Error 
 	// uint8, ('B', dtype('uint8'))
 	// ubyte, ('B', dtype('uint8'))
 	case "u1" : alignment = 1
+	case:
+		alignment = 255 // not supported
+		ok = NPY_Not_Implemented{"Array with non-numeric type is not supported!"}
+
 	}
 	return
 }
@@ -87,8 +87,7 @@ delete_np_header :: proc(h: ^NPY_Array_Header) {
 // read_numpy_array_from_file
 // Read NumPy's npy file as `anvil.tensor.Tensor`. The produced `Tensor` would have
 // same shape with the input array with type of `T`. It only support numeric types
-// and boolean, other NumPy's dtype is not supported, yet. For complex data type
-// It will only take the real part and cast it to `T`.
+// except for complex numbers, other NumPy's dtype is not supported, yet.
 // Note: For unsigned data types, they will be casted to `T`.
 read_numpy_array_from_file :: proc(
 	$T: typeid,
@@ -107,20 +106,18 @@ read_numpy_array_from_file :: proc(
 	os_open_error    : os.Error
 	reader           : io.Stream
 	ok               : bool             // general usage
-
+	
 	// NOTE: npy in header is NOT an abreviation for NumPy
 	// it is referring exactly to `.npy` file format
-	npy_header       := NPY_Array_Header{
-		magic=" ", shape=[]uint{0, 0}, descr=" "
-	} // numpy npy file header
+	npy_header       := new(NPY_Array_Header) // numpy npy file header
 
 	{ // scoping the stream and readers
 		handle, os_open_error = os.open(file_name, os.O_RDONLY)
 		if os_open_error != os.ERROR_NONE do return nil, NPY_Open_Error{file_name, os_open_error}
-
+	
 		// create a stream
 		stream := os.stream_from_handle(handle)
-
+	
 		// create a reader
 		reader, ok = io.to_reader(stream)
 		if !ok do return nil, NPY_Reader_Creation_Error{file_name, stream}
@@ -128,14 +125,14 @@ read_numpy_array_from_file :: proc(
 		// guard the reader to stop early when there is no progress when reading file
 		bufio_reader.max_consecutive_empty_reads = 1
 	}
-
+	
 	// read and validate header section
-	parse_numpy_npy_error = parse_and_validate_npy_header(&reader, &npy_header, allocator, loc)
+	parse_numpy_npy_error = parse_and_validate_npy_header(&reader, npy_header, allocator, loc)
 	if parse_numpy_npy_error != nil do return nil, parse_numpy_npy_error
-
+	
 	// tensor allocation
 	out = tensor.tensor_alloc(T, npy_header.shape[:], true, allocator, loc)
-
+	
 	// figure out length of bytes in the array
 	n_elem : uint
 	if len(npy_header.shape) > 1 {
@@ -144,11 +141,11 @@ read_numpy_array_from_file :: proc(
 		n_elem = npy_header.shape[0]
 	}
 	n_elem *= npy_header.alignment
-
+	
 	// start numpy array parsing
 	ok = parse_npy_array_values(
 		T,
-		&npy_header,
+		npy_header,
 		&bufio_reader,
 		out,
 		n_elem,
@@ -160,7 +157,7 @@ read_numpy_array_from_file :: proc(
 			"Cannot parse array values, possible curropted data, or data saved with type that is not supported yet"
 		}
 	}
-	defer delete_np_header(&npy_header)
+	defer delete_np_header(npy_header)
 	return out, nil
 }
 
@@ -188,7 +185,6 @@ parse_npy_array_values :: proc(
 	raw_bytes_pos, read_bytes_err = bufio.reader_read(reader, raw_bytes_container[:])
 
 	switch np_header.descr[1:] {
-	case : return false
 
 	case "f8" :
 		casted_data : f64
@@ -250,26 +246,6 @@ parse_npy_array_values :: proc(
 		}
 		return cast_ok
 
-	case "c16" :
-		casted_data : f64
-		#no_bounds_check for ; i < n_elem-uint(alignment/2); i += alignment {
-			casted_data, cast_ok = endian.get_f64(raw_bytes_container[i:i+alignment], endianess)
-			if !cast_ok do break
-			tensor.data[count] = T(casted_data)
-			count += 1
-		}
-		return cast_ok
-
-	case "c8" :
-		casted_data : f32
-		#no_bounds_check for ; i < n_elem; i += alignment {
-			casted_data, cast_ok = endian.get_f32(raw_bytes_container[i:i+alignment], endianess)
-			if !cast_ok do break
-			tensor.data[count] = T(casted_data)
-			count += 1
-		}
-		return cast_ok
-
 	case "u2" :
 		casted_data : u16
 		#no_bounds_check for ; i < n_elem; i += alignment {
@@ -313,6 +289,7 @@ parse_npy_array_values :: proc(
 			count += 1
 		}
 		return true
+	case : return false
 	}
 }
 
@@ -550,6 +527,26 @@ read_numpy_array_from_file_longdouble_test :: proc(t: ^testing.T) {
 	)
 }
 
+
+@(test)
+read_numpy_array_from_file_complex_test :: proc(t: ^testing.T) {
+	// creation of assets/test_np_arrays/complex128_5x5.npy
+	// ```python
+	// import numpy as np;
+	// complex128 = np.arange(1, 6, 1).astype(np.complex128)
+	// complex128_5x5 = np.array([complex128 +x for x in range(5)])
+	// np.save("assets/test_np_arrays/complex128_5x5.npy", complex128)
+	// ```
+	context.allocator = context.temp_allocator
+	np_tensor, err := read_numpy_array_from_file(
+		f64,
+		"assets/test_np_arrays/complex128_5x5.npy",
+		allocator=context.allocator,
+	)
+	testing.expect(t, err != nil, fmt.tprint(err))
+	defer tensor.free_tensor(np_tensor)
+}
+
 @(test)
 read_numpy_array_from_file_boolean_test :: proc(t: ^testing.T) {
 	// creation of assets/test_np_arrays/boolean_5x5.npy
@@ -559,7 +556,6 @@ read_numpy_array_from_file_boolean_test :: proc(t: ^testing.T) {
 	// b_5x5   = np.array([b_5 for _ in range(5)])
 	// np.save("assets/test_np_arrays/boolean_5x5.npy", b_5x5)
 	// ```
-
 	context.allocator = context.temp_allocator
 	np_tensor, err := read_numpy_array_from_file(
 		f32,
@@ -568,7 +564,6 @@ read_numpy_array_from_file_boolean_test :: proc(t: ^testing.T) {
 	)
 	testing.expect(t, err != nil, fmt.tprint(err))
 	defer tensor.free_tensor(np_tensor)
-
 }
 
 @(test)
@@ -589,40 +584,4 @@ read_numpy_array_from_file_ubyte_test :: proc(t: ^testing.T) {
 	)
 	testing.expect(t, err == nil, fmt.tprint(err))
 	defer tensor.free_tensor(np_tensor)
-
-}
-
-@(test)
-read_numpy_array_from_file_complex_test :: proc(t: ^testing.T) {
-	// creation of assets/test_np_arrays/complex128_5x5.npy
-	// ```python
-	// import numpy as np;
-    // complex128 = np.arange(1, 6, 1).astype(np.complex128)
-    // complex128_5x5 = np.array([complex128 +x for x in range(5)])
-	// np.save("assets/test_np_arrays/complex128_5x5.npy", complex128)
-	// ```
-
-	context.allocator = context.temp_allocator
-	np_tensor, err := read_numpy_array_from_file(
-		f64,
-		"assets/test_np_arrays/complex128_5x5.npy",
-		allocator=context.allocator,
-	)
-	testing.expect(t, err == nil, fmt.tprint(err))
-	defer tensor.free_tensor(np_tensor)
-	testing.expect(t, slice.equal(np_tensor.shape, []uint{5, 5}))
-	testing.expect(
-		t,
-		slice.equal(
-			np_tensor.data,
-			[]f64{
-				1, 2, 3, 4, 5,
-				2, 3, 4, 5, 6,
-				3, 4, 5, 6, 7,
-				4, 5, 6, 7, 8,
-				5, 6, 7, 8, 9
-			}
-		)
-	)
-
 }
