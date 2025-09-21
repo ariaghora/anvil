@@ -3,6 +3,19 @@ package simd_backend
 import "core:math"
 import "core:simd"
 
+when ODIN_ARCH == .amd64 {
+	when #config(AVX512, false) {
+		SIMD_LANES :: 16
+	} else when #config(AVX2, false) {
+		SIMD_LANES :: 8
+	} else {
+		SIMD_LANES :: 4
+	}
+} else when ODIN_ARCH == .arm64 {
+	SIMD_LANES :: 4 // 128-bit NEON
+}
+SIMD_F32 :: #simd[SIMD_LANES]f32
+
 when ODIN_OS == .Darwin {
 	foreign import accelerate "system:Accelerate.framework"
 
@@ -58,5 +71,26 @@ when ODIN_OS == .Darwin {
 		for i in 0 ..< len(src) {
 			dst[i] = math.exp(src[i])
 		}
+	}
+}
+
+@(private = "file")
+splat_f32x4 :: #force_inline proc(val: f32) -> #simd[4]f32 {
+	return #simd[4]f32{val, val, val, val}
+}
+@(private = "file")
+splat_f32x8 :: #force_inline proc(val: f32) -> #simd[8]f32 {
+	return #simd[8]f32{val, val, val, val, val, val, val, val}
+}
+
+splat :: #force_inline proc($T: typeid, val: f32) -> T {
+	when T == #simd[4]f32 {
+		return splat_f32x4(val)
+	} else when T == #simd[8]f32 {
+		return splat_f32x8(val)
+	} else when T == #simd[16]f32 {
+		return splat_f32x16(val) // TODO
+	} else {
+		#panic("Unsupported SIMD type")
 	}
 }

@@ -1894,7 +1894,6 @@ softmax_last_dim_inplace :: proc(t: ^Tensor($T)) {
 
 			col = 0
 			for ; col + 4 <= last_dim; col += 4 {
-				// vals := (#simd[4]f32)(row_data[col])
 				vals := #simd[4]f32 {
 					row_data[col + 0 * dim_stride],
 					row_data[col + 1 * dim_stride],

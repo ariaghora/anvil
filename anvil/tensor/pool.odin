@@ -2,6 +2,7 @@ package tensor
 
 import "../simd_backend"
 import "../trace"
+import "base:intrinsics"
 import "core:math"
 import "core:simd"
 
@@ -50,6 +51,7 @@ max_pool_2d_f32_simd :: proc(
 	src, dst: []f32,
 	b, c, h, w, k_h, k_w, h_out, w_out, stride, padding: uint,
 ) {
+	using simd_backend
 	hw_in := h * w
 	hw_out := h_out * w_out
 
@@ -100,20 +102,11 @@ max_pool_2d_f32_simd :: proc(
 							window_width := uint(x_end - x_start_clamped)
 
 							x := uint(0)
-							max_vec := #simd[4]f32 {
-								math.inf_f32(-1),
-								math.inf_f32(-1),
-								math.inf_f32(-1),
-								math.inf_f32(-1),
-							}
+							// {-inf, -inf, ..., -inf}
+							max_vec := splat(SIMD_F32, math.inf_f32(-1))
 
 							for ; x + 4 <= window_width; x += 4 {
-								vals := #simd[4]f32 {
-									src_channel[row_start + x],
-									src_channel[row_start + x + 1],
-									src_channel[row_start + x + 2],
-									src_channel[row_start + x + 3],
-								}
+								vals := (^SIMD_F32)(&src_channel[row_start + x])^
 								max_vec = simd.max(max_vec, vals)
 							}
 

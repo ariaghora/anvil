@@ -1,20 +1,21 @@
+// This file contains implementation of convolution operations: for the general
+// case and special cases. Special cases are meant to handle convolution setups
+// commonly found in the popular arcitectures.
+//
+// The code are meant to be fast, NOT necessarily clean and readable
+
 package tensor
 
 import "../simd_backend"
 import "../tensor"
 import "../trace"
+import "base:intrinsics"
 import "base:runtime"
 import "core:fmt"
 import "core:os"
 import "core:simd"
 import "core:sync"
 import "core:thread"
-
-// This file contains implementation of convolution operations: for the general
-// case and special cases. Special cases are meant to handle convolution setups
-// commonly found in the popular arcitectures.
-//
-// The code are meant to be fast, NOT necessarily clean and readable
 
 
 // NOTE(Aria): initially tuned for M1 chips. Basically this depends on cache size.
