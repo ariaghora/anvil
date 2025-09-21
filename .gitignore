@@ -13,6 +13,7 @@ tensorgen/safetensors
 *.bin
 *.o
 *.exe
+*.pdb
 
 odinfmt.json
 
