@@ -157,7 +157,7 @@ read_numpy_array_from_file :: proc(
 			"Cannot parse array values, possible curropted data, or data saved with type that is not supported yet"
 		}
 	}
-	defer delete_np_header(npy_header)
+	delete_np_header(npy_header)
 	return out, nil
 }
 
@@ -302,10 +302,42 @@ parse_and_validate_npy_header :: proc(
 	loc        := #caller_location,
 ) -> (err: IO_Error) {
 
-	// header's layout.
-	// ...         TODO(Rey) : Add brief explanation about the header layout
-	//                         will be taken from
-	//                         https://numpy.org/neps/nep-0001-npy-format.html
+	// Layout. (source: https://numpy.org/neps/nep-0001-npy-format.html)
+	//
+	// ---
+	//
+	// First 6 bytes are a magic string: exactly “x93NUMPY”, `MAGIC_NPY`
+	//
+	// ---
+	//
+	// Next  1 byte  is an unsigned byte: major version of NumPy
+	// Next  1 byte  is an unsigned byte: minor version of NumPy
+	// We directly read major and minor version in one go in variable `version : [2]u8`
+	//
+	// ---
+	//
+	// Next  2 bytes is a little-endian unsigned short int: in variable `header_length : [2]u8`
+	// These 2 bytes tell us how many bytes that we should read in order to get all
+	// the header. The header descriptions are ASCII strings which contains
+	// Python's literal experssion of dictionary (map/hashmap). Header is terminated
+	// by new line character `\n`.
+	//
+	//
+	// EXAMPLE:
+	// header : "{'descr': '|b1', 'fortran_order': False, 'shape': (5, 5), }                                                          \n"
+	// with length of: 118
+	//
+	// Note that `descr` later will be refered as `type char` in this procedure.
+	//
+	//     more about above example can be seen in
+	//     https://github.com/kelreeeeey/python-numpy-npy-in-odin#generate-test-data
+	//
+	// ---
+	//
+	// This procedure only cares for the first (6 + (1 + 1) + 2 + `header_length`)
+	// bytes. The rest of the bytes will handled by `parse_npy_array_values`
+	// procedure.
+
 
 	// read magic header (6 first bytes)
 	// these bytes indicating whether the file is produced by NumPy or not.
@@ -344,25 +376,29 @@ parse_and_validate_npy_header :: proc(
 	}
 	npy_header.version = version
 
-	header_lenght : [2]u8
-	// read header length
-	header := header_lenght[:]
+	// Infer header's length
+	header_length : [2]u8
+	header := header_length[:]
 	read, rerr = io.read(reader^, header)
 	if rerr != nil || read != 2 {
 		delete(header)
 		delete_np_header(npy_header)
-		return NPY_Invalid_Header_Length{header_lenght}
+		return NPY_Invalid_Header_Length{header_length}
 	}
-
-	npy_header.header_length = transmute(u16le)header_lenght
+	npy_header.header_length = transmute(u16le)header_length
 	len_header := cast(int)npy_header.header_length
 	header_desc := make([]u8, len_header)
 
+	// Actually reading the header, convert the header to string, take the
+	// necessary information, and put them in `npy_header`
 	read, rerr = io.read(reader^, header_desc[:])
 	if rerr != nil || read != len_header {
 		delete_np_header(npy_header)
-		return NPY_Invalid_Header_Length{header_lenght}
+		return NPY_Invalid_Header_Length{header_length}
 	}
+
+	// From the point, all the following processes are string manipulations since the header
+	// are literal ASCII character of Python's dictionary (map/hashmap) expression.
 
 	// Clean up header string
 	clean_header := strings.trim_space(string(header_desc))
@@ -489,7 +525,7 @@ parse_and_validate_npy_header :: proc(
 import "core:fmt"
 import "core:testing"
 
-// NOTE(Rey) : Add more test cases for numpy array with
+// TODO(Rey) : Add more test cases for numpy array with
 // 1. shape of [batch, channels, *spatial_dimension]
 // 2. nested structure, e.g. array.shape = [1, 1, 1, 1, 1, 2]
 
@@ -502,7 +538,6 @@ read_numpy_array_from_file_longdouble_test :: proc(t: ^testing.T) {
 	// clongdouble_5x5  = np.array([clongdouble+x for x in range(5)])
 	// np.save("assets/test_np_arrays/longdouble_5x5.npy", clongdouble_5x5)
 	// ```
-
 	context.allocator = context.temp_allocator
 	np_tensor, err := read_numpy_array_from_file(
 		f32,
