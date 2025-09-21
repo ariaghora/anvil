@@ -193,9 +193,9 @@ parse_npy_array_values :: proc(
 	case "f8" :
 		casted_data : f64
 		#no_bounds_check for ; i < n_elem; i += alignment {
-			casted_data, cast_ok := endian.get_f64(raw_bytes_container[i:i+alignment], endianess)
+			casted_data, cast_ok = endian.get_f64(raw_bytes_container[i:i+alignment], endianess)
 			if !cast_ok do break
-			tensor.data[count] = cast(T)casted_data
+			tensor.data[count] = T(casted_data)
 			count += 1
 		}
 		return cast_ok
@@ -203,9 +203,9 @@ parse_npy_array_values :: proc(
 	case "i8" :
 		casted_data : i64
 		#no_bounds_check for ; i < n_elem; i += alignment {
-			casted_data, cast_ok := endian.get_i64(raw_bytes_container[i:i+alignment], endianess)
+			casted_data, cast_ok = endian.get_i64(raw_bytes_container[i:i+alignment], endianess)
 			if !cast_ok do break
-			tensor.data[count] = cast(T)casted_data
+			tensor.data[count] = T(casted_data)
 			count += 1
 		}
 		return cast_ok
@@ -213,9 +213,9 @@ parse_npy_array_values :: proc(
 	case "f4" :
 		casted_data : f32
 		#no_bounds_check for ; i < n_elem; i += alignment {
-			casted_data, cast_ok := endian.get_f32(raw_bytes_container[i:i+alignment], endianess)
+			casted_data, cast_ok = endian.get_f32(raw_bytes_container[i:i+alignment], endianess)
 			if !cast_ok do break
-			tensor.data[count] = cast(T)casted_data
+			tensor.data[count] = T(casted_data)
 			count += 1
 		}
 		return cast_ok
@@ -223,9 +223,9 @@ parse_npy_array_values :: proc(
 	case "i4" :
 		casted_data : i32
 		#no_bounds_check for ; i < n_elem; i += alignment {
-			casted_data, cast_ok := endian.get_i32(raw_bytes_container[i:i+alignment], endianess)
+			casted_data, cast_ok = endian.get_i32(raw_bytes_container[i:i+alignment], endianess)
 			if !cast_ok do break
-			tensor.data[count] = cast(T)casted_data
+			tensor.data[count] = T(casted_data)
 			count += 1
 		}
 		return cast_ok
@@ -233,9 +233,9 @@ parse_npy_array_values :: proc(
 	case "f2" :
 		casted_data : f16
 		#no_bounds_check for ; i < n_elem; i += alignment {
-			casted_data, cast_ok := endian.get_f16(raw_bytes_container[i:i+alignment], endianess)
+			casted_data, cast_ok = endian.get_f16(raw_bytes_container[i:i+alignment], endianess)
 			if !cast_ok do break
-			tensor.data[count] = cast(T)casted_data
+			tensor.data[count] = T(casted_data)
 			count += 1
 		}
 		return cast_ok
@@ -245,7 +245,7 @@ parse_npy_array_values :: proc(
 		#no_bounds_check for ; i < n_elem; i += alignment {
 			casted_data, cast_ok = endian.get_i16(raw_bytes_container[i:i+alignment], endianess)
 			if !cast_ok do break
-			tensor.data[count] = cast(T)casted_data
+			tensor.data[count] = T(casted_data)
 			count += 1
 		}
 		return cast_ok
@@ -253,9 +253,9 @@ parse_npy_array_values :: proc(
 	case "c16" :
 		casted_data : f64
 		#no_bounds_check for ; i < n_elem-uint(alignment/2); i += alignment {
-			casted_data, cast_ok := endian.get_f64(raw_bytes_container[i:i+alignment], endianess)
+			casted_data, cast_ok = endian.get_f64(raw_bytes_container[i:i+alignment], endianess)
 			if !cast_ok do break
-			tensor.data[count] = cast(T)casted_data
+			tensor.data[count] = T(casted_data)
 			count += 1
 		}
 		return cast_ok
@@ -263,9 +263,9 @@ parse_npy_array_values :: proc(
 	case "c8" :
 		casted_data : f32
 		#no_bounds_check for ; i < n_elem; i += alignment {
-			casted_data, cast_ok := endian.get_f32(raw_bytes_container[i:i+alignment], endianess)
+			casted_data, cast_ok = endian.get_f32(raw_bytes_container[i:i+alignment], endianess)
 			if !cast_ok do break
-			tensor.data[count] = cast(T)casted_data
+			tensor.data[count] = T(casted_data)
 			count += 1
 		}
 		return cast_ok
@@ -275,7 +275,7 @@ parse_npy_array_values :: proc(
 		#no_bounds_check for ; i < n_elem; i += alignment {
 			casted_data, cast_ok = endian.get_u16(raw_bytes_container[i:i+alignment], endianess)
 			if !cast_ok do break
-			tensor.data[count] = cast(T)casted_data
+			tensor.data[count] = T(casted_data)
 			count += 1
 		}
 		return cast_ok
@@ -285,7 +285,7 @@ parse_npy_array_values :: proc(
 		#no_bounds_check for ; i < n_elem; i += alignment {
 			casted_data, cast_ok = endian.get_u32(raw_bytes_container[i:i+alignment], endianess)
 			if !cast_ok do break
-			tensor.data[count] = cast(T)casted_data
+			tensor.data[count] = T(casted_data)
 			count += 1
 		}
 		return cast_ok
@@ -295,21 +295,21 @@ parse_npy_array_values :: proc(
 		#no_bounds_check for ; i < n_elem; i += alignment {
 			casted_data, cast_ok = endian.get_u16(raw_bytes_container[i:i+alignment], endianess)
 			if !cast_ok do break
-			tensor.data[count] = cast(T)casted_data
+			tensor.data[count] = T(casted_data)
 			count += 1
 		}
 		return cast_ok
 
 	case "u1" :
 		#no_bounds_check for ; i < n_elem; i += alignment {
-			tensor.data[count] = cast(T)raw_bytes_container[i]
+			tensor.data[count] = T(raw_bytes_container[i])
 			count += 1
 		}
 		return true
 
 	case "i1" :
 		#no_bounds_check for ; i < n_elem; i += alignment {
-			tensor.data[count] = cast(T)raw_bytes_container[i]
+			tensor.data[count] = T(raw_bytes_container[i])
 			count += 1
 		}
 		return true
