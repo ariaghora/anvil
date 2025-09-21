@@ -631,7 +631,7 @@ parse_tensor :: proc(
 		}
 	}
 
-	// Convert dims to shape (using uint as you specified)
+	// Convert dims to shape
 	shape := make([]uint, len(dims), context.temp_allocator)
 	for dim, i in dims do shape[i] = uint(dim)
 

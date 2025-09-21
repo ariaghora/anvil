@@ -9,45 +9,44 @@ import "core:time"
 
 run :: proc(model: ^ONNX($T), inputs: map[string]^tensor.Tensor(T)) -> ONNX_Error {
 	allocator := model.allocator
-
-	// set inputs to the models
+	// set inputs to the models. We shall clone and manage ownership by our own.
+	// TODO(Aria): no need to clone.
 	for k, v in inputs do model.graph.tensors[k] = tensor.clone(v, allocator)
 
 	input_names := slice.map_keys(inputs, context.temp_allocator) or_return
 	orders := determine_execution_order(model.graph, input_names, context.temp_allocator)
+	
+	// odinfmt:disable
 	for op_idx, i in orders {
-		op := model.graph.nodes[op_idx]
-
 		// Sanity check for each inputs before node execution
+		op := model.graph.nodes[op_idx]
 		for iname in op.inputs do ensure_tensor_non_nil(model.graph.tensors[iname], iname, op.op_type, true) or_return
 
 		switch op.op_type {
-		case "Conv":
-			run_conv(op, model, allocator) or_return
-		case "Relu":
-			run_relu(op, model, allocator) or_return
-		case "Reshape":
-			run_reshape(op, model, allocator) or_return
-		case "MaxPool":
-			run_max_pool(op, model, allocator) or_return
-		case "Add":
-			run_add(op, model, allocator) or_return
-		case "Concat":
-			run_concat(op, model, allocator) or_return
-		case "Flatten":
-			run_flatten(op, model, allocator) or_return
-		case "Gemm":
-			run_gemm(op, model, allocator) or_return
-		case "GlobalAveragePool":
-			run_global_average_pool(op, model, allocator) or_return
-		case "Softmax":
-			run_softmax(op, model, allocator) or_return
-		case "Transpose":
-			run_transpose(op, model, allocator) or_return
-		case:
-			return Unsupported_Op{op.op_type}
+/*===================================================================================================*/	
+//      SUPPORTED OPERATIONS
+/*===================================================================================================*/	
+		case "Add"               : run_add(op, model, allocator) or_return
+		case "Concat"            : run_concat(op, model, allocator) or_return
+		case "Conv"              : run_conv(op, model, allocator) or_return
+		case "Div"               : run_div(op, model, allocator) or_return
+		case "Exp"               : run_exp(op, model, allocator) or_return
+		case "Flatten"           : run_flatten(op, model, allocator) or_return
+		case "Gemm"              : run_gemm(op, model, allocator) or_return
+		case "GlobalAveragePool" : run_global_average_pool(op, model, allocator) or_return
+		case "MaxPool"           : run_max_pool(op, model, allocator) or_return
+		case "Mul"               : run_mul(op, model, allocator) or_return
+		case "Relu"              : run_relu(op, model, allocator) or_return
+		case "Reshape"           : run_reshape(op, model, allocator) or_return
+		case "Slice"             : run_slice(op, model, allocator) or_return
+		case "Softmax"           : run_softmax(op, model, allocator) or_return
+		case "Sub"               : run_sub(op, model, allocator) or_return
+		case "Transpose"         : run_transpose(op, model, allocator) or_return
+/*====================================================================================================*/	
+		case /*OTHER*/          : return Unsupported_Op{op.op_type}
 		}
 	}
+	// odinfmt:enable
 	return nil
 }
 
@@ -277,6 +276,31 @@ run_conv :: proc(
 	return
 }
 
+run_div :: proc(
+	op: ^Node($T),
+	model: ^ONNX(T),
+	allocator: runtime.Allocator,
+) -> (
+	err: ONNX_Error,
+) {
+	inputs, outputs := op.inputs, op.outputs
+	x, y := model.graph.tensors[inputs[0]], model.graph.tensors[inputs[1]]
+	model.graph.tensors[outputs[0]] = tensor.div(x, y, allocator)
+	return
+}
+
+run_exp :: proc(
+	op: ^Node($T),
+	model: ^ONNX(T),
+	allocator: runtime.Allocator,
+) -> (
+	err: ONNX_Error,
+) {
+	x := model.graph.tensors[op.inputs[0]]
+	model.graph.tensors[op.outputs[0]] = tensor.exp(x, allocator)
+	return
+}
+
 run_relu :: proc(
 	op: ^Node($T),
 	model: ^ONNX(T),
@@ -420,6 +444,67 @@ run_global_average_pool :: proc(
 	return
 }
 
+run_mul :: proc(
+	op: ^Node($T),
+	model: ^ONNX(T),
+	allocator: runtime.Allocator,
+) -> (
+	err: ONNX_Error,
+) {
+	inputs, outputs := op.inputs, op.outputs
+	x, y := model.graph.tensors[inputs[0]], model.graph.tensors[inputs[1]]
+	model.graph.tensors[outputs[0]] = tensor.mul(x, y, allocator)
+	return
+}
+
+@(private = "file")
+_range :: proc($T: typeid, n: uint, allocator := context.allocator) -> []T {
+	res := make([]T, n, allocator)
+	for i in 0 ..< n do res[i] = T(i)
+	return res
+}
+
+run_slice :: proc(
+	op: ^Node($T),
+	model: ^ONNX(T),
+	allocator: runtime.Allocator,
+) -> (
+	err: ONNX_Error,
+) {
+	x := model.graph.tensors[op.inputs[0]]
+
+	opset := model.opset_version
+	attributes := op.attributes
+
+
+	slices := make([]tensor.Slice, len(x.shape))
+	for _, i in slices do slices[i] = tensor.Range{}
+
+	if opset < 10 {
+		// 1..9: starts and ends are in attributes
+		starts, ok_starts := attributes["starts"].([]i64)
+		if !ok_starts do return Missing_Required_Attribute{"starts"}
+		ends, ok_ends := attributes["ends"].([]i64)
+		if !ok_ends do return Missing_Required_Attribute{"ends"}
+		axes, ok_axes := attributes["axes"].([]i64)
+
+		for start, i in starts {
+			slices[axes[i]] = tensor.Range {
+				start = int(starts[i]),
+				end   = int(ends[i]),
+				step  = 1, // earlier ONNX version doesn't specify step
+			}
+		}
+	} else {
+		// 10..current: starts, ends, and steps are input tensors
+		panic("TODO (Aria): implemented yet slice for opset >= 10")
+	}
+
+	out := tensor.slice(x, slices, allocator = allocator)
+	model.graph.tensors[op.outputs[0]] = out
+	return
+}
+
 run_softmax :: proc(
 	op: ^Node($T),
 	model: ^ONNX(T),
@@ -437,6 +522,19 @@ run_softmax :: proc(
 
 	out := tensor.softmax(x, axis, allocator)
 	model.graph.tensors[op.outputs[0]] = out
+	return
+}
+
+run_sub :: proc(
+	op: ^Node($T),
+	model: ^ONNX(T),
+	allocator: runtime.Allocator,
+) -> (
+	err: ONNX_Error,
+) {
+	inputs, outputs := op.inputs, op.outputs
+	x, y := model.graph.tensors[inputs[0]], model.graph.tensors[inputs[1]]
+	model.graph.tensors[outputs[0]] = tensor.sub(x, y, allocator)
 	return
 }
 
