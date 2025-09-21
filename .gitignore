@@ -12,6 +12,8 @@ odin-simd
 tensorgen/safetensors
 *.bin
 *.o
+*.exe
+*.pdb
 
 odinfmt.json
 
