@@ -2,6 +2,7 @@ package file_io
 
 import "../tensor"
 import "core:os"
+import "core:strings"
 import "vendor:stb/image"
 
 // Read image from file as a 3D tensor. The output shape will be [height, width, channel].
@@ -17,7 +18,7 @@ read_image_from_file :: proc(
 	err: IO_Error,
 ) where (T == f16 || T == f32 || T == f64) {
 	data, ok := os.read_entire_file(file_name, allocator)
-	if !ok do return nil, Cannot_Read_File{}
+	if !ok do return nil, Image_Cannot_Read_File{}
 	defer delete(data, allocator)
 
 	width, height, channels_in_file: i32
@@ -31,7 +32,7 @@ read_image_from_file :: proc(
 		&channels_in_file,
 		desired_channels,
 	)
-	if pixels == nil do return nil, Invalid_Image_Format{}
+	if pixels == nil do return nil, Image_Invalid_Format{}
 	defer image.image_free(pixels)
 
 	// Actual channels we got (if desired_channels was 0, this equals channels_in_file)
@@ -45,6 +46,57 @@ read_image_from_file :: proc(
 	}
 
 	return res, nil
+}
+
+write_image :: proc(
+	image_hwc: ^tensor.Tensor($T),
+	out_path: string,
+	loc := #caller_location,
+) -> IO_Error {
+	ensure(len(image_hwc.shape) == 3, "expects image tensor to be 3D", loc = loc)
+	out_path_norm := strings.to_lower(out_path, context.temp_allocator)
+
+	out_type: string
+	if strings.ends_with(out_path_norm, ".png") {
+		out_type = "png"
+	} else if (strings.ends_with(out_path_norm, ".jpg") ||
+		   strings.ends_with(out_path_norm, ".jpeg")) {
+		out_type = "jpg"
+	} else {
+		return Image_Unsupported_Output_Extension{}
+	}
+
+	height := i32(image_hwc.shape[0])
+	width := i32(image_hwc.shape[1])
+	channels := i32(image_hwc.shape[2])
+
+	num_pixels := int(height * width * channels)
+	pixels := make([]u8, num_pixels, context.temp_allocator)
+	for i in 0 ..< num_pixels {
+		val := clamp(image_hwc.data[i], 0, 1) * 255.0
+		pixels[i] = u8(val)
+	}
+
+	out_path_c := strings.clone_to_cstring(out_path, context.temp_allocator)
+	success: i32
+	if out_type == "png" {
+		success = image.write_png(out_path_c, width, height, channels, raw_data(pixels), 0)
+	} else if out_type == "jpg" {
+		// For JPEG, quality parameter (1-100, higher = better)
+		jpeg_quality: i32 = 95 // TODO(Aria): Parameterize this
+		success = image.write_jpg(
+			out_path_c,
+			width,
+			height,
+			channels,
+			raw_data(pixels),
+			jpeg_quality,
+		)
+	} else do panic("should be unreachable")
+
+	if success == 0 do return Image_Write_Failed{}
+
+	return nil
 }
 
 import "core:fmt"
