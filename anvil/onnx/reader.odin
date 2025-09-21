@@ -41,6 +41,10 @@ Value_Error :: struct {
 	msg: string,
 }
 
+Missing_Required_Attribute :: struct {
+	name: string,
+}
+
 ONNX_Error :: union {
 	runtime.Allocator_Error,
 	IO_Error,
@@ -51,6 +55,7 @@ ONNX_Error :: union {
 	Unsupported_Attribute,
 	Malformed_Attribute,
 	Value_Error,
+	Missing_Required_Attribute,
 }
 
 ONNX :: struct($T: typeid) {

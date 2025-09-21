@@ -3,6 +3,7 @@ package onnx
 import "../tensor"
 import "base:runtime"
 import "core:fmt"
+import "core:math"
 import "core:slice"
 import "core:time"
 
@@ -18,46 +19,31 @@ run :: proc(model: ^ONNX($T), inputs: map[string]^tensor.Tensor(T)) -> ONNX_Erro
 		op := model.graph.nodes[op_idx]
 
 		// Sanity check for each inputs before node execution
-		for iname in op.inputs {
-			ensure_tensor_non_nil(model.graph.tensors[iname], iname, op.op_type, true) or_return
-		}
+		for iname in op.inputs do ensure_tensor_non_nil(model.graph.tensors[iname], iname, op.op_type, true) or_return
 
 		switch op.op_type {
 		case "Conv":
-			run_conv(
-				op.inputs[:],
-				op.outputs[:],
-				op.attributes,
-				model.graph,
-				model.opset_version,
-				allocator,
-			) or_return
+			run_conv(op, model, allocator) or_return
 		case "Relu":
-			run_relu(
-				op.inputs[:],
-				op.outputs[:],
-				op.attributes,
-				model.graph,
-				model.opset_version,
-				allocator,
-			) or_return
+			run_relu(op, model, allocator) or_return
+		case "Reshape":
+			run_reshape(op, model, allocator) or_return
 		case "MaxPool":
-			run_max_pool(
-				op.inputs[:],
-				op.outputs[:],
-				op.attributes,
-				model.graph,
-				model.opset_version,
-				allocator,
-			) or_return
+			run_max_pool(op, model, allocator) or_return
 		case "Add":
 			run_add(op, model, allocator) or_return
+		case "Concat":
+			run_concat(op, model, allocator) or_return
 		case "Flatten":
 			run_flatten(op, model, allocator) or_return
 		case "Gemm":
 			run_gemm(op, model, allocator) or_return
 		case "GlobalAveragePool":
 			run_global_average_pool(op, model, allocator) or_return
+		case "Softmax":
+			run_softmax(op, model, allocator) or_return
+		case "Transpose":
+			run_transpose(op, model, allocator) or_return
 		case:
 			return Unsupported_Op{op.op_type}
 		}
@@ -224,15 +210,13 @@ determine_execution_order :: proc(
 }
 
 run_conv :: proc(
-	inputs, outputs: []string,
-	attributes: map[string]Attribute($T),
-	graph: ^Graph(T),
-	opset: i64,
+	op: ^Node($T),
+	model: ^ONNX(T),
 	allocator: runtime.Allocator,
 ) -> (
 	err: ONNX_Error,
 ) {
-	x := graph.tensors[inputs[0]]
+	x := model.graph.tensors[op.inputs[0]]
 	ensure(
 		len(x.shape) == 4,
 		fmt.tprintf(
@@ -241,27 +225,27 @@ run_conv :: proc(
 		),
 	)
 
-	w := graph.tensors[inputs[1]]
-	b := graph.tensors[inputs[2]] or_else nil
+	w := model.graph.tensors[op.inputs[1]]
+	b := model.graph.tensors[op.inputs[2]] or_else nil
 	auto_pad: string
 	dilations, kernel_shape, pads, strides: []i64
 	groups: uint
 
 	output: ^tensor.Tensor(T)
 
-	if opset < 1 {
-		return Unsupported_Opset{"Conv", opset}
-	} else if opset <= 22 {
-		auto_pad = attributes["auto_pad"].(string) or_else "NOTSET"
-		if auto_pad != "NOTSET" do return Unsupported_Attribute{"Conv", "auto_pad", auto_pad, opset}
+	if model.opset_version < 1 {
+		return Unsupported_Opset{"Conv", model.opset_version}
+	} else if model.opset_version <= 22 {
+		auto_pad = op.attributes["auto_pad"].(string) or_else "NOTSET"
+		if auto_pad != "NOTSET" do return Unsupported_Attribute{"Conv", "auto_pad", auto_pad, model.opset_version}
 
-		dilations = attributes["dilations"].([]i64) or_else {1}
+		dilations = op.attributes["dilations"].([]i64) or_else {1}
 		if !slice.all_of(dilations, dilations[0]) do return Malformed_Attribute{"Conv only support symmetrical dilations"}
 
-		pads = attributes["pads"].([]i64) or_else {0}
+		pads = op.attributes["pads"].([]i64) or_else {0}
 		if !slice.all_of(pads, pads[0]) do return Malformed_Attribute{"Conv only support symmetrical paddings"}
 
-		strides = attributes["strides"].([]i64) or_else {1}
+		strides = op.attributes["strides"].([]i64) or_else {1}
 		if !slice.all_of(strides, strides[0]) do return Malformed_Attribute{"Conv only support symmetrical strides"}
 
 		// NOTE(Aria): Kernel shape is omitted since we don't use it directly and can just infer from
@@ -272,7 +256,7 @@ run_conv :: proc(
 		stride := uint(strides[0])
 		dilation := uint(dilations[0])
 		padding := uint(pads[0])
-		groups = uint(attributes["group"].(i64) or_else 1)
+		groups = uint(op.attributes["group"].(i64) or_else 1)
 
 		output = tensor.conv2d_xwb(
 			x,
@@ -285,43 +269,71 @@ run_conv :: proc(
 			allocator = allocator,
 		)
 	} else {
-		return Unsupported_Opset{"Conv", opset}
+		return Unsupported_Opset{"Conv", model.opset_version}
 	}
 
-	graph.tensors[outputs[0]] = output
+	model.graph.tensors[op.outputs[0]] = output
 
 	return
 }
 
 run_relu :: proc(
-	inputs, outputs: []string,
-	attributes: map[string]Attribute($T),
-	graph: ^Graph(T),
-	opset: i64,
+	op: ^Node($T),
+	model: ^ONNX(T),
 	allocator: runtime.Allocator,
 ) -> (
 	err: ONNX_Error,
 ) {
-	x := graph.tensors[inputs[0]]
-	graph.tensors[outputs[0]] = tensor.relu(x, allocator)
+	x := model.graph.tensors[op.inputs[0]]
+	model.graph.tensors[op.outputs[0]] = tensor.relu(x, allocator)
+	return
+}
+
+run_reshape :: proc(
+	op: ^Node($T),
+	model: ^ONNX(T),
+	allocator: runtime.Allocator,
+) -> (
+	err: ONNX_Error,
+) {
+	if model.opset_version <= 5 do return Unsupported_Opset{"Reshape", model.opset_version}
+	allowzero := op.attributes["beta"].(i64) or_else 0
+	if allowzero != 0 do return Unsupported_Attribute{"Reshape", "allowzero", fmt.tprint(allowzero), model.opset_version}
+
+	x := model.graph.tensors[op.inputs[0]]
+	out_shape_f := model.graph.tensors[op.inputs[1]].data
+	out_shape := make([]uint, len(out_shape_f), context.temp_allocator)
+
+	out_size := abs(int(math.prod(out_shape_f)))
+	inferred_dimsize := len(x.data) / out_size
+	for s, i in out_shape_f {
+		if s < 0 { 	// -1 detected!
+			out_shape[i] = uint(inferred_dimsize)
+		} else {
+			out_shape[i] = uint(s)
+		}
+	}
+	reshaped := tensor.reshape(x, out_shape, allocator)
+	model.graph.tensors[op.outputs[0]] = reshaped
 	return
 }
 
 run_max_pool :: proc(
-	inputs, outputs: []string,
-	attributes: map[string]Attribute($T),
-	graph: ^Graph(T),
-	opset: i64,
+	op: ^Node($T),
+	model: ^ONNX(T),
 	allocator: runtime.Allocator,
 ) -> (
 	err: ONNX_Error,
 ) {
-	x := graph.tensors[inputs[0]]
-	ensure_batched_image_shape(x, inputs[0], "MaxPool", true) or_return
+	x := model.graph.tensors[op.inputs[0]]
+	ensure_batched_image_shape(x, op.inputs[0], "MaxPool", true) or_return
 
 	auto_pad: string
 	output: ^tensor.Tensor(T)
 	dilations, kernel_shape, pads, strides: []i64
+	opset := model.opset_version
+	attributes := op.attributes
+
 	if opset < 1 {
 		return Unsupported_Opset{"Conv", opset}
 	} else if opset <= 22 {
@@ -354,7 +366,7 @@ run_max_pool :: proc(
 	} else {
 		return Unsupported_Opset{"Conv", opset}
 	}
-	graph.tensors[outputs[0]] = output
+	model.graph.tensors[op.outputs[0]] = output
 	return
 }
 
@@ -408,6 +420,45 @@ run_global_average_pool :: proc(
 	return
 }
 
+run_softmax :: proc(
+	op: ^Node($T),
+	model: ^ONNX(T),
+	allocator: runtime.Allocator,
+) -> (
+	err: ONNX_Error,
+) {
+	x := model.graph.tensors[op.inputs[0]]
+	axis_i := op.attributes["axis"].(i64)
+
+	axis: uint
+	if axis_i < 0 {
+		axis = uint(int(len(x.data)) - int(axis_i))
+	}
+
+	out := tensor.softmax(x, axis, allocator)
+	model.graph.tensors[op.outputs[0]] = out
+	return
+}
+
+run_transpose :: proc(
+	op: ^Node($T),
+	model: ^ONNX(T),
+	allocator: runtime.Allocator,
+) -> (
+	err: ONNX_Error,
+) {
+	x := model.graph.tensors[op.inputs[0]]
+	perm, ok := op.attributes["perm"].([]i64)
+	if !ok do return Missing_Required_Attribute{"perm"}
+
+	perm_uint := make([]uint, len(perm), context.temp_allocator)
+	for v, i in perm do perm_uint[i] = uint(v)
+
+	out := tensor.permute(x, perm_uint, allocator)
+	model.graph.tensors[op.outputs[0]] = out
+	return
+}
+
 run_add :: proc(
 	op: ^Node($T),
 	model: ^ONNX(T),
@@ -418,5 +469,24 @@ run_add :: proc(
 	inputs, outputs := op.inputs, op.outputs
 	x, y := model.graph.tensors[inputs[0]], model.graph.tensors[inputs[1]]
 	model.graph.tensors[outputs[0]] = tensor.add(x, y, allocator)
+	return
+}
+
+run_concat :: proc(
+	op: ^Node($T),
+	model: ^ONNX(T),
+	allocator: runtime.Allocator,
+) -> (
+	err: ONNX_Error,
+) {
+	inputs, outputs := op.inputs, op.outputs
+	inputs_tensor := make([dynamic]^tensor.Tensor(T), len(inputs), context.temp_allocator)
+	for input_name, i in inputs do inputs_tensor[i] = model.graph.tensors[input_name]
+
+	axis, ok := op.attributes["axis"].(i64)
+	if !ok do return Missing_Required_Attribute{"axis"}
+
+	out := tensor.cat(inputs_tensor[:], uint(axis), allocator)
+	model.graph.tensors[outputs[0]] = out
 	return
 }
