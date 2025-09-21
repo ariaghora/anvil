@@ -525,10 +525,6 @@ parse_and_validate_npy_header :: proc(
 import "core:fmt"
 import "core:testing"
 
-// TODO(Rey) : Add more test cases for numpy array with
-// - [x] shape of [batch, channels, *spatial_dimension] -> read_numpy_array_from_npy_file_BCHW_array_test
-// - [ ] nested structure, e.g. array.shape = [1, 1, 1, 1, 1, 2]
-
 @(test)
 read_numpy_array_from_npy_file_longdouble_test :: proc(t: ^testing.T) {
 	// creation of assets/test_np_arrays/longdouble_5x5.npy
@@ -683,6 +679,40 @@ read_numpy_array_from_npy_file_BCHW_array_test :: proc(t: ^testing.T) {
 				13,13,13,13,13,13,13,13,13,13,13,13,13,13,13,13,
 				14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,
 				15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15
+			}
+		)
+	)
+}
+
+@(test)
+read_numpy_array_from_npy_file_nested_shaped_array_test :: proc(t: ^testing.T) {
+	// creation of assets/test_np_arrays/nested_shape.npy
+	// ```python
+	// import numpy as np
+	// a = np.arange(0, 16, 1).astype("int32")
+	// a = a[
+	//     np.newaxis, np.newaxis, np.newaxis,
+	//     np.newaxis, np.newaxis, ...
+	// ]
+	// b = np.concatenate([ a, a ], axis=3)
+	// np.save("assets/test_np_arrays/nested_shape.npy", b)
+	// ```
+	context.allocator = context.temp_allocator
+	np_tensor, err := read_numpy_array_from_npy_file(
+		i64,
+		"assets/test_np_arrays/nested_shape.npy",
+		allocator=context.allocator,
+	)
+	testing.expect(t, err == nil, fmt.tprint(err))
+	defer tensor.free_tensor(np_tensor)
+	testing.expect(t, slice.equal(np_tensor.shape, []uint{1, 1, 1, 2, 1, 16}))
+	testing.expect(
+		t,
+		slice.equal(
+			np_tensor.data,
+			[]i64{
+				0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+				0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
 			}
 		)
 	)
