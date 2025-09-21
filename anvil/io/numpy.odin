@@ -84,12 +84,12 @@ delete_np_header :: proc(h: ^NPY_Array_Header) {
 	delete(h.descr)
 }
 
-// read_numpy_array_from_file
-// Read NumPy's npy file as `anvil.tensor.Tensor`. The produced `Tensor` would have
+// read_numpy_array_from_npy_file
+// Read NumPy's `npy` file as `anvil.tensor.Tensor`. The produced `Tensor` would have
 // same shape with the input array with type of `T`. It only support numeric types
 // except for complex numbers, other NumPy's dtype is not supported, yet.
 // Note: For unsigned data types, they will be casted to `T`.
-read_numpy_array_from_file :: proc(
+read_numpy_array_from_npy_file :: proc(
 	$T: typeid,
 	file_name: string,
 	bufreader_size: int = NPY_BUFFER_READER_SIZE,
@@ -530,7 +530,7 @@ import "core:testing"
 // 2. nested structure, e.g. array.shape = [1, 1, 1, 1, 1, 2]
 
 @(test)
-read_numpy_array_from_file_longdouble_test :: proc(t: ^testing.T) {
+read_numpy_array_from_npy_file_longdouble_test :: proc(t: ^testing.T) {
 	// creation of assets/test_np_arrays/longdouble_5x5.npy
 	// ```python
 	// import numpy as np
@@ -539,7 +539,7 @@ read_numpy_array_from_file_longdouble_test :: proc(t: ^testing.T) {
 	// np.save("assets/test_np_arrays/longdouble_5x5.npy", clongdouble_5x5)
 	// ```
 	context.allocator = context.temp_allocator
-	np_tensor, err := read_numpy_array_from_file(
+	np_tensor, err := read_numpy_array_from_npy_file(
 		f32,
 		"assets/test_np_arrays/longdouble_5x5.npy",
 		allocator=context.allocator,
@@ -564,7 +564,7 @@ read_numpy_array_from_file_longdouble_test :: proc(t: ^testing.T) {
 
 
 @(test)
-read_numpy_array_from_file_complex_test :: proc(t: ^testing.T) {
+read_numpy_array_from_npy_file_complex_test :: proc(t: ^testing.T) {
 	// creation of assets/test_np_arrays/complex128_5x5.npy
 	// ```python
 	// import numpy as np;
@@ -573,7 +573,7 @@ read_numpy_array_from_file_complex_test :: proc(t: ^testing.T) {
 	// np.save("assets/test_np_arrays/complex128_5x5.npy", complex128)
 	// ```
 	context.allocator = context.temp_allocator
-	np_tensor, err := read_numpy_array_from_file(
+	np_tensor, err := read_numpy_array_from_npy_file(
 		f64,
 		"assets/test_np_arrays/complex128_5x5.npy",
 		allocator=context.allocator,
@@ -583,7 +583,7 @@ read_numpy_array_from_file_complex_test :: proc(t: ^testing.T) {
 }
 
 @(test)
-read_numpy_array_from_file_boolean_test :: proc(t: ^testing.T) {
+read_numpy_array_from_npy_file_boolean_test :: proc(t: ^testing.T) {
 	// creation of assets/test_np_arrays/boolean_5x5.npy
 	// ```python
 	// import numpy as np;
@@ -592,7 +592,7 @@ read_numpy_array_from_file_boolean_test :: proc(t: ^testing.T) {
 	// np.save("assets/test_np_arrays/boolean_5x5.npy", b_5x5)
 	// ```
 	context.allocator = context.temp_allocator
-	np_tensor, err := read_numpy_array_from_file(
+	np_tensor, err := read_numpy_array_from_npy_file(
 		f32,
 		"assets/test_np_arrays/boolean_5x5.npy",
 		allocator=context.allocator,
@@ -602,7 +602,7 @@ read_numpy_array_from_file_boolean_test :: proc(t: ^testing.T) {
 }
 
 @(test)
-read_numpy_array_from_file_ubyte_test :: proc(t: ^testing.T) {
+read_numpy_array_from_npy_file_ubyte_test :: proc(t: ^testing.T) {
 	// creation of assets/test_np_arrays/ubyte_5x5.npy
 	// ```python
 	// import numpy as np;
@@ -612,7 +612,7 @@ read_numpy_array_from_file_ubyte_test :: proc(t: ^testing.T) {
 	// ```
 
 	context.allocator = context.temp_allocator
-	np_tensor, err := read_numpy_array_from_file(
+	np_tensor, err := read_numpy_array_from_npy_file(
 		f32,
 		"assets/test_np_arrays/ubyte_5x5.npy",
 		allocator=context.allocator,
