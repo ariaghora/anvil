@@ -517,7 +517,9 @@ run_softmax :: proc(
 
 	axis: uint
 	if axis_i < 0 {
-		axis = uint(int(len(x.data)) - int(axis_i))
+		axis = uint(int(len(x.shape)) + int(axis_i))
+	} else {
+		axis = uint(axis_i)
 	}
 
 	out := tensor.softmax(x, axis, allocator)
