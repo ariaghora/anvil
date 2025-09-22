@@ -5,6 +5,7 @@ import "../../anvil/io"
 import "../../anvil/onnx"
 import "../../anvil/tensor"
 import "core:fmt"
+import "core:mem"
 import "core:os/os2"
 import "core:slice"
 import "core:time"
@@ -49,6 +50,22 @@ non_maximum_suppression :: proc(bboxes: [dynamic]BBox, threshold: f32) -> [dynam
 }
 
 main :: proc() {
+	when ODIN_DEBUG {
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, context.allocator)
+		context.allocator = mem.tracking_allocator(&track)
+
+		defer {
+			if len(track.allocation_map) > 0 {
+				fmt.eprintf("=== %v allocations not freed: ===\n", len(track.allocation_map))
+				for _, entry in track.allocation_map {
+					fmt.eprintf("- %v bytes @ %v\n", entry.size, entry.location)
+				}
+			}
+			mem.tracking_allocator_destroy(&track)
+		}
+	}
+
 	ensure(len(os2.args) == 2, "first positional argument must be an image path")
 	image_file_path := os2.args[1]
 
@@ -66,7 +83,11 @@ main :: proc() {
 	defer tensor.free_tensor(img, img_resized)
 	for _, i in img_resized.data do img_resized.data[i] = ((img_resized.data[i] * 255) - 127) / 128
 
-	input_t := tensor.unsqueeze(tensor.permute(img_resized, {2, 0, 1}, context.temp_allocator), 0)
+	input_t := tensor.unsqueeze(
+		tensor.permute(img_resized, {2, 0, 1}, context.temp_allocator),
+		0,
+		context.temp_allocator,
+	)
 	inputs := make(map[string]^tensor.Tensor(T), context.temp_allocator)
 	inputs["input"] = input_t
 

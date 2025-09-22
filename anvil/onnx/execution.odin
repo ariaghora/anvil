@@ -477,7 +477,7 @@ run_slice :: proc(
 	attributes := op.attributes
 
 
-	slices := make([]tensor.Slice, len(x.shape))
+	slices := make([]tensor.Slice, len(x.shape), context.temp_allocator)
 	for _, i in slices do slices[i] = tensor.Range{}
 
 	if opset < 10 {
