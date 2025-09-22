@@ -83,7 +83,7 @@ main :: proc() {
 	bboxes := make([dynamic]BBox, context.temp_allocator)
 	for i in 0 ..< scores.shape[1] {
 		score := tensor.tensor_get(scores, 0, i, 1)
-		if score > 0.90 {
+		if score > 0.80 {
 			s := tensor.slice(boxes, {{}, int(i), {}}, true)
 			defer tensor.free_tensor(s)
 			xmin, ymin :=
