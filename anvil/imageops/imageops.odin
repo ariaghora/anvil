@@ -65,3 +65,69 @@ resize :: proc(
 
 	return out_resized
 }
+
+// Draw a rectangle outline on an image tensor in-place.
+// Expects image in HWC format with 3 channels (RGB).
+// Rectangle specified as [x, y, width, height] in pixel coordinates.
+// Color values should be in range [0, 1].
+draw_rectangle_line :: proc(
+	image_hwc: ^tensor.Tensor($T),
+	x, y, w, h: uint,
+	color: [3]f32,
+	line_width: uint,
+) {
+	ensure(len(image_hwc.shape) == 3, "Image tensor must be 3D (HWC format)")
+	ensure(image_hwc.shape[2] == 3, "Image must have 3 channels (RGB)")
+
+	height := image_hwc.shape[0]
+	width := image_hwc.shape[1]
+	channels := image_hwc.shape[2]
+
+	// Clamp bounds
+	x_end := min(x + w, width)
+	y_end := min(y + h, height)
+
+	// Top and bottom horizontal lines (with thickness)
+	for i in x ..< x_end {
+		// Top edge
+		for t in 0 ..< line_width {
+			if y + t < height {
+				offset := ((y + t) * width + i) * channels
+				for c in 0 ..< 3 {
+					image_hwc.data[int(offset) + c] = T(color[c])
+				}
+			}
+		}
+		// Bottom edge
+		for t in 0 ..< line_width {
+			if y_end > t && y_end - t - 1 < height {
+				offset := ((y_end - t - 1) * width + i) * channels
+				for c in 0 ..< 3 {
+					image_hwc.data[int(offset) + c] = T(color[c])
+				}
+			}
+		}
+	}
+
+	// Left and right vertical lines (with thickness)
+	for j in y ..< y_end {
+		// Left edge
+		for t in 0 ..< line_width {
+			if x + t < width {
+				offset := (j * width + x + t) * channels
+				for c in 0 ..< 3 {
+					image_hwc.data[int(offset) + c] = T(color[c])
+				}
+			}
+		}
+		// Right edge
+		for t in 0 ..< line_width {
+			if x_end > t && x_end - t - 1 < width {
+				offset := (j * width + (x_end - t - 1)) * channels
+				for c in 0 ..< 3 {
+					image_hwc.data[int(offset) + c] = T(color[c])
+				}
+			}
+		}
+	}
+}
