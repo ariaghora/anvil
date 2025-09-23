@@ -63,6 +63,7 @@ ONNX :: struct($T: typeid) {
 	producer_name:    string,
 	producer_version: string,
 	raw_bytes:        []u8,
+	raw_embedded:     bool,
 	graph:            ^Graph(T),
 	allocator:        runtime.Allocator,
 }
@@ -134,12 +135,13 @@ read_from_file :: proc(
 ) {
 	raw_bytes, ok := os.read_entire_file(fn, allocator)
 	if !ok do return nil, IO_Error{msg = fmt.tprintf("Failed to read ONNX from %s", fn)}
-	return read_from_bytes(T, raw_bytes, allocator, loc)
+	return read_from_bytes(T, raw_bytes, false, allocator, loc)
 }
 
 read_from_bytes :: proc(
 	$T: typeid,
 	raw_bytes: []u8,
+	raw_embedded := true,
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> (
@@ -210,6 +212,7 @@ read_from_bytes :: proc(
 				producer_version = producer_version,
 				graph = graph,
 				opset_version = opset_version,
+				raw_embedded = raw_embedded,
 				allocator = allocator,
 			},
 			allocator,
@@ -725,7 +728,7 @@ free_onnx :: proc(model: ^ONNX($T), allocator := context.allocator) {
 		tensor.free_tensor(t, allocator = main_allocator)
 	}
 
-	delete(model.raw_bytes, raw_bytes_allocator)
+	if !model.raw_embedded do delete(model.raw_bytes, raw_bytes_allocator)
 
 	delete(model.graph.nodes)
 	delete(model.graph.tensors)

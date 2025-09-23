@@ -2,9 +2,9 @@ package tensor
 
 import "../simd_backend"
 import "../trace"
-import "base:intrinsics"
 import "core:math"
 import "core:simd"
+import "core:slice"
 
 // Calculate output dimensions
 get_pool_hw :: proc(h_in, w_in, k_h, k_w, stride, padding: uint) -> (uint, uint) {
@@ -107,7 +107,7 @@ max_pool_2d_f32_simd :: proc(
 
 							for ; x + 4 <= window_width; x += 4 {
 								vals := (^SIMD_F32)(&src_channel[row_start + x])^
-								max_vec = simd.max(max_vec, vals)
+								max_vec = simd_backend.max_f32(max_vec, vals)
 							}
 
 							max_val = max(max_val, simd.reduce_max(max_vec))

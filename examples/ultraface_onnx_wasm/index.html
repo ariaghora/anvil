@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <link rel="shortcut icon" href="#">
+    <title>Anvil WASM Face Detection</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .upload-area {
+            border: 2px dashed #ccc;
+            border-radius: 10px;
+            padding: 20px;
+            text-align: center;
+            margin: 20px 0;
+        }
+
+        .upload-area:hover {
+            border-color: #999;
+        }
+
+        #imageInput {
+            margin: 10px 0;
+        }
+
+        .status {
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 5px;
+        }
+
+        .status.loading {
+            background-color: #fff3cd;
+            color: #856404;
+        }
+
+        .status.success {
+            background-color: #d4edda;
+            color: #155724;
+        }
+
+        .status.error {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Face Detection Demo</h1>
+
+    <div class="upload-area">
+        <h3>Upload or drop an image here to detect faces</h3>
+        <input type="file" id="imageInput" accept="image/*">
+    </div>
+
+    <div id="status" class="status" style="display: none;"></div>
+
+    <script type="text/javascript" src="./odin.js"></script>
+    <script type="text/javascript">
+        let wasmExports;
+        let memInterface;
+        let isWasmLoaded = false;
+
+        const statusDiv = document.getElementById('status');
+        const imageInput = document.getElementById('imageInput');
+
+        function showStatus(message, type = 'loading') {
+            statusDiv.textContent = message;
+            statusDiv.className = `status ${type}`;
+            statusDiv.style.display = 'block';
+        }
+
+        function hideStatus() {
+            statusDiv.style.display = 'none';
+        }
+
+        (async () => {
+            try {
+                showStatus('Loading WASM module...', 'loading');
+
+                memInterface = new odin.WasmMemoryInterface();
+                const odinImports = odin.setupDefaultImports(memInterface);
+                await odin.runWasm("out.wasm", null, null, memInterface);
+                wasmExports = memInterface.exports;
+
+                isWasmLoaded = true;
+                showStatus('WASM module loaded successfully!', 'success');
+                setTimeout(hideStatus, 2000);
+
+                imageInput.addEventListener('change', handleImageUpload);
+
+            } catch (error) {
+                console.error('Failed to load WASM:', error);
+                showStatus('Failed to load WASM module', 'error');
+            }
+        })();
+
+        async function handleImageUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            if (!isWasmLoaded) {
+                showStatus('WASM module not loaded yet', 'error');
+                return;
+            }
+
+            try {
+                showStatus('Processing image...', 'loading');
+
+                const arrayBuffer = await file.arrayBuffer();
+                const imageBytes = new Uint8Array(arrayBuffer);
+
+                console.log(`Image size: ${imageBytes.length} bytes`);
+
+                const MAX_SIZE = 10 * 1024 * 1024;
+                if (imageBytes.length > MAX_SIZE) {
+                    showStatus(`Image too large (${(imageBytes.length / 1024 / 1024).toFixed(1)}MB). Max size is 10MB.`, 'error');
+                    return;
+                }
+
+                const bufferPtr = wasmExports.get_image_buffer();
+                const wasmMemory = new Uint8Array(memInterface.memory.buffer, bufferPtr, imageBytes.length);
+                wasmMemory.set(imageBytes);
+
+                console.log('Image data copied to WASM memory');
+
+                // Call detect_face
+                wasmExports.detect_face(imageBytes.length);
+
+                // Get the processed image back
+                displayProcessedImage();
+
+                showStatus('Face detection completed!', 'success');
+                setTimeout(hideStatus, 3000);
+
+            } catch (error) {
+                console.error('Error processing image:', error);
+                showStatus('Error processing image. Check console for details.', 'error');
+            }
+        }
+
+        function displayProcessedImage() {
+            const imageDataPtr = wasmExports.get_processed_image_data();
+            if (!imageDataPtr) {
+                console.error('No processed image data available');
+                return;
+            }
+
+            const width = wasmExports.get_processed_image_width();
+            const height = wasmExports.get_processed_image_height();
+            const channels = wasmExports.get_processed_image_channels();
+
+            console.log(`Processed image: ${width}x${height}x${channels}`);
+
+            // Get the image data from WASM memory
+            const imageDataSize = width * height * channels;
+            const imageData = new Float32Array(memInterface.memory.buffer, imageDataPtr, imageDataSize);
+
+            // Create canvas and display
+            let canvas = document.getElementById('resultCanvas');
+            if (!canvas) {
+                canvas = document.createElement('canvas');
+                canvas.id = 'resultCanvas';
+                canvas.style.maxWidth = '100%';
+                canvas.style.border = '1px solid #ccc';
+                document.body.appendChild(canvas);
+            }
+
+            canvas.width = width;
+            canvas.height = height;
+
+            const ctx = canvas.getContext('2d');
+            const canvasImageData = ctx.createImageData(width, height);
+
+            // Convert float RGB to uint8 RGBA
+            for (let i = 0; i < width * height; i++) {
+                const r = Math.floor(imageData[i * 3 + 0] * 255);
+                const g = Math.floor(imageData[i * 3 + 1] * 255);
+                const b = Math.floor(imageData[i * 3 + 2] * 255);
+
+                canvasImageData.data[i * 4 + 0] = r;
+                canvasImageData.data[i * 4 + 1] = g;
+                canvasImageData.data[i * 4 + 2] = b;
+                canvasImageData.data[i * 4 + 3] = 255; // Alpha
+            }
+
+            ctx.putImageData(canvasImageData, 0, 0);
+        }
+
+        // Handle drag and drop
+        const uploadArea = document.querySelector('.upload-area');
+
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.style.borderColor = '#999';
+        });
+
+        uploadArea.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            uploadArea.style.borderColor = '#ccc';
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.style.borderColor = '#ccc';
+
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                imageInput.files = files;
+                handleImageUpload({ target: { files } });
+            }
+        });
+    </script>
+
+    <div id="results" style="margin-top: 20px;">
+    </div>
+</body>
+
+</html>

@@ -13,6 +13,8 @@ when ODIN_ARCH == .amd64 {
 	}
 } else when ODIN_ARCH == .arm64 {
 	SIMD_LANES :: 4 // 128-bit NEON
+} else {
+	SIMD_LANES :: 4
 }
 SIMD_F32 :: #simd[SIMD_LANES]f32
 
@@ -92,5 +94,20 @@ splat :: #force_inline proc($T: typeid, val: f32) -> T {
 		return splat_f32x16(val) // TODO
 	} else {
 		#panic("Unsupported SIMD type")
+	}
+}
+
+max_f32 :: proc(va, vb: #simd[4]f32) -> #simd[4]f32 {
+	// NOTE(Aria): simd.max(segfaults in WASM)
+	// This is just a workaround
+	when ODIN_OS == .Darwin || ODIN_OS == .Windows || ODIN_OS == .Linux {
+		return simd.max(va, vb)
+	} else {
+		return #simd[4]f32 {
+			max(simd.extract(va, 0), simd.extract(vb, 0)),
+			max(simd.extract(va, 1), simd.extract(vb, 1)),
+			max(simd.extract(va, 2), simd.extract(vb, 2)),
+			max(simd.extract(va, 3), simd.extract(vb, 3)),
+		}
 	}
 }

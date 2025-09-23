@@ -8,19 +8,15 @@ import "vendor:stb/image"
 // Read image from file as a 3D tensor. The output shape will be [height, width, channel].
 // The purpose of channel dimension as the innermost is for convenience, e.g., normalization.
 // Resulting tensor will be floating number familty ranging from 0 (dark) to 1 (light).
-read_image_from_file :: proc(
+read_image_from_bytes :: proc(
 	$T: typeid,
-	file_name: string,
+	data: []byte,
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> (
 	res: ^tensor.Tensor(T),
 	err: IO_Error,
 ) where (T == f16 || T == f32 || T == f64) {
-	data, ok := os.read_entire_file(file_name, allocator)
-	if !ok do return nil, Image_Cannot_Read_File{}
-	defer delete(data, allocator)
-
 	width, height, channels_in_file: i32
 	desired_channels: i32 = 0 // 0 = use image's native channel count
 
@@ -46,6 +42,21 @@ read_image_from_file :: proc(
 	}
 
 	return res, nil
+}
+
+read_image_from_file :: proc(
+	$T: typeid,
+	file_name: string,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> (
+	res: ^tensor.Tensor(T),
+	err: IO_Error,
+) where (T == f16 || T == f32 || T == f64) {
+	data, ok := os.read_entire_file(file_name, allocator)
+	if !ok do return nil, Image_Cannot_Read_File{}
+	defer delete(data, allocator)
+	return read_image_from_bytes(T, data, allocator, loc)
 }
 
 write_image :: proc(

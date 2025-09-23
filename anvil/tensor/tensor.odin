@@ -1837,7 +1837,7 @@ softmax_last_dim_inplace :: proc(t: ^Tensor($T)) {
 					row_data[col + 2 * dim_stride],
 					row_data[col + 3 * dim_stride],
 				}
-				max_vec = simd.max(max_vec, vals)
+				max_vec = simd_backend.max_f32(max_vec, vals)
 			}
 
 			// Reduce the vector to scalar
@@ -2009,7 +2009,7 @@ softmax_inplace :: proc(t: ^Tensor($T), dim: uint) {
 					slice_data[idx + 2 * dim_stride],
 					slice_data[idx + 3 * dim_stride],
 				}
-				max_vec = simd.max(max_vec, vals)
+				max_vec = simd_backend.max_f32(max_vec, vals)
 			}
 
 			// Reduce the vector to scalar

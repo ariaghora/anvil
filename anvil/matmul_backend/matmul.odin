@@ -21,13 +21,17 @@ CBLAS_TRANSPOSE :: enum i32 {
 	ConjTrans = 113,
 }
 
-@(default_calling_convention = "c")
-foreign blas {
-	@(link_name = "cblas_sgemm")
-	sgemm :: proc(order: CBLAS_ORDER, transa, transb: CBLAS_TRANSPOSE, m, n, k: i32, alpha: f32, a: [^]f32, lda: i32, b: [^]f32, ldb: i32, beta: f32, c: [^]f32, ldc: i32) ---
+when ODIN_OS == .Darwin || ODIN_OS == .Linux || ODIN_OS == .Windows {
+	@(default_calling_convention = "c")
+	foreign blas {
+		@(link_name = "cblas_sgemm")
+		sgemm :: proc(order: CBLAS_ORDER, transa, transb: CBLAS_TRANSPOSE, m, n, k: i32, alpha: f32, a: [^]f32, lda: i32, b: [^]f32, ldb: i32, beta: f32, c: [^]f32, ldc: i32) ---
 
-	@(link_name = "cblas_dgemm")
-	dgemm :: proc(order: CBLAS_ORDER, transa, transb: CBLAS_TRANSPOSE, m, n, k: i32, alpha: f64, a: [^]f64, lda: i32, b: [^]f64, ldb: i32, beta: f64, c: [^]f64, ldc: i32) ---
+		@(link_name = "cblas_dgemm")
+		dgemm :: proc(order: CBLAS_ORDER, transa, transb: CBLAS_TRANSPOSE, m, n, k: i32, alpha: f64, a: [^]f64, lda: i32, b: [^]f64, ldb: i32, beta: f64, c: [^]f64, ldc: i32) ---
+	}
+} else {
+	sgemm :: sgemm_naive
 }
 
 matmul_2d :: proc(a: []$T, b: []T, m, n, k: uint, c: []T, allocator := context.allocator) {

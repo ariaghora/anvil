@@ -17,6 +17,11 @@ import "core:simd"
 import "core:sync"
 import "core:thread"
 
+when ODIN_OS == .Darwin || ODIN_OS == .Windows || ODIN_OS == .Linux {
+	SUPPORTS_THREADING :: true
+} else {
+	SUPPORTS_THREADING :: false
+}
 
 // NOTE(Aria): initially tuned for M1 chips. Basically this depends on cache size.
 TILE_H :: 64
@@ -942,6 +947,53 @@ conv2d_grouped :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
+	when SUPPORTS_THREADING {
+		// Only do parallelism when groups >= 4 (arbitrary) to avoid unnecessary overhead.
+		if groups > 4 {
+			return conv2d_grouped_parallel(
+				input,
+				kernel,
+				groups,
+				stride,
+				dilation,
+				padding,
+				allocator,
+				loc,
+			)
+		} else {
+			return conv2d_grouped_sequential(
+				input,
+				kernel,
+				groups,
+				stride,
+				dilation,
+				padding,
+				allocator,
+				loc,
+			)
+		}
+	} else {
+		return conv2d_grouped_sequential(
+			input,
+			kernel,
+			groups,
+			stride,
+			dilation,
+			padding,
+			allocator,
+			loc,
+		)
+	}
+}
+
+conv2d_grouped_sequential :: proc(
+	input: ^Tensor($T),
+	kernel: ^Tensor(T),
+	groups: uint,
+	stride, dilation, padding: uint,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
 	b, c_in, h, w := input.shape[0], input.shape[1], input.shape[2], input.shape[3]
 	c_out, c_in_k, k_h, k_w := kernel.shape[0], kernel.shape[1], kernel.shape[2], kernel.shape[3]
 
@@ -967,153 +1019,186 @@ conv2d_grouped :: proc(
 	c_in_per_group := c_in / groups
 	c_out_per_group := c_out / groups
 
-	// Only do parallelism when groups >= 4 (arbitrary) to avoid unnecessary overhead.
-	if groups >= 4 { 	// TODO(Aria): decide a clever way to determine this magic number
-		// Parallel path using thread pool
-		grouped_conv_trace := trace.TRACE_SECTION("grouped_conv_parallel")
-		defer trace.end_scoped_trace(grouped_conv_trace)
+	// Sequential path for small workloads
+	grouped_conv_trace := trace.TRACE_SECTION("grouped_conv_sequential")
+	defer trace.end_scoped_trace(grouped_conv_trace)
 
-		num_threads := min(int(groups), 4)
-		pool: thread.Pool
-		thread.pool_init(&pool, context.allocator, num_threads)
-		defer thread.pool_destroy(&pool)
-		thread.pool_start(&pool)
+	for g in 0 ..< groups {
+		input_offset := g * c_in_per_group
+		kernel_offset := g * c_out_per_group
+		output_offset := g * c_out_per_group
 
-		Group_Work_Data :: struct {
-			input:                     ^Tensor(T),
-			kernel:                    ^Tensor(T),
-			result:                    ^Tensor(T),
-			group_idx:                 uint,
-			c_in_per_group:            uint,
-			c_out_per_group:           uint,
-			b, h, w, h_out, w_out:     uint,
-			k_h, k_w:                  uint,
-			stride, dilation, padding: uint,
+		input_data_offset := b * input_offset * h * w
+		kernel_data_offset := kernel_offset * c_in_per_group * k_h * k_w
+
+		input_view := Tensor(T) {
+			data       = input.data[input_data_offset:],
+			shape      = []uint{b, c_in_per_group, h, w},
+			strides    = input.strides,
+			contiguous = input.contiguous,
 		}
 
-		work_items := make([]Group_Work_Data, groups, context.temp_allocator)
-
-		process_group_task :: proc(t: thread.Task) {
-			work := cast(^Group_Work_Data)t.data
-
-			// Create views for this group
-			input_offset := work.group_idx * work.c_in_per_group
-			kernel_offset := work.group_idx * work.c_out_per_group
-			output_offset := work.group_idx * work.c_out_per_group
-
-			// Calculate offsets for views
-			input_data_offset := work.b * input_offset * work.h * work.w
-			kernel_data_offset := kernel_offset * work.c_in_per_group * work.k_h * work.k_w
-
-			input_view := Tensor(T) {
-				data       = work.input.data[input_data_offset:],
-				shape      = []uint{work.b, work.c_in_per_group, work.h, work.w},
-				strides    = work.input.strides,
-				contiguous = work.input.contiguous,
-			}
-
-			kernel_view := Tensor(T) {
-				data       = work.kernel.data[kernel_data_offset:],
-				shape      = []uint{work.c_out_per_group, work.c_in_per_group, work.k_h, work.k_w},
-				strides    = work.kernel.strides,
-				contiguous = work.kernel.contiguous,
-			}
-
-			// Run convolution for this group
-			group_output := conv2d_single(
-				&input_view,
-				&kernel_view,
-				work.stride,
-				work.dilation,
-				work.padding,
-				context.temp_allocator,
-			)
-
-			// Copy to result (thread-safe as each group writes to different channels)
-			copy_group_output_parallel(
-				work.result,
-				group_output,
-				work.b,
-				output_offset,
-				work.c_out_per_group,
-				work.h_out,
-				work.w_out,
-			)
+		kernel_view := Tensor(T) {
+			data       = kernel.data[kernel_data_offset:],
+			shape      = []uint{c_out_per_group, c_in_per_group, k_h, k_w},
+			strides    = kernel.strides,
+			contiguous = kernel.contiguous,
 		}
 
-		// Create work items and submit tasks
-		for g in 0 ..< groups {
-			work_items[g] = Group_Work_Data {
-				input           = input,
-				kernel          = kernel,
-				result          = result,
-				group_idx       = g,
-				c_in_per_group  = c_in_per_group,
-				c_out_per_group = c_out_per_group,
-				b               = b,
-				h               = h,
-				w               = w,
-				h_out           = h_out,
-				w_out           = w_out,
-				k_h             = k_h,
-				k_w             = k_w,
-				stride          = stride,
-				dilation        = dilation,
-				padding         = padding,
-			}
+		group_output := conv2d_single(
+			&input_view,
+			&kernel_view,
+			stride,
+			dilation,
+			padding,
+			context.temp_allocator,
+		)
 
-			thread.pool_add_task(&pool, context.temp_allocator, process_group_task, &work_items[g])
-
-		}
-
-		thread.pool_finish(&pool)
-	} else {
-		// Sequential path for small workloads
-		grouped_conv_trace := trace.TRACE_SECTION("grouped_conv_sequential")
-		defer trace.end_scoped_trace(grouped_conv_trace)
-
-		for g in 0 ..< groups {
-			input_offset := g * c_in_per_group
-			kernel_offset := g * c_out_per_group
-			output_offset := g * c_out_per_group
-
-			input_data_offset := b * input_offset * h * w
-			kernel_data_offset := kernel_offset * c_in_per_group * k_h * k_w
-
-			input_view := Tensor(T) {
-				data       = input.data[input_data_offset:],
-				shape      = []uint{b, c_in_per_group, h, w},
-				strides    = input.strides,
-				contiguous = input.contiguous,
-			}
-
-			kernel_view := Tensor(T) {
-				data       = kernel.data[kernel_data_offset:],
-				shape      = []uint{c_out_per_group, c_in_per_group, k_h, k_w},
-				strides    = kernel.strides,
-				contiguous = kernel.contiguous,
-			}
-
-			group_output := conv2d_single(
-				&input_view,
-				&kernel_view,
-				stride,
-				dilation,
-				padding,
-				context.temp_allocator,
-			)
-
-			copy_group_output_parallel(
-				result,
-				group_output,
-				b,
-				output_offset,
-				c_out_per_group,
-				h_out,
-				w_out,
-			)
-		}
+		copy_group_output_parallel(
+			result,
+			group_output,
+			b,
+			output_offset,
+			c_out_per_group,
+			h_out,
+			w_out,
+		)
 	}
+
+	return result
+}
+
+conv2d_grouped_parallel :: proc(
+	input: ^Tensor($T),
+	kernel: ^Tensor(T),
+	groups: uint,
+	stride, dilation, padding: uint,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	b, c_in, h, w := input.shape[0], input.shape[1], input.shape[2], input.shape[3]
+	c_out, c_in_k, k_h, k_w := kernel.shape[0], kernel.shape[1], kernel.shape[2], kernel.shape[3]
+
+	// Validate group constraints
+	if c_in % groups != 0 {
+		panic("Input channels must be divisible by groups")
+	}
+	if c_out % groups != 0 {
+		panic("Output channels must be divisible by groups")
+	}
+	if c_in_k != c_in / groups {
+		panic("Kernel input channels must equal input channels per group")
+	}
+
+	if groups == 1 {
+		return conv2d_single(input, kernel, stride, dilation, padding, allocator, loc)
+	}
+
+	h_out, w_out := get_hw(h, w, k_h, k_w, stride, dilation, padding)
+
+	result := tensor_alloc(T, []uint{b, c_out, h_out, w_out}, true, allocator, loc)
+
+	c_in_per_group := c_in / groups
+	c_out_per_group := c_out / groups
+
+	// Parallel path using thread pool
+	grouped_conv_trace := trace.TRACE_SECTION("grouped_conv_parallel")
+	defer trace.end_scoped_trace(grouped_conv_trace)
+
+	num_threads := min(int(groups), 4)
+	pool: thread.Pool
+	thread.pool_init(&pool, context.allocator, num_threads)
+	defer thread.pool_destroy(&pool)
+	thread.pool_start(&pool)
+
+	Group_Work_Data :: struct {
+		input:                     ^Tensor(T),
+		kernel:                    ^Tensor(T),
+		result:                    ^Tensor(T),
+		group_idx:                 uint,
+		c_in_per_group:            uint,
+		c_out_per_group:           uint,
+		b, h, w, h_out, w_out:     uint,
+		k_h, k_w:                  uint,
+		stride, dilation, padding: uint,
+	}
+
+	work_items := make([]Group_Work_Data, groups, context.temp_allocator)
+
+	process_group_task :: proc(t: thread.Task) {
+		work := cast(^Group_Work_Data)t.data
+
+		// Create views for this group
+		input_offset := work.group_idx * work.c_in_per_group
+		kernel_offset := work.group_idx * work.c_out_per_group
+		output_offset := work.group_idx * work.c_out_per_group
+
+		// Calculate offsets for views
+		input_data_offset := work.b * input_offset * work.h * work.w
+		kernel_data_offset := kernel_offset * work.c_in_per_group * work.k_h * work.k_w
+
+		input_view := Tensor(T) {
+			data       = work.input.data[input_data_offset:],
+			shape      = []uint{work.b, work.c_in_per_group, work.h, work.w},
+			strides    = work.input.strides,
+			contiguous = work.input.contiguous,
+		}
+
+		kernel_view := Tensor(T) {
+			data       = work.kernel.data[kernel_data_offset:],
+			shape      = []uint{work.c_out_per_group, work.c_in_per_group, work.k_h, work.k_w},
+			strides    = work.kernel.strides,
+			contiguous = work.kernel.contiguous,
+		}
+
+		// Run convolution for this group
+		group_output := conv2d_single(
+			&input_view,
+			&kernel_view,
+			work.stride,
+			work.dilation,
+			work.padding,
+			context.temp_allocator,
+		)
+
+		// Copy to result (thread-safe as each group writes to different channels)
+		copy_group_output_parallel(
+			work.result,
+			group_output,
+			work.b,
+			output_offset,
+			work.c_out_per_group,
+			work.h_out,
+			work.w_out,
+		)
+	}
+
+	// Create work items and submit tasks
+	for g in 0 ..< groups {
+		work_items[g] = Group_Work_Data {
+			input           = input,
+			kernel          = kernel,
+			result          = result,
+			group_idx       = g,
+			c_in_per_group  = c_in_per_group,
+			c_out_per_group = c_out_per_group,
+			b               = b,
+			h               = h,
+			w               = w,
+			h_out           = h_out,
+			w_out           = w_out,
+			k_h             = k_h,
+			k_w             = k_w,
+			stride          = stride,
+			dilation        = dilation,
+			padding         = padding,
+		}
+
+		thread.pool_add_task(&pool, context.temp_allocator, process_group_task, &work_items[g])
+
+	}
+
+	thread.pool_finish(&pool)
 
 	return result
 }
