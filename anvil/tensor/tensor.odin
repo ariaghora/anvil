@@ -2105,3 +2105,95 @@ softmax :: proc(t: ^Tensor($T), dim: uint, allocator := context.allocator) -> ^T
 	softmax_inplace(result, dim)
 	return result
 }
+
+split :: proc(
+	tensor: ^Tensor($T),
+	axis: int,
+	split_sizes: []uint = nil,
+	num_outputs: uint = 0,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> []^Tensor(T) {
+	rank := len(tensor.shape)
+
+	// Normalize axis to positive index
+	norm_axis := axis if axis >= 0 else rank + axis
+
+	// Validate axis range
+	if norm_axis < 0 || norm_axis >= rank {
+		panic(fmt.tprintf("axis %d out of range for tensor with rank %d", axis, rank))
+	}
+
+	axis_dim := uint(norm_axis)
+	dim_size := tensor.shape[axis_dim]
+
+	// Determine split sizes
+	actual_split_sizes: []uint
+
+	if split_sizes == nil {
+		// Equal splits (with potentially smaller last chunk)
+		if num_outputs == 0 {
+			panic("Must specify either split_sizes or num_outputs")
+		}
+
+		chunk_size := dim_size / num_outputs
+		remainder := dim_size % num_outputs
+
+		actual_split_sizes = make([]uint, num_outputs, context.temp_allocator)
+		for i in 0 ..< num_outputs - 1 {
+			actual_split_sizes[i] = chunk_size
+		}
+		// Last chunk gets the remainder
+		actual_split_sizes[num_outputs - 1] = chunk_size + remainder
+
+	} else {
+		// Custom splits
+		actual_split_sizes = split_sizes
+
+		// Validate split sizes
+		total: uint = 0
+		for size in split_sizes {
+			total += size
+		}
+		if total != dim_size {
+			panic(fmt.tprintf("Split sizes sum to %d but dimension size is %d", total, dim_size))
+		}
+	}
+
+	num_splits := len(actual_split_sizes)
+	outputs := make([]^Tensor(T), num_splits, allocator)
+
+	current_offset: uint = 0
+
+	for i in 0 ..< num_splits {
+		// Create shape for this split
+		split_shape := make([]uint, rank, context.temp_allocator)
+		copy(split_shape, tensor.shape)
+		split_shape[axis_dim] = actual_split_sizes[i]
+
+		// Allocate output tensor
+		output := tensor_alloc(T, split_shape, true, allocator, loc)
+
+		// Calculate the offset in the input tensor for this split
+		offset := current_offset * tensor.strides[axis_dim]
+
+		// Create a view into the tensor starting at the offset
+		split_view := Tensor(T) {
+			data       = tensor.data[offset:],
+			shape      = split_shape,
+			strides    = tensor.strides,
+			contiguous = tensor.contiguous,
+			owns_data  = false,
+		}
+
+		data, allocated := get_strided_data(&split_view, split_shape, tensor.strides, allocator)
+		defer if allocated do delete(data, allocator)
+
+		copy(output.data, data)
+		outputs[i] = output
+
+		current_offset += actual_split_sizes[i]
+	}
+
+	return outputs
+}

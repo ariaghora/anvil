@@ -43,6 +43,7 @@ print :: proc(
 }
 
 
+@(private = "file")
 print_value :: proc(builder: ^strings.Builder, value: $T, loc := #caller_location) {
 	when T == f32 || T == f64 {
 		strings.write_string(builder, fmt.tprintf("%.6f", value))

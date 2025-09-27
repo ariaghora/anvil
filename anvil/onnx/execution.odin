@@ -27,21 +27,23 @@ run :: proc(model: ^ONNX($T), inputs: map[string]^tensor.Tensor(T)) -> ONNX_Erro
 	for op_idx, i in orders {
 		// Sanity check for each inputs before node execution
 		op := model.graph.nodes[op_idx]
-		for iname in op.inputs do ensure_tensor_non_nil(model.graph.tensors[iname], iname, op.op_type, true) or_return
 
 		switch op.op_type {
 /*===================================================================================================*/	
 //      SUPPORTED OPERATIONS
 /*===================================================================================================*/	
 		case "Add"               : run_add(op, model, allocator) or_return
+		case "Cast"              : run_cast(op, model, allocator) or_return
 		case "Concat"            : run_concat(op, model, allocator) or_return
 		case "Conv"              : run_conv(op, model, allocator) or_return
+		case "Constant"          : run_constant(op, model, allocator) or_return
 		case "Div"               : run_div(op, model, allocator) or_return
 		case "Exp"               : run_exp(op, model, allocator) or_return
 		case "Flatten"           : run_flatten(op, model, allocator) or_return
 		case "Gemm"              : run_gemm(op, model, allocator) or_return
 		case "GlobalAveragePool" : run_global_average_pool(op, model, allocator) or_return
 		case "MaxPool"           : run_max_pool(op, model, allocator) or_return
+		case "MatMul"            : run_matmul(op, model, allocator) or_return
 		case "Mul"               : run_mul(op, model, allocator) or_return
 		case "Relu"              : run_relu(op, model, allocator) or_return
 		case "Reshape"           : run_reshape(op, model, allocator) or_return
@@ -49,6 +51,7 @@ run :: proc(model: ^ONNX($T), inputs: map[string]^tensor.Tensor(T)) -> ONNX_Erro
 		case "Sigmoid"           : run_sigmoid(op, model, allocator) or_return
 		case "Slice"             : run_slice(op, model, allocator) or_return
 		case "Softmax"           : run_softmax(op, model, allocator) or_return
+		case "Split"             : run_split(op, model, allocator) or_return
 		case "Sub"               : run_sub(op, model, allocator) or_return
 		case "Transpose"         : run_transpose(op, model, allocator) or_return
 /*====================================================================================================*/	
@@ -285,6 +288,22 @@ run_conv :: proc(
 	return
 }
 
+run_constant :: proc(
+	op: ^Node($T),
+	model: ^ONNX(T),
+	allocator: runtime.Allocator,
+) -> (
+	err: ONNX_Error,
+) {
+	if model.opset_version < 12 do return Unsupported_Opset{"Constant", model.opset_version}
+
+	value, ok := op.attributes["value"].(^tensor.Tensor(T))
+	ensure(ok, "Only fetch `value` attribute for now")
+
+	model.graph.tensors[op.outputs[0]] = value
+	return
+}
+
 run_div :: proc(
 	op: ^Node($T),
 	model: ^ONNX(T),
@@ -453,6 +472,19 @@ run_global_average_pool :: proc(
 	return
 }
 
+run_matmul :: proc(
+	op: ^Node($T),
+	model: ^ONNX(T),
+	allocator: runtime.Allocator,
+) -> (
+	err: ONNX_Error,
+) {
+	inputs, outputs := op.inputs, op.outputs
+	x, y := model.graph.tensors[inputs[0]], model.graph.tensors[inputs[1]]
+	model.graph.tensors[outputs[0]] = tensor.matmul(x, y, allocator)
+	return
+}
+
 run_mul :: proc(
 	op: ^Node($T),
 	model: ^ONNX(T),
@@ -600,11 +632,11 @@ run_slice :: proc(
 			if ends[i] > int(x.shape[ax]) do ends[i] = int(x.shape[ax])
 		}
 
-		for start, i in starts {
-			slices[axes[i]] = tensor.Range {
+		for ax, i in axes {
+			slices[ax] = tensor.Range {
 				start = starts[i],
 				end   = ends[i],
-				step  = steps[i],
+				step  = steps == nil ? 1 : steps[i],
 			}
 		}
 	}
@@ -633,6 +665,32 @@ run_softmax :: proc(
 
 	out := tensor.softmax(x, axis, allocator)
 	model.graph.tensors[op.outputs[0]] = out
+	return
+}
+
+run_split :: proc(
+	op: ^Node($T),
+	model: ^ONNX(T),
+	allocator: runtime.Allocator,
+) -> (
+	err: ONNX_Error,
+) {
+	axis := int(op.attributes["axis"].(i64) or_else 0)
+	x := model.graph.tensors[op.inputs[0]]
+	split: ^tensor.Tensor(T) = nil
+	split_u: []uint
+	if len(op.inputs) == 2 {
+		split = model.graph.tensors[op.inputs[1]]
+		split_u = slice_cast(split.data, uint, context.temp_allocator)
+	}
+	num_outputs := uint(op.attributes["num_outputs"].(i64) or_else 0)
+	out := tensor.split(x, axis, split_u, num_outputs, allocator)
+	defer delete(out, allocator)
+
+	for o, i in out {
+		model.graph.tensors[op.outputs[i]] = o
+	}
+
 	return
 }
 
@@ -678,6 +736,21 @@ run_add :: proc(
 	inputs, outputs := op.inputs, op.outputs
 	x, y := model.graph.tensors[inputs[0]], model.graph.tensors[inputs[1]]
 	model.graph.tensors[outputs[0]] = tensor.add(x, y, allocator)
+	return
+}
+
+run_cast :: proc(
+	op: ^Node($T),
+	model: ^ONNX(T),
+	allocator: runtime.Allocator,
+) -> (
+	err: ONNX_Error,
+) {
+	// We don't do casting. All will be retargeted to T and handled internally
+	// in each node
+	inputs, outputs := op.inputs, op.outputs
+	x := model.graph.tensors[inputs[0]]
+	model.graph.tensors[outputs[0]] = x
 	return
 }
 
