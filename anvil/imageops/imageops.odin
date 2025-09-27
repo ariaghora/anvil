@@ -7,24 +7,66 @@ import "core:math"
 import "core:testing"
 
 Resize_Method :: enum {
+	Nearest,
 	Bilinear,
 }
 
-// TODO(Aria): this might be slow
 resize :: proc(
 	image_hwc: ^tensor.Tensor($T),
 	target_height, target_width: uint,
 	resize_method: Resize_Method,
 	allocator := context.allocator,
-) -> ^tensor.Tensor(T) {
+) -> ^tensor.Tensor(T) where (T == f16 || T == f32 || T == f64) {
 	using tensor
 
-	h, w, c := image_hwc.shape[0], image_hwc.shape[1], image_hwc.shape[2]
+	out_resized := tensor_alloc(
+		T,
+		{target_height, target_width, image_hwc.shape[2]},
+		true,
+		allocator,
+	)
 
+	if resize_method == .Bilinear {
+		resize_bilinear(image_hwc, out_resized, target_height, target_width)
+	} else if resize_method == .Nearest {
+		resize_nearest(image_hwc, out_resized, target_height, target_width)
+	}
+
+	return out_resized
+}
+
+resize_nearest :: proc(
+	image_in, image_out: ^tensor.Tensor($T),
+	target_height, target_width: uint,
+) {
+	h, w, c := image_in.shape[0], image_in.shape[1], image_in.shape[2]
+	x_ratio := f32(w) / f32(target_width)
+	y_ratio := f32(h) / f32(target_height)
+
+	for out_y in 0 ..< target_height {
+		for out_x in 0 ..< target_width {
+			// Find nearest source pixel
+			src_x := min(int(f32(out_x) * x_ratio + 0.5), int(w - 1))
+			src_y := min(int(f32(out_y) * y_ratio + 0.5), int(h - 1))
+
+			// Copy all channels
+			for ch in 0 ..< c {
+				src_idx := src_y * int(w * c) + src_x * int(c) + int(ch)
+				out_idx := int(out_y * target_width * c + out_x * c) + int(ch)
+				image_out.data[out_idx] = image_in.data[src_idx]
+			}
+		}
+	}
+}
+
+// TODO(Aria): this might be slow
+resize_bilinear :: proc(
+	image_in, image_out: ^tensor.Tensor($T),
+	target_height, target_width: uint,
+) {
+	h, w, c := image_in.shape[0], image_in.shape[1], image_in.shape[2]
 	x_ratio := f32(w - 1) / f32(target_width - 1) if target_width > 1 else 0
 	y_ratio := f32(h - 1) / f32(target_height - 1) if target_height > 1 else 0
-
-	out_resized := tensor_alloc(T, {target_height, target_width, c}, true, allocator)
 
 	for out_y in 0 ..< target_height {
 		for out_x in 0 ..< target_width {
@@ -42,28 +84,22 @@ resize :: proc(
 
 			for ch in 0 ..< c {
 				// Get the 4 corner pixels for this channel
-				a := image_hwc.data[y_l * int(w * c) + x_l * int(c) + int(ch)]
-				b := image_hwc.data[y_l * int(w * c) + x_h * int(c) + int(ch)]
-				c_val := image_hwc.data[y_h * int(w * c) + x_l * int(c) + int(ch)]
-				d := image_hwc.data[y_h * int(w * c) + x_h * int(c) + int(ch)]
+				a := image_in.data[y_l * int(w * c) + x_l * int(c) + int(ch)]
+				b := image_in.data[y_l * int(w * c) + x_h * int(c) + int(ch)]
+				c_val := image_in.data[y_h * int(w * c) + x_l * int(c) + int(ch)]
+				d := image_in.data[y_h * int(w * c) + x_h * int(c) + int(ch)]
 
 				// Bilinear interpolation
 				out_idx := int(out_y * target_width * c + out_x * c) + int(ch)
 
-				when T == f16 || T == f32 || T == f64 {
-					out_resized.data[out_idx] =
-						a * T(1 - x_weight) * T(1 - y_weight) +
-						b * T(x_weight) * T(1 - y_weight) +
-						c_val * T(y_weight) * T(1 - x_weight) +
-						d * T(x_weight * y_weight)
-				} else {
-					fmt.panicf("resize does not support %v", typeid_of(T))
-				}
+				image_out.data[out_idx] =
+					a * T(1 - x_weight) * T(1 - y_weight) +
+					b * T(x_weight) * T(1 - y_weight) +
+					c_val * T(y_weight) * T(1 - x_weight) +
+					d * T(x_weight * y_weight)
 			}
 		}
 	}
-
-	return out_resized
 }
 
 // Draw a rectangle outline on an image tensor in-place.

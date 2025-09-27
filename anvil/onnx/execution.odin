@@ -1,11 +1,18 @@
 package onnx
 
+import "../imageops"
 import "../tensor"
 import "base:runtime"
 import "core:fmt"
 import "core:math"
 import "core:slice"
 import "core:time"
+
+onnx_dbg_warn :: proc(fmt_str: string, args: ..any) {
+	when ODIN_DEBUG {
+		fmt.printfln(fmt_str, ..args)
+	}
+}
 
 run :: proc(model: ^ONNX($T), inputs: map[string]^tensor.Tensor(T)) -> ONNX_Error {
 	allocator := model.allocator
@@ -38,6 +45,7 @@ run :: proc(model: ^ONNX($T), inputs: map[string]^tensor.Tensor(T)) -> ONNX_Erro
 		case "Mul"               : run_mul(op, model, allocator) or_return
 		case "Relu"              : run_relu(op, model, allocator) or_return
 		case "Reshape"           : run_reshape(op, model, allocator) or_return
+		case "Resize"            : run_resize(op, model, allocator) or_return
 		case "Sigmoid"           : run_sigmoid(op, model, allocator) or_return
 		case "Slice"             : run_slice(op, model, allocator) or_return
 		case "Softmax"           : run_softmax(op, model, allocator) or_return
@@ -463,6 +471,62 @@ _range :: proc($T: typeid, n: uint, allocator := context.allocator) -> []T {
 	res := make([]T, n, allocator)
 	for i in 0 ..< n do res[i] = T(i)
 	return res
+}
+
+run_resize :: proc(
+	op: ^Node($T),
+	model: ^ONNX(T),
+	allocator: runtime.Allocator,
+) -> (
+	err: ONNX_Error,
+) {
+	x := model.graph.tensors[op.inputs[0]]
+	assert(len(x.shape) == 4, "Resize node can only accept 4D tensors")
+	assert(x.shape[0] == 1, "Resize node can only resize a size-1 batch for now")
+
+	x_hwc := tensor.permute(
+		tensor.squeeze(x, context.temp_allocator),
+		{1, 2, 0},
+		context.temp_allocator,
+	)
+
+	mode_str := op.attributes["mode"].(string) or_else "nearest"
+	resize_method: imageops.Resize_Method
+	if mode_str == "nearest" {
+		resize_method = .Nearest
+	} else if mode_str == "linear" {
+		resize_method = .Bilinear
+	} else {
+		fmt.panicf("Resize mode `%s` is unsupported", mode_str)
+	}
+
+	coordinate_transformation_mode, ok_ctm := op.attributes["coordinate_transformation_mode"].(string)
+	nearest_mode, ok_nm := op.attributes["nearest_mode"].(string)
+
+	// coordinate_transformation_mode is set!
+	if ok_ctm do onnx_dbg_warn("TODO(Aria): coordinate transformation mode `%v` is ignored, handle this in the future", coordinate_transformation_mode)
+	// nearest_mode is set!
+	if ok_nm do onnx_dbg_warn("Nearest mode is ignored, using whatever Anvil implemented")
+
+	target_h, target_w: uint
+	scales := model.graph.tensors[op.inputs[2]]
+	if scales != nil {
+		target_h = uint(f32(x_hwc.shape[0]) * scales.data[2])
+		target_w = uint(f32(x_hwc.shape[1]) * scales.data[3])
+	}
+	if len(op.inputs) > 3 {
+		sizes := model.graph.tensors[op.inputs[3]]
+		target_h = uint(sizes.data[2])
+		target_w = uint(sizes.data[3])
+	}
+
+	resized := imageops.resize(x_hwc, target_h, target_w, resize_method, context.temp_allocator)
+	model.graph.tensors[op.outputs[0]] = tensor.unsqueeze(
+		tensor.permute(resized, {2, 0, 1}, context.temp_allocator),
+		0,
+		allocator,
+	)
+	return
 }
 
 run_sigmoid :: proc(
