@@ -38,6 +38,7 @@ run :: proc(model: ^ONNX($T), inputs: map[string]^tensor.Tensor(T)) -> ONNX_Erro
 		case "Mul"               : run_mul(op, model, allocator) or_return
 		case "Relu"              : run_relu(op, model, allocator) or_return
 		case "Reshape"           : run_reshape(op, model, allocator) or_return
+		case "Sigmoid"           : run_sigmoid(op, model, allocator) or_return
 		case "Slice"             : run_slice(op, model, allocator) or_return
 		case "Softmax"           : run_softmax(op, model, allocator) or_return
 		case "Sub"               : run_sub(op, model, allocator) or_return
@@ -464,6 +465,28 @@ _range :: proc($T: typeid, n: uint, allocator := context.allocator) -> []T {
 	return res
 }
 
+run_sigmoid :: proc(
+	op: ^Node($T),
+	model: ^ONNX(T),
+	allocator: runtime.Allocator,
+) -> (
+	err: ONNX_Error,
+) {
+	x := model.graph.tensors[op.inputs[0]]
+	out := tensor.sigmoid(x, allocator)
+	model.graph.tensors[op.outputs[0]] = out
+	return
+}
+
+@(private = "file")
+slice_cast :: proc(s: []$TI, $TO: typeid, allocator := context.allocator) -> []TO {
+	res := make([]TO, len(s), allocator)
+	for v, i in s {
+		res[i] = TO(v)
+	}
+	return res
+}
+
 run_slice :: proc(
 	op: ^Node($T),
 	model: ^ONNX(T),
@@ -475,7 +498,6 @@ run_slice :: proc(
 
 	opset := model.opset_version
 	attributes := op.attributes
-
 
 	slices := make([]tensor.Slice, len(x.shape), context.temp_allocator)
 	for _, i in slices do slices[i] = tensor.Range{}
@@ -497,7 +519,30 @@ run_slice :: proc(
 		}
 	} else {
 		// 10..current: starts, ends, and steps are input tensors
-		panic("TODO (Aria): implemented yet slice for opset >= 10")
+		starts := slice_cast(model.graph.tensors[op.inputs[1]].data, int, context.temp_allocator)
+		ends := slice_cast(model.graph.tensors[op.inputs[2]].data, int, context.temp_allocator)
+		axes, steps: []int
+		if len(op.inputs) > 3 {
+			axes = slice_cast(model.graph.tensors[op.inputs[3]].data, int, context.temp_allocator)
+		}
+		if len(op.inputs) > 4 {
+			steps = slice_cast(model.graph.tensors[op.inputs[4]].data, int, context.temp_allocator)
+		}
+
+		// If the value passed to start or end is larger than the n (the number of elements in
+		// this dimension), it represents `n``
+		for ax, i in axes {
+			if starts[i] > int(x.shape[ax]) do starts[i] = int(x.shape[ax])
+			if ends[i] > int(x.shape[ax]) do ends[i] = int(x.shape[ax])
+		}
+
+		for start, i in starts {
+			slices[axes[i]] = tensor.Range {
+				start = starts[i],
+				end   = ends[i],
+				step  = steps[i],
+			}
+		}
 	}
 
 	out := tensor.slice(x, slices, allocator = allocator)
