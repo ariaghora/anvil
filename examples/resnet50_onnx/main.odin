@@ -6,10 +6,8 @@ import "../../anvil/onnx"
 import "../../anvil/tensor"
 import "../../anvil/trace"
 
-import "core:c/libc"
 import "core:fmt"
 import "core:mem"
-import vmem "core:mem/virtual"
 import "core:os/os2"
 import "core:slice"
 import "core:strings"
@@ -34,8 +32,12 @@ main :: proc() {
 		}
 	}
 
-	trace.init_trace()
-	defer trace.finish_trace()
+	when trace.TRACE do trace.global_init()
+	when trace.TRACE do defer {
+		trace.global_finish()
+		fmt.println(strings.to_string(trace.global_tracer.builder))
+		trace.global_destroy()
+	}
 
 	ensure(len(os2.args) == 2, "first positional argument must be an image path")
 	image_file_path := os2.args[1]
@@ -88,5 +90,4 @@ main :: proc() {
 
 	class_names := IMAGENET_CLASSES
 	fmt.println("Predicted class  : ", class_names[argmax])
-
 }

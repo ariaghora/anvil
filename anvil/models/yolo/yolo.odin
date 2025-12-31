@@ -160,19 +160,19 @@ forward_conv_block :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
-	conv_bn_trace := trace.TRACE_FUNCTION("conv2d_bn")
-	defer trace.end_scoped_trace(conv_bn_trace)
+	conv_bn_trace := trace.global_scoped("conv2d_bn")
+	defer trace.global_end_scoped(conv_bn_trace)
 
-	conv_trace := trace.TRACE_SECTION("conv2d")
+	conv_trace := trace.global_scoped("conv2d", "section")
 	conv_out := nn.forward_conv2d(layer.conv, x, allocator, loc)
 	defer tensor.free_tensor(conv_out, allocator = allocator)
-	trace.end_scoped_trace(conv_trace)
+	trace.global_end_scoped(conv_trace)
 
-	bn_trace := trace.TRACE_SECTION("batch_norm")
+	bn_trace := trace.global_scoped("batch_norm", "section")
 	bn_out := nn.forward_batch_norm_2d(layer.bn, conv_out, allocator, loc)
 	defer tensor.free_tensor(bn_out, allocator = allocator)
 	bn_out_silu := tensor.silu_fast(bn_out, allocator)
-	trace.end_scoped_trace(bn_trace)
+	trace.global_end_scoped(bn_trace)
 
 	return bn_out_silu
 }

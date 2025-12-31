@@ -11,8 +11,8 @@ upsample_nearest_2d :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
-	upsample_trace := trace.TRACE_FUNCTION("upsample_nearest_2d")
-	defer trace.end_scoped_trace(upsample_trace)
+	upsample_trace := trace.global_scoped("upsample_nearest_2d")
+	defer trace.global_end_scoped(upsample_trace)
 
 	// Extract dimensions
 	b, c, src_h, src_w := input.shape[0], input.shape[1], input.shape[2], input.shape[3]

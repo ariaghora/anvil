@@ -666,8 +666,8 @@ reshape :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
-	trace_reshape := trace.TRACE_FUNCTION("reshape")
-	defer trace.end_scoped_trace(trace_reshape)
+	trace_reshape := trace.global_scoped("reshape")
+	defer trace.global_end_scoped(trace_reshape)
 
 	// Check if total size matches
 	old_size := shape_to_size(arr.shape)
@@ -970,8 +970,8 @@ transpose :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
-	trace_transpose := trace.TRACE_FUNCTION(fmt.tprint("transpose", tensor.shape))
-	defer trace.end_scoped_trace(trace_transpose)
+	trace_transpose := trace.global_scoped(fmt.tprint("transpose", tensor.shape))
+	defer trace.global_end_scoped(trace_transpose)
 
 	if dim0 == dim1 {
 		out := tensor_alloc(T, tensor.shape, false, allocator, loc)
@@ -1435,8 +1435,8 @@ slice :: proc(
 	keepdims := false,
 	allocator := context.allocator,
 ) -> ^Tensor(T) {
-	trace_slice := trace.TRACE_FUNCTION("slice")
-	defer trace.end_scoped_trace(trace_slice)
+	trace_slice := trace.global_scoped("slice")
+	defer trace.global_end_scoped(trace_slice)
 
 	rank := len(input.shape)
 	assert(len(slices) <= rank, "ranges exceeding tensor rank")
@@ -1803,8 +1803,8 @@ flatten_all :: proc(tensor: ^Tensor($T), allocator := context.allocator) -> ^Ten
 // Applies softmax along the last dimension of a tensor
 // For a tensor of shape [..., N], applies softmax to each [...] slice over N elements
 softmax_last_dim_inplace :: proc(t: ^Tensor($T)) {
-	softmax_trace := trace.TRACE_FUNCTION("softmax_inplace")
-	defer trace.end_scoped_trace(softmax_trace)
+	softmax_trace := trace.global_scoped("softmax_inplace")
+	defer trace.global_end_scoped(softmax_trace)
 
 	// Calculate the number of softmax operations needed
 	// This is the product of all dimensions except the last
@@ -1942,8 +1942,8 @@ softmax_last_dim :: proc(t: ^Tensor($T), allocator := context.allocator) -> ^Ten
 // Applies softmax along the specified dimension of a tensor
 // Requires contiguous tensor for predictable performance
 softmax_inplace :: proc(t: ^Tensor($T), dim: uint) {
-	softmax_trace := trace.TRACE_FUNCTION("softmax_inplace")
-	defer trace.end_scoped_trace(softmax_trace)
+	softmax_trace := trace.global_scoped("softmax_inplace")
+	defer trace.global_end_scoped(softmax_trace)
 
 	ensure(t.contiguous, "softmax requires contiguous tensor")
 	ensure(dim < uint(len(t.shape)), "dimension index out of range for softmax")

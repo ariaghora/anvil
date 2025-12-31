@@ -240,8 +240,8 @@ add :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
-	trace_mul := trace.TRACE_FUNCTION("add")
-	defer trace.end_scoped_trace(trace_mul)
+	trace_mul := trace.global_scoped("add")
+	defer trace.global_end_scoped(trace_mul)
 
 	if slice.equal(a.shape, b.shape) && a.contiguous && b.contiguous {
 		when T == f32 && ODIN_OS == .Darwin {
@@ -259,8 +259,8 @@ mul :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
-	trace_mul := trace.TRACE_FUNCTION("mul")
-	defer trace.end_scoped_trace(trace_mul)
+	trace_mul := trace.global_scoped("mul")
+	defer trace.global_end_scoped(trace_mul)
 
 	if slice.equal(a.shape, b.shape) && a.contiguous && b.contiguous {
 		when T == f32 {
@@ -760,8 +760,8 @@ relu :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
-	relu_trace := trace.begin_scoped_trace("relu")
-	trace.end_scoped_trace(relu_trace)
+	relu_trace := trace.global_scoped("relu")
+	trace.global_end_scoped(relu_trace)
 	when T == f32 && ODIN_OS == .Darwin { 	// currently only darwin has maxf_batch
 		// max(0, x), and out.data is initialized with 0
 		out := tensor_alloc(T, tensor.shape, true, allocator, loc)
@@ -805,8 +805,8 @@ gelu :: proc(
 ) -> ^Tensor(T) where T == f32 ||
 	T == f64 ||
 	T == f16 {
-	gelu_trace := trace.TRACE_FUNCTION("gelu")
-	defer trace.end_scoped_trace(gelu_trace)
+	gelu_trace := trace.global_scoped("gelu")
+	defer trace.global_end_scoped(gelu_trace)
 
 	return elementwise_unary_op(tensor, .GELU, allocator, loc)
 }
@@ -818,8 +818,8 @@ silu :: proc(
 ) -> ^Tensor(T) where T == f32 ||
 	T == f64 ||
 	T == f16 {
-	silu_trace := trace.TRACE_FUNCTION("silu")
-	defer trace.end_scoped_trace(silu_trace)
+	silu_trace := trace.global_scoped("silu")
+	defer trace.global_end_scoped(silu_trace)
 
 	return elementwise_unary_op(tensor, .SILU, allocator, loc)
 }

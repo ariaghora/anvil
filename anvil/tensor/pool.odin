@@ -21,8 +21,8 @@ max_pool_2d :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
-	pool_trace := trace.TRACE_FUNCTION("max_pool_2d")
-	defer trace.end_scoped_trace(pool_trace)
+	pool_trace := trace.global_scoped("max_pool_2d")
+	defer trace.global_end_scoped(pool_trace)
 
 	b, c, h, w := input.shape[0], input.shape[1], input.shape[2], input.shape[3]
 	k_h, k_w := kernel_size[0], kernel_size[1]
@@ -180,8 +180,8 @@ global_avg_pool_2d :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
-	pool_trace := trace.TRACE_FUNCTION("global_avg_pool_2d")
-	defer trace.end_scoped_trace(pool_trace)
+	pool_trace := trace.global_scoped("global_avg_pool_2d")
+	defer trace.global_end_scoped(pool_trace)
 
 	// Extract dimensions
 	b, c, h, w := input.shape[0], input.shape[1], input.shape[2], input.shape[3]

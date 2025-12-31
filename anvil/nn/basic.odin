@@ -41,8 +41,8 @@ forward_linear :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
-	forward_linear_trace := trace.TRACE_FUNCTION("forward_linear")
-	defer trace.end_scoped_trace(forward_linear_trace)
+	forward_linear_trace := trace.global_scoped("forward_linear")
+	defer trace.global_end_scoped(forward_linear_trace)
 
 	out := tensor.matmul(x, l.w, allocator, loc)
 

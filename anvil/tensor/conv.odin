@@ -42,8 +42,8 @@ im2col :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^Tensor(T) {
-	conv_bn_trace := trace.TRACE_FUNCTION("im2col")
-	defer trace.end_scoped_trace(conv_bn_trace)
+	conv_bn_trace := trace.global_scoped("im2col")
+	defer trace.global_end_scoped(conv_bn_trace)
 
 	b, c, h, w := t.shape[0], t.shape[1], t.shape[2], t.shape[3]
 	h_out, w_out := get_hw(h, w, h_k, w_k, stride, dilation, padding)
@@ -57,7 +57,7 @@ im2col :: proc(
 	dst_size := b * h_out * w_out * c * h_k * w_k
 	dst := runtime.make_aligned([]T, dst_size, SIMD_ALIGNMENT, allocator, loc)
 
-	im2col_building := trace.TRACE_SECTION("im2col_building")
+	im2col_building := trace.global_scoped("im2col_building", "section")
 	if stride == 1 && dilation == 1 && t.contiguous {
 		if h_k == 1 && w_k == 1 {
 			im2col_fast_1x1(src, dst, b, c, h, w, h_out, w_out)
@@ -124,7 +124,7 @@ im2col :: proc(
 			t.strides,
 		)
 	}
-	trace.end_scoped_trace(im2col_building)
+	trace.global_end_scoped(im2col_building)
 	if allocated do delete(src)
 
 	t_out := tensor_alloc(T, []uint{b, h_out * w_out, c * h_k * w_k}, false, allocator, loc)
@@ -135,8 +135,8 @@ im2col :: proc(
 
 @(private = "file")
 im2col_fast_1x1 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
-	im2col_trace := trace.TRACE_FUNCTION("im2col_1x1")
-	defer trace.end_scoped_trace(im2col_trace)
+	im2col_trace := trace.global_scoped("im2col_1x1")
+	defer trace.global_end_scoped(im2col_trace)
 
 	hw := h * w
 	chw := c * hw
@@ -254,8 +254,8 @@ im2col_fast_1x1 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
 
 @(private = "file")
 im2col_fast_3x3_padding0 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
-	im2col_trace := trace.TRACE_FUNCTION("im2col_3x3")
-	defer trace.end_scoped_trace(im2col_trace)
+	im2col_trace := trace.global_scoped("im2col_3x3")
+	defer trace.global_end_scoped(im2col_trace)
 
 	dst_idx := 0
 	hw := h * w
@@ -284,8 +284,8 @@ im2col_fast_3x3_padding0 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint)
 
 @(private = "file")
 im2col_fast_3x3_padding1 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint) {
-	im2col_trace := trace.TRACE_FUNCTION("im2col_3x3_padding1")
-	defer trace.end_scoped_trace(im2col_trace)
+	im2col_trace := trace.global_scoped("im2col_3x3_padding1")
+	defer trace.global_end_scoped(im2col_trace)
 
 	hw := h * w
 	chw := c * hw
@@ -363,8 +363,8 @@ im2col_fast_3x3_padding1 :: proc(src, dst: []$T, b, c, h, w, h_out, w_out: uint)
 
 @(private = "file")
 im2col_fast_3x3_padding1_simd :: proc(src, dst: []f32, b, c, h, w, h_out, w_out: uint) {
-	im2col_trace := trace.TRACE_FUNCTION("im2col_3x3_padding1_simd")
-	defer trace.end_scoped_trace(im2col_trace)
+	im2col_trace := trace.global_scoped("im2col_3x3_padding1_simd")
+	defer trace.global_end_scoped(im2col_trace)
 
 	hw := h * w
 	chw := c * hw
@@ -543,7 +543,7 @@ im2col_general :: proc(
 	stride, dilation, padding: uint,
 	strides: []uint,
 ) {
-	im2col_trace := trace.TRACE_FUNCTION(
+	im2col_trace := trace.global_scoped(
 		fmt.tprintf(
 			"im2col_general_%dx%d_stride%d_dilation%d_padding%d",
 			h_k,
@@ -553,7 +553,7 @@ im2col_general :: proc(
 			padding,
 		),
 	)
-	defer trace.end_scoped_trace(im2col_trace)
+	defer trace.global_end_scoped(im2col_trace)
 	src_s0, src_s1, src_s2, src_s3 := strides[0], strides[1], strides[2], strides[3]
 
 	// Special case: stride=1, dilation=1 with padding can still be optimized
@@ -1020,8 +1020,8 @@ conv2d_grouped_sequential :: proc(
 	c_out_per_group := c_out / groups
 
 	// Sequential path for small workloads
-	grouped_conv_trace := trace.TRACE_SECTION("grouped_conv_sequential")
-	defer trace.end_scoped_trace(grouped_conv_trace)
+	grouped_conv_trace := trace.global_scoped("grouped_conv_sequential", "section")
+	defer trace.global_end_scoped(grouped_conv_trace)
 
 	for g in 0 ..< groups {
 		input_offset := g * c_in_per_group
@@ -1102,8 +1102,8 @@ conv2d_grouped_parallel :: proc(
 	c_out_per_group := c_out / groups
 
 	// Parallel path using thread pool
-	grouped_conv_trace := trace.TRACE_SECTION("grouped_conv_parallel")
-	defer trace.end_scoped_trace(grouped_conv_trace)
+	grouped_conv_trace := trace.global_scoped("grouped_conv_parallel", "section")
+	defer trace.global_end_scoped(grouped_conv_trace)
 
 	num_threads := min(int(groups), 4)
 	pool: thread.Pool
@@ -1310,15 +1310,15 @@ conv2d_single :: proc(
 
 	// Step 3: Batched matrix multiplication
 	// (B, H_out * W_out, C_in * K_h * K_w) @ (C_in * K_h * K_w, C_out) -> (B, H_out * W_out, C_out)
-	im2col_matmul_trace := trace.TRACE_SECTION("im2col_matmul")
+	im2col_matmul_trace := trace.global_scoped("im2col_matmul", "section")
 	result := matmul(col, kernel_transposed, allocator, loc)
 	defer free_tensor(result, allocator)
-	trace.end_scoped_trace(im2col_matmul_trace)
+	trace.global_end_scoped(im2col_matmul_trace)
 
 	// Step 4: Reshape back to (B, C_out, H_out, W_out)
-	reshape_back_get_strided_data_trace := trace.TRACE_SECTION("reshape_back_get_strided_data")
+	reshape_back_get_strided_data_trace := trace.global_scoped("reshape_back_get_strided_data", "section")
 	final := reshape_bhwc_to_bchw(result, b, h_out, w_out, c_out, allocator)
-	trace.end_scoped_trace(reshape_back_get_strided_data_trace)
+	trace.global_end_scoped(reshape_back_get_strided_data_trace)
 
 	return final
 }
@@ -1333,16 +1333,16 @@ conv2d_xwb :: proc(
 ) -> (
 	out: ^tensor.Tensor(T),
 ) {
-	conv2d_xwb_trace := trace.TRACE_FUNCTION("conv2d_xwb")
-	defer trace.end_scoped_trace(conv2d_xwb_trace)
+	conv2d_xwb_trace := trace.global_scoped("conv2d_xwb")
+	defer trace.global_end_scoped(conv2d_xwb_trace)
 
 	if groups == 1 {
-		conv2d_single_trace := trace.TRACE_SECTION("conv2d_single")
-		defer trace.end_scoped_trace(conv2d_single_trace)
+		conv2d_single_trace := trace.global_scoped("conv2d_single", "section")
+		defer trace.global_end_scoped(conv2d_single_trace)
 		out = tensor.conv2d_single(input, kernel, stride, dilation, padding, allocator, loc)
 	} else {
-		conv2d_grouped_trace := trace.TRACE_SECTION("conv2d_grouped")
-		defer trace.end_scoped_trace(conv2d_grouped_trace)
+		conv2d_grouped_trace := trace.global_scoped("conv2d_grouped", "section")
+		defer trace.global_end_scoped(conv2d_grouped_trace)
 		out = tensor.conv2d_grouped(
 			input,
 			kernel,
@@ -1357,8 +1357,8 @@ conv2d_xwb :: proc(
 
 	// Add bias if present
 	if bias, has_bias := bias.?; has_bias {
-		add_bias_trace := trace.TRACE_SECTION("add_bias")
-		defer trace.end_scoped_trace(add_bias_trace)
+		add_bias_trace := trace.global_scoped("add_bias", "section")
+		defer trace.global_end_scoped(add_bias_trace)
 
 		batch_size := out.shape[0]
 		out_channels := out.shape[1]

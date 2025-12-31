@@ -161,16 +161,16 @@ forward_conv_2d_bn :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
-	conv_bn_trace := trace.TRACE_FUNCTION("conv2d_bn")
-	defer trace.end_scoped_trace(conv_bn_trace)
+	conv_bn_trace := trace.global_scoped("conv2d_bn")
+	defer trace.global_end_scoped(conv_bn_trace)
 
-	conv_trace := trace.TRACE_SECTION("conv2d")
+	conv_trace := trace.global_scoped("conv2d", "section")
 	conv_out := nn.forward_conv2d(layer.conv, x, context.temp_allocator)
-	trace.end_scoped_trace(conv_trace)
+	trace.global_end_scoped(conv_trace)
 
-	bn_trace := trace.TRACE_SECTION("batch_norm")
+	bn_trace := trace.global_scoped("batch_norm", "section")
 	bn_out := nn.forward_batch_norm_2d(layer.bn, conv_out, allocator, loc)
-	trace.end_scoped_trace(bn_trace)
+	trace.global_end_scoped(bn_trace)
 
 	return bn_out
 }
@@ -207,14 +207,14 @@ forward_patch_embed :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
-	patch_embed_trace := trace.TRACE_FUNCTION("patch_embed")
-	defer trace.end_scoped_trace(patch_embed_trace)
+	patch_embed_trace := trace.global_scoped("patch_embed")
+	defer trace.global_end_scoped(patch_embed_trace)
 
 	conv1_out := forward_conv_2d_bn(pe.conv1, x, context.temp_allocator)
 
-	gelu_trace := trace.TRACE_SECTION("gelu_activation")
+	gelu_trace := trace.global_scoped("gelu_activation", "section")
 	gelu_out := gelu_fast(conv1_out, context.temp_allocator)
-	trace.end_scoped_trace(gelu_trace)
+	trace.global_end_scoped(gelu_trace)
 
 	conv2_out := forward_conv_2d_bn(pe.conv2, gelu_out, allocator, loc)
 	return conv2_out
@@ -257,27 +257,27 @@ forward_mb_conv :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
-	mbconv_trace := trace.TRACE_FUNCTION("mb_conv")
-	defer trace.end_scoped_trace(mbconv_trace)
+	mbconv_trace := trace.global_scoped("mb_conv")
+	defer trace.global_end_scoped(mbconv_trace)
 
 	shortcut := x
 
 	// Expansion
-	expansion_trace := trace.TRACE_SECTION("expansion")
+	expansion_trace := trace.global_scoped("expansion", "section")
 	conv1_out := forward_conv_2d_bn(mb.conv1, x, context.temp_allocator)
 	gelu1_out := gelu_fast(conv1_out, context.temp_allocator)
-	trace.end_scoped_trace(expansion_trace)
+	trace.global_end_scoped(expansion_trace)
 
 	// Depthwise
-	depthwise_trace := trace.TRACE_SECTION("depthwise")
+	depthwise_trace := trace.global_scoped("depthwise", "section")
 	conv2_out := forward_conv_2d_bn(mb.conv2, gelu1_out, context.temp_allocator)
 	gelu2_out := gelu_fast(conv2_out, context.temp_allocator)
-	trace.end_scoped_trace(depthwise_trace)
+	trace.global_end_scoped(depthwise_trace)
 
 	// Projection
-	projection_trace := trace.TRACE_SECTION("projection")
+	projection_trace := trace.global_scoped("projection", "section")
 	conv3_out := forward_conv_2d_bn(mb.conv3, gelu2_out, context.temp_allocator)
-	trace.end_scoped_trace(projection_trace)
+	trace.global_end_scoped(projection_trace)
 
 	// Check shapes before residual connection
 	if !slice.equal(conv3_out.shape, shortcut.shape) {
@@ -285,10 +285,10 @@ forward_mb_conv :: proc(
 	}
 
 	// Residual connection + final activation
-	residual_trace := trace.TRACE_SECTION("residual_connection")
+	residual_trace := trace.global_scoped("residual_connection", "section")
 	residual := tensor.add(conv3_out, shortcut, context.temp_allocator)
 	result := gelu_fast(residual, allocator, loc)
-	trace.end_scoped_trace(residual_trace)
+	trace.global_end_scoped(residual_trace)
 
 	return result
 }
@@ -577,8 +577,8 @@ forward_attention :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
-	forward_attention_trace := trace.TRACE_FUNCTION("forward_attention")
-	defer trace.end_scoped_trace(forward_attention_trace)
+	forward_attention_trace := trace.global_scoped("forward_attention")
+	defer trace.global_end_scoped(forward_attention_trace)
 
 	b, n := x.shape[0], x.shape[1]
 	h := attn.num_heads
@@ -607,7 +607,7 @@ forward_attention :: proc(
 	v := tensor.zeros(T, v_shape, context.temp_allocator)
 
 	// Optimized copy - do it in one pass with better memory access
-	qkv_copy_trace := trace.TRACE_FUNCTION("qkv_copy_matmul")
+	qkv_copy_trace := trace.global_scoped("qkv_copy_matmul")
 	total_elements := b * n * h
 	#no_bounds_check for i in 0 ..< total_elements {
 		batch_idx := i / (n * h)
@@ -632,9 +632,9 @@ forward_attention :: proc(
 			qkv_reshaped.data[base_src + 2 * d_k:base_src + 2 * d_k + d_v],
 		)
 	}
-	trace.end_scoped_trace(qkv_copy_trace)
+	trace.global_end_scoped(qkv_copy_trace)
 
-	qkv_permute_transpose_matmul_trace := trace.TRACE_FUNCTION("qkv_permute_transpose_matmul")
+	qkv_permute_transpose_matmul_trace := trace.global_scoped("qkv_permute_transpose_matmul")
 	// Reshape for attention: (B, N, H, D) -> (B, H, N, D)
 	q_transposed := tensor.permute(q, []uint{0, 2, 1, 3}, context.temp_allocator)
 	k_transposed := tensor.permute(k, []uint{0, 2, 1, 3}, context.temp_allocator)
@@ -644,7 +644,7 @@ forward_attention :: proc(
 	ndim := len(k_transposed.shape)
 	k_t := tensor.transpose(k_transposed, ndim - 1, ndim - 2, context.temp_allocator)
 	attn_scores := tensor.matmul(q_transposed, k_t, context.temp_allocator)
-	trace.end_scoped_trace(qkv_permute_transpose_matmul_trace)
+	trace.global_end_scoped(qkv_permute_transpose_matmul_trace)
 
 	// Scale scores in-place
 	scale := attn.scale
@@ -667,9 +667,9 @@ forward_attention :: proc(
 
 	// Softmax - do it in-place to avoid allocation
 	// Process each (batch, head) separately
-	attention_softmax_trace := trace.TRACE_FUNCTION("attention_softmax")
+	attention_softmax_trace := trace.global_scoped("attention_softmax")
 	tensor.softmax_last_dim_inplace(attn_scores)
-	trace.end_scoped_trace(attention_softmax_trace)
+	trace.global_end_scoped(attention_softmax_trace)
 
 	// Apply attention to values
 	attn_output := tensor.matmul(attn_scores, v_transposed, context.temp_allocator)
@@ -813,8 +813,8 @@ forward_tiny_vit_block :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
-	tiny_vit_block_trace := trace.TRACE_FUNCTION("tiny_vit_block")
-	defer trace.end_scoped_trace(tiny_vit_block_trace)
+	tiny_vit_block_trace := trace.global_scoped("tiny_vit_block")
+	defer trace.global_end_scoped(tiny_vit_block_trace)
 
 	h, w := block.input_resolution[0], block.input_resolution[1]
 	b, l, c := x.shape[0], x.shape[1], x.shape[2]
@@ -822,9 +822,9 @@ forward_tiny_vit_block :: proc(
 
 	// Skip windowing if input matches window size
 	if h == window_size && w == window_size {
-		global_attention_trace := trace.TRACE_SECTION("global_attention")
+		global_attention_trace := trace.global_scoped("global_attention", "section")
 		attn_out := forward_attention(block.attn, x, context.temp_allocator)
-		trace.end_scoped_trace(global_attention_trace)
+		trace.global_end_scoped(global_attention_trace)
 
 		// Add residual
 		xs := tensor.add(attn_out, x, context.temp_allocator)
@@ -849,7 +849,7 @@ forward_tiny_vit_block :: proc(
 		return result
 	}
 
-	win_attention_trace := trace.TRACE_SECTION("windowed_attention")
+	win_attention_trace := trace.global_scoped("windowed_attention", "section")
 
 	// Calculate padding
 	pad_h := (window_size - (h % window_size)) % window_size
@@ -964,7 +964,7 @@ forward_tiny_vit_block :: proc(
 		}
 	}
 
-	trace.end_scoped_trace(win_attention_trace)
+	trace.global_end_scoped(win_attention_trace)
 
 	// Local conv
 	xs_4d := tensor.reshape(result_3d, []uint{b, h, w, c}, context.temp_allocator)
@@ -1220,29 +1220,29 @@ forward_tiny_vit_5m :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
-	tiny_vit_trace := trace.TRACE_FUNCTION("tiny_vit_5m_forward")
-	defer trace.end_scoped_trace(tiny_vit_trace)
+	tiny_vit_trace := trace.global_scoped("tiny_vit_5m_forward")
+	defer trace.global_end_scoped(tiny_vit_trace)
 
 	// Patch embedding
 	patch_embedding := forward_patch_embed(model.patch_embed, x, context.temp_allocator)
 
 	// Layer 0
-	layer0_trace := trace.TRACE_SECTION("layer0_conv")
+	layer0_trace := trace.global_scoped("layer0_conv", "section")
 	xs := forward_conv_layer(model.layer0, patch_embedding, context.temp_allocator)
-	trace.end_scoped_trace(layer0_trace)
+	trace.global_end_scoped(layer0_trace)
 
 	// Remaining layers
 	for i in 0 ..< len(model.layers) {
 		layer := model.layers[i]
 		layer_name := fmt.aprintf("layer_%d_basic", i + 1, allocator = context.allocator)
 
-		layer_trace := trace.TRACE_SECTION(layer_name)
+		layer_trace := trace.global_scoped(layer_name, "section")
 		xs = forward_basic_layer(layer, xs, context.temp_allocator)
-		trace.end_scoped_trace(layer_trace)
+		trace.global_end_scoped(layer_trace)
 	}
 
 	// Neck: reshape to 4D and apply convolutions
-	neck_trace := trace.TRACE_SECTION("neck_processing")
+	neck_trace := trace.global_scoped("neck_processing", "section")
 	b := xs.shape[0]
 	c := xs.shape[2]
 
@@ -1258,7 +1258,7 @@ forward_tiny_vit_5m :: proc(
 	conv2_out := nn.forward_conv2d(model.neck_conv2, ln1_out, context.temp_allocator)
 
 	result := nn.forward_channel_layer_norm(model.neck_ln2, conv2_out, allocator, loc)
-	trace.end_scoped_trace(neck_trace)
+	trace.global_end_scoped(neck_trace)
 
 	return result
 }

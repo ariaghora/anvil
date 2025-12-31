@@ -5,12 +5,12 @@ import "../../anvil/io"
 import yl "../../anvil/models/yolo"
 import "../../anvil/onnx"
 import "../../anvil/tensor"
+import "../../anvil/trace"
 import "core:fmt"
-import "core:image/qoi"
-import "core:math"
 import "core:mem"
 import "core:os/os2"
 import "core:slice"
+import "core:strings"
 import "core:time"
 
 THRESHOLD_NMS :: 0.45
@@ -135,6 +135,13 @@ main :: proc() {
 	)
 	inputs := make(map[string]^tensor.Tensor(T), context.temp_allocator)
 	inputs["images"] = input_t
+
+	when trace.TRACE do trace.global_init()
+	when trace.TRACE do defer {
+		trace.global_finish()
+		fmt.println(strings.to_string(trace.global_tracer.builder))
+		trace.global_destroy()
+	}
 
 	st := time.now()
 	err_run := onnx.run(model, inputs)

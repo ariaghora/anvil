@@ -381,8 +381,8 @@ forward_layer_norm_1d :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
-	forward_layer_norm_trace := trace.TRACE_FUNCTION("forward_layer_norm_1d")
-	defer trace.end_scoped_trace(forward_layer_norm_trace)
+	forward_layer_norm_trace := trace.global_scoped("forward_layer_norm_1d")
+	defer trace.global_end_scoped(forward_layer_norm_trace)
 
 	// Get dimensions
 	normalized_dim := ln.normalized_shape[0]

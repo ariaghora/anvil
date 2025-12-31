@@ -26,7 +26,6 @@
 //   - All strings (node names, tensor names, op types) point directly into raw_bytes.
 //     Do NOT free raw_bytes while the model is still in use.
 //   - raw_embedded=true means caller owns raw_bytes; false means we own it.
-//   - Tensor attributes in free_onnx are not yet freed (TODO in code).
 //
 // Platform assumptions:
 //   - Float parsing assumes little-endian byte order (x86, ARM).

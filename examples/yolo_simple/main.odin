@@ -223,8 +223,12 @@ main :: proc() {
 	input_t, orig_w, orig_h, resize_w, resize_h := load_image(image_path, context.temp_allocator)
 
 	// Do inference!
-	trace.init_trace()
-	defer trace.finish_trace()
+	when trace.TRACE do trace.global_init()
+	when trace.TRACE do defer {
+		trace.global_finish()
+		fmt.println(strings.to_string(trace.global_tracer.builder))
+		trace.global_destroy()
+	}
 
 	t := time.now()
 	pred, anchors, strides := yolo.forward_yolo(model, input_t)
