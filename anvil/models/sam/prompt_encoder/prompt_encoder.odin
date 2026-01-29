@@ -23,7 +23,6 @@ pe_encoding :: proc(
 ) -> ^tensor.Tensor(T) {
 	// coords = coords * 2 - 1 (affine transformation)
 	coords_transformed := tensor.clone(coords, allocator)
-	defer tensor.free_tensor(coords_transformed, allocator = allocator)
 	for v, i in coords_transformed.data {
 		coords_transformed.data[i] = coords_transformed.data[i] * 2 - 1
 	}
@@ -34,19 +33,22 @@ pe_encoding :: proc(
 		pe.positional_encoding_gaussian_matrix,
 		allocator,
 	)
-	defer tensor.free_tensor(coords_encoded, allocator = allocator)
 
 	// Multiply by 2π
 	two_pi := tensor.new_with_init([]T{T(2 * math.PI)}, []uint{}, allocator)
-	defer tensor.free_tensor(two_pi, allocator = allocator)
 	coords_scaled_pi := tensor.mul(coords_encoded, two_pi, allocator)
-	defer tensor.free_tensor(coords_scaled_pi, allocator = allocator)
 
 	// Get sin and cos
 	sin_coords := tensor.sin(coords_scaled_pi, allocator)
-	defer tensor.free_tensor(sin_coords, allocator = allocator)
 	cos_coords := tensor.cos(coords_scaled_pi, allocator)
-	defer tensor.free_tensor(cos_coords, allocator = allocator)
+	defer {
+		tensor.free_tensor(coords_transformed, allocator = allocator)
+		tensor.free_tensor(coords_encoded, allocator = allocator)
+		tensor.free_tensor(two_pi, allocator = allocator)
+		tensor.free_tensor(coords_scaled_pi, allocator = allocator)
+		tensor.free_tensor(sin_coords, allocator = allocator)
+		tensor.free_tensor(cos_coords, allocator = allocator)
+	}
 
 	// Concatenate along last dimension
 	result := tensor.cat(
@@ -65,34 +67,34 @@ forward_position_embedding :: proc(
 ) -> ^tensor.Tensor(T) {
 	// Create x coordinates: [0, 1, ..., w-1] + 0.5
 	x_embed_norm := tensor.arange(T, w, allocator)
-	defer tensor.free_tensor(x_embed_norm, allocator = allocator)
 	for v, i in x_embed_norm.data do x_embed_norm.data[i] = (v + T(0.5)) / T(w)
-
 	x_embed_reshaped := tensor.reshape(x_embed_norm, []uint{1, w}, allocator)
-	defer tensor.free_tensor(x_embed_reshaped, allocator = allocator)
 	x_embed_broadcast := tensor.broadcast_as(x_embed_reshaped, []uint{h, w}, allocator)
-	defer tensor.free_tensor(x_embed_broadcast, allocator = allocator)
 
 	// Create y coordinates similarly
 	y_embed_norm := tensor.arange(T, h, allocator)
-	defer tensor.free_tensor(y_embed_norm, allocator = allocator)
 	for v, i in y_embed_norm.data do y_embed_norm.data[i] = (v + T(0.5)) / T(h)
 	y_embed_reshaped := tensor.reshape(y_embed_norm, []uint{h, 1}, allocator)
-	defer tensor.free_tensor(y_embed_reshaped, allocator = allocator)
 	y_embed_broadcast := tensor.broadcast_as(y_embed_reshaped, []uint{h, w}, allocator)
-	defer tensor.free_tensor(y_embed_broadcast, allocator = allocator)
+
 	coords := tensor.stack(
 		[]^tensor.Tensor(T){x_embed_broadcast, y_embed_broadcast},
 		2, // last axis
 		allocator,
 	)
-	defer tensor.free_tensor(coords, allocator = allocator)
-
 	encoded := pe_encoding(pe, coords, allocator)
-	defer tensor.free_tensor(encoded, allocator = allocator)
-	result := tensor.permute(encoded, []uint{2, 0, 1}, allocator)
+	defer {
+		tensor.free_tensor(x_embed_norm, allocator = allocator)
+		tensor.free_tensor(x_embed_reshaped, allocator = allocator)
+		tensor.free_tensor(x_embed_broadcast, allocator = allocator)
+		tensor.free_tensor(y_embed_norm, allocator = allocator)
+		tensor.free_tensor(y_embed_reshaped, allocator = allocator)
+		tensor.free_tensor(y_embed_broadcast, allocator = allocator)
+		tensor.free_tensor(coords, allocator = allocator)
+		tensor.free_tensor(encoded, allocator = allocator)
+	}
 
-	return result
+	return tensor.permute(encoded, []uint{2, 0, 1}, allocator)
 }
 
 forward_position_embedding_with_coords :: proc(
@@ -102,16 +104,17 @@ forward_position_embedding_with_coords :: proc(
 	allocator := context.allocator,
 ) -> ^tensor.Tensor(T) {
 	coords0 := tensor.slice(coords_input, {{}, {}, R(0, 1)}, allocator = allocator)
-	defer tensor.free_tensor(coords0, allocator = allocator)
 	for v, i in coords0.data do coords0.data[i] /= T(image_h)
 	coords1 := tensor.slice(coords_input, {{}, {}, R(1, 2)}, allocator = allocator)
-	defer tensor.free_tensor(coords1, allocator = allocator)
 	for v, i in coords1.data do coords1.data[i] /= T(image_w)
 	c := len(coords_input.shape) - 1
 	coords := tensor.cat([]^tensor.Tensor(T){coords0, coords1}, uint(c), allocator)
-	defer tensor.free_tensor(coords, allocator = allocator)
-	result := pe_encoding(pe, coords, allocator)
-	return result
+	defer {
+		tensor.free_tensor(coords0, allocator = allocator)
+		tensor.free_tensor(coords1, allocator = allocator)
+		tensor.free_tensor(coords, allocator = allocator)
+	}
+	return pe_encoding(pe, coords, allocator)
 }
 
 Prompt_Encoder :: struct($T: typeid) {
@@ -244,7 +247,6 @@ prompt_encoder_embed_points :: proc(
 	allocator := context.allocator,
 ) -> ^tensor.Tensor(T) {
 	points := tensor.clone(points_in, allocator)
-	defer tensor.free_tensor(points, allocator = allocator)
 	for i in 0 ..< len(points.data) do points.data[i] += T(0.5)
 
 	// Handle padding
@@ -252,17 +254,15 @@ prompt_encoder_embed_points :: proc(
 	points_final: ^tensor.Tensor(T)
 	if pad {
 		points_padded := tensor.zeros(T, {points.shape[0], 1, 2}, allocator)
-		defer tensor.free_tensor(points_padded, allocator = allocator)
 		labels_padded := tensor.new_with_init([]T{-1}, {labels_in.shape[0], 1}, allocator)
-		defer tensor.free_tensor(labels_padded, allocator = allocator)
 		points_final = tensor.cat([]^tensor.Tensor(T){points, points_padded}, 1, allocator)
 		labels = tensor.cat([]^tensor.Tensor(T){labels_in, labels_padded}, 1, allocator)
+		tensor.free_tensor(points_padded, allocator = allocator)
+		tensor.free_tensor(labels_padded, allocator = allocator)
 	} else {
 		points_final = tensor.clone(points, allocator)
 		labels = tensor.clone(labels_in, allocator)
 	}
-	defer tensor.free_tensor(points_final, allocator = allocator)
-	defer tensor.free_tensor(labels, allocator = allocator)
 
 	// Get point embeddings
 	point_embedding := forward_position_embedding_with_coords(
@@ -272,7 +272,12 @@ prompt_encoder_embed_points :: proc(
 		uint(pe.input_image_size.y),
 		allocator,
 	)
-	defer tensor.free_tensor(point_embedding, allocator = allocator)
+	defer {
+		tensor.free_tensor(points, allocator = allocator)
+		tensor.free_tensor(points_final, allocator = allocator)
+		tensor.free_tensor(labels, allocator = allocator)
+		tensor.free_tensor(point_embedding, allocator = allocator)
+	}
 
 	n_points := points_final.shape[1]
 	embed_dim := pe.point_embeddings[0].embedding_dim

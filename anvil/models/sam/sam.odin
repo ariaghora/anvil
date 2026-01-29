@@ -70,26 +70,19 @@ forward_sam_for_embedding :: proc(
 		uint(sam.prompt_encoder.image_embedding_size[1]),
 		allocator,
 	)
-	defer tensor.free_tensor(image_pe_raw, allocator = allocator)
 	image_pe := tensor.unsqueeze(image_pe_raw, 0, allocator)
-	defer tensor.free_tensor(image_pe, allocator = allocator)
 
 	// Build flat array of scaled coordinates
 	n_points: uint = len(points)
 	xys := make([]f32, n_points * 2, allocator)
-	defer delete(xys, allocator)
 	labels := make([]f32, n_points, allocator)
-	defer delete(labels, allocator)
-	// original_w, original_h := input.shape[2], input.shape[3]
 	for point, i in points {
 		xys[i * 2] = f32(point.x) * f32(original_w)
 		xys[i * 2 + 1] = f32(point.y) * f32(original_h)
 		labels[i] = point.is_positive ? 1.0 : 0.0
 	}
 	points_tensor := tensor.new_with_init(xys, []uint{1, n_points, 2}, allocator)
-	defer tensor.free_tensor(points_tensor, allocator = allocator)
 	labels_tensor := tensor.new_with_init(labels, []uint{1, n_points}, allocator)
-	defer tensor.free_tensor(labels_tensor, allocator = allocator)
 
 	// Prompt encoder forward
 	sparse_prompt_embeddings, dense_prompt_embeddings := pe.forward_prompt_encoder(
@@ -98,8 +91,15 @@ forward_sam_for_embedding :: proc(
 		labels_tensor,
 		allocator,
 	)
-	defer tensor.free_tensor(sparse_prompt_embeddings, allocator = allocator)
-	defer tensor.free_tensor(dense_prompt_embeddings, allocator = allocator)
+	defer {
+		tensor.free_tensor(image_pe_raw, image_pe, allocator = allocator)
+		delete(xys, allocator)
+		delete(labels, allocator)
+		tensor.free_tensor(points_tensor, allocator = allocator)
+		tensor.free_tensor(labels_tensor, allocator = allocator)
+		tensor.free_tensor(sparse_prompt_embeddings, allocator = allocator)
+		tensor.free_tensor(dense_prompt_embeddings, allocator = allocator)
+	}
 
 	return md.forward_mask_decoder(
 		sam.mask_decoder,

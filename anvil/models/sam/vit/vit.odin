@@ -212,12 +212,15 @@ forward_patch_embed :: proc(
 	defer trace.global_end_scoped(patch_embed_trace)
 
 	conv1_out := forward_conv_2d_bn(pe.conv1, x, allocator)
-	defer tensor.free_tensor(conv1_out, allocator = allocator)
 
 	gelu_trace := trace.global_scoped("gelu_activation", "section")
 	gelu_out := gelu_fast(conv1_out, allocator)
-	defer tensor.free_tensor(gelu_out, allocator = allocator)
 	trace.global_end_scoped(gelu_trace)
+
+	defer {
+		tensor.free_tensor(conv1_out, allocator = allocator)
+		tensor.free_tensor(gelu_out, allocator = allocator)
+	}
 
 	conv2_out := forward_conv_2d_bn(pe.conv2, gelu_out, allocator, loc)
 	return conv2_out
@@ -268,24 +271,27 @@ forward_mb_conv :: proc(
 	// Expansion
 	expansion_trace := trace.global_scoped("expansion", "section")
 	conv1_out := forward_conv_2d_bn(mb.conv1, x, allocator)
-	defer tensor.free_tensor(conv1_out, allocator = allocator)
 	gelu1_out := gelu_fast(conv1_out, allocator)
-	defer tensor.free_tensor(gelu1_out, allocator = allocator)
 	trace.global_end_scoped(expansion_trace)
 
 	// Depthwise
 	depthwise_trace := trace.global_scoped("depthwise", "section")
 	conv2_out := forward_conv_2d_bn(mb.conv2, gelu1_out, allocator)
-	defer tensor.free_tensor(conv2_out, allocator = allocator)
 	gelu2_out := gelu_fast(conv2_out, allocator)
-	defer tensor.free_tensor(gelu2_out, allocator = allocator)
 	trace.global_end_scoped(depthwise_trace)
 
 	// Projection
 	projection_trace := trace.global_scoped("projection", "section")
 	conv3_out := forward_conv_2d_bn(mb.conv3, gelu2_out, allocator)
-	defer tensor.free_tensor(conv3_out, allocator = allocator)
 	trace.global_end_scoped(projection_trace)
+
+	defer {
+		tensor.free_tensor(conv1_out, allocator = allocator)
+		tensor.free_tensor(gelu1_out, allocator = allocator)
+		tensor.free_tensor(conv2_out, allocator = allocator)
+		tensor.free_tensor(gelu2_out, allocator = allocator)
+		tensor.free_tensor(conv3_out, allocator = allocator)
+	}
 
 	// Check shapes before residual connection
 	if !slice.equal(conv3_out.shape, shortcut.shape) {
@@ -369,22 +375,24 @@ forward_patch_merging :: proc(
 		permuted = tensor.permute(reshaped, []uint{0, 3, 1, 2}, allocator)
 		xs = permuted
 	}
-	defer if reshaped != nil do tensor.free_tensor(reshaped, allocator = allocator)
-	defer if permuted != nil do tensor.free_tensor(permuted, allocator = allocator)
+	defer {
+		if reshaped != nil do tensor.free_tensor(reshaped, allocator = allocator)
+		if permuted != nil do tensor.free_tensor(permuted, allocator = allocator)
+	}
 
 	// Apply convolutions
 	conv1_out := forward_conv_2d_bn(pm.conv1, xs, allocator)
-	defer tensor.free_tensor(conv1_out, allocator = allocator)
 	gelu1_out := gelu_fast(conv1_out, allocator)
-	defer tensor.free_tensor(gelu1_out, allocator = allocator)
-
 	conv2_out := forward_conv_2d_bn(pm.conv2, gelu1_out, allocator)
-	defer tensor.free_tensor(conv2_out, allocator = allocator)
 	gelu2_out := gelu_fast(conv2_out, allocator)
-	defer tensor.free_tensor(gelu2_out, allocator = allocator)
-
 	conv3_out := forward_conv_2d_bn(pm.conv3, gelu2_out, allocator)
-	defer tensor.free_tensor(conv3_out, allocator = allocator)
+	defer {
+		tensor.free_tensor(conv1_out, allocator = allocator)
+		tensor.free_tensor(gelu1_out, allocator = allocator)
+		tensor.free_tensor(conv2_out, allocator = allocator)
+		tensor.free_tensor(gelu2_out, allocator = allocator)
+		tensor.free_tensor(conv3_out, allocator = allocator)
+	}
 
 	// Flatten and transpose: (B, C, H, W) -> (B, C, H*W) -> (B, H*W, C)
 	b := conv3_out.shape[0]
@@ -611,68 +619,54 @@ forward_attention :: proc(
 	d_k := attn.key_dim
 	d_v := attn.d
 
-	// Layer norm
+	// Layer norm and QKV projection
 	xs := nn.forward_layer_norm_1d(attn.norm, x, allocator)
-	defer tensor.free_tensor(xs, allocator = allocator)
-
-	// QKV projection
 	qkv := nn.forward_linear(attn.qkv, xs, allocator)
-	defer tensor.free_tensor(qkv, allocator = allocator)
-
-	// Reshape QKV and split into Q, K, V
 	qkv_reshaped := tensor.reshape(qkv, []uint{b, n, h, 2 * d_k + d_v}, allocator)
-	defer tensor.free_tensor(qkv_reshaped, allocator = allocator)
+	defer {
+		tensor.free_tensor(xs, allocator = allocator)
+		tensor.free_tensor(qkv, allocator = allocator)
+		tensor.free_tensor(qkv_reshaped, allocator = allocator)
+	}
 
+	// Split into Q, K, V and permute for attention
 	q := tensor.slice(qkv_reshaped, {{}, {}, {}, tensor.R(0, int(d_k))}, allocator = allocator)
-	defer tensor.free_tensor(q, allocator = allocator)
 	k := tensor.slice(qkv_reshaped, {{}, {}, {}, tensor.R(int(d_k), int(2 * d_k))}, allocator = allocator)
-	defer tensor.free_tensor(k, allocator = allocator)
 	v := tensor.slice(qkv_reshaped, {{}, {}, {}, tensor.R(int(2 * d_k), int(2 * d_k + d_v))}, allocator = allocator)
-	defer tensor.free_tensor(v, allocator = allocator)
-
-	qkv_permute_transpose_matmul_trace := trace.global_scoped("qkv_permute_transpose_matmul")
-	// Reshape for attention: (B, N, H, D) -> (B, H, N, D)
 	q_transposed := tensor.permute(q, []uint{0, 2, 1, 3}, allocator)
-	defer tensor.free_tensor(q_transposed, allocator = allocator)
 	k_transposed := tensor.permute(k, []uint{0, 2, 1, 3}, allocator)
-	defer tensor.free_tensor(k_transposed, allocator = allocator)
 	v_transposed := tensor.permute(v, []uint{0, 2, 1, 3}, allocator)
-	defer tensor.free_tensor(v_transposed, allocator = allocator)
+	defer {
+		tensor.free_tensor(q, k, v, allocator = allocator)
+		tensor.free_tensor(q_transposed, k_transposed, v_transposed, allocator = allocator)
+	}
 
-	// Attention computation: Q @ K^T
-	ndim := len(k_transposed.shape)
-	k_t := tensor.transpose(k_transposed, ndim - 1, ndim - 2, allocator)
-	defer tensor.free_tensor(k_t, allocator = allocator)
+	// Attention: Q @ K^T, scale, add bias, softmax
+	qkv_permute_transpose_matmul_trace := trace.global_scoped("qkv_permute_transpose_matmul")
+	k_t := tensor.transpose(k_transposed, len(k_transposed.shape) - 1, len(k_transposed.shape) - 2, allocator)
 	attn_scores := tensor.matmul(q_transposed, k_t, allocator)
-	defer tensor.free_tensor(attn_scores, allocator = allocator)
 	trace.global_end_scoped(qkv_permute_transpose_matmul_trace)
-
 	tensor.scale(attn_scores, attn.scale)
-
 	attn_scores_biased := tensor.add(attn_scores, attn.ab, allocator)
 	tensor.free_tensor(attn_scores, allocator = allocator)
-	attn_scores = attn_scores_biased
 
-	// Softmax - do it in-place to avoid allocation
-	// Process each (batch, head) separately
 	attention_softmax_trace := trace.global_scoped("attention_softmax")
-	tensor.softmax_last_dim_inplace(attn_scores)
+	tensor.softmax_last_dim_inplace(attn_scores_biased)
 	trace.global_end_scoped(attention_softmax_trace)
 
-	// Apply attention to values
-	attn_output := tensor.matmul(attn_scores, v_transposed, allocator)
-	defer tensor.free_tensor(attn_output, allocator = allocator)
-
-	// Reshape back: (B, H, N, D) -> (B, N, H*D)
+	// Apply attention to values and reshape back
+	attn_output := tensor.matmul(attn_scores_biased, v_transposed, allocator)
 	output_transposed := tensor.permute(attn_output, []uint{0, 2, 1, 3}, allocator)
-	defer tensor.free_tensor(output_transposed, allocator = allocator)
 	output_reshaped := tensor.reshape(output_transposed, []uint{b, n, h * d_v}, allocator)
-	defer tensor.free_tensor(output_reshaped, allocator = allocator)
+	defer {
+		tensor.free_tensor(k_t, allocator = allocator)
+		tensor.free_tensor(attn_scores_biased, allocator = allocator)
+		tensor.free_tensor(attn_output, allocator = allocator)
+		tensor.free_tensor(output_transposed, allocator = allocator)
+		tensor.free_tensor(output_reshaped, allocator = allocator)
+	}
 
-	// Final projection
-	result := nn.forward_linear(attn.proj, output_reshaped, allocator, loc)
-
-	return result
+	return nn.forward_linear(attn.proj, output_reshaped, allocator, loc)
 }
 
 free_attention :: proc(attn: ^Attention($T), allocator := context.allocator) {
@@ -717,16 +711,15 @@ forward_mlp :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
-	start_time := time.now()
 	norm_out := nn.forward_layer_norm_1d(mlp.norm, x, allocator)
-	defer tensor.free_tensor(norm_out, allocator = allocator)
 	fc1_out := nn.forward_linear(mlp.fc1, norm_out, allocator)
-	defer tensor.free_tensor(fc1_out, allocator = allocator)
 	gelu_out := gelu_fast(fc1_out, allocator)
-	defer tensor.free_tensor(gelu_out, allocator = allocator)
-	fc2_out := nn.forward_linear(mlp.fc2, gelu_out, allocator, loc)
-	duration := time.since(start_time)
-	return fc2_out
+	defer {
+		tensor.free_tensor(norm_out, allocator = allocator)
+		tensor.free_tensor(fc1_out, allocator = allocator)
+		tensor.free_tensor(gelu_out, allocator = allocator)
+	}
+	return nn.forward_linear(mlp.fc2, gelu_out, allocator, loc)
 }
 
 free_mlp :: proc(mlp: ^Mlp($T), allocator := context.allocator) {
@@ -814,66 +807,50 @@ forward_tiny_vit_block :: proc(
 	if h == window_size && w == window_size {
 		global_attention_trace := trace.global_scoped("global_attention", "section")
 		attn_out := forward_attention(block.attn, x, allocator)
-		defer tensor.free_tensor(attn_out, allocator = allocator)
 		trace.global_end_scoped(global_attention_trace)
 
-		// Add residual
 		xs := tensor.add(attn_out, x, allocator)
-		defer tensor.free_tensor(xs, allocator = allocator)
-
-		// Local conv: [b, l, c] -> [b, c, h, w] -> conv -> [b, l, c]
 		xs_transposed := tensor.transpose(xs, 1, 2, allocator)
-		defer tensor.free_tensor(xs_transposed, allocator = allocator)
 		xs_conv := tensor.reshape(xs_transposed, []uint{b, c, h, w}, allocator)
-		defer tensor.free_tensor(xs_conv, allocator = allocator)
 		conv_out := forward_conv_2d_bn(block.local_conv, xs_conv, allocator)
-		defer tensor.free_tensor(conv_out, allocator = allocator)
 		conv_flat := tensor.reshape(conv_out, []uint{b, c, l}, allocator)
-		defer tensor.free_tensor(conv_flat, allocator = allocator)
 		conv_final := tensor.transpose(conv_flat, 1, 2, allocator)
-		defer tensor.free_tensor(conv_final, allocator = allocator)
-
-		// MLP with residual
 		mlp_out := forward_mlp(block.mlp, conv_final, allocator)
-		defer tensor.free_tensor(mlp_out, allocator = allocator)
-		result := tensor.add(conv_final, mlp_out, allocator, loc)
+		defer {
+			tensor.free_tensor(attn_out, allocator = allocator)
+			tensor.free_tensor(xs, allocator = allocator)
+			tensor.free_tensor(xs_transposed, allocator = allocator)
+			tensor.free_tensor(xs_conv, allocator = allocator)
+			tensor.free_tensor(conv_out, allocator = allocator)
+			tensor.free_tensor(conv_flat, allocator = allocator)
+			tensor.free_tensor(conv_final, allocator = allocator)
+			tensor.free_tensor(mlp_out, allocator = allocator)
+		}
 
-		return result
+		return tensor.add(conv_final, mlp_out, allocator, loc)
 	}
 
 	win_attention_trace := trace.global_scoped("windowed_attention", "section")
-
-	// Reshape to spatial: [B, L, C] -> [B, H, W, C]
 	x_spatial := tensor.reshape(x, []uint{b, h, w, c}, allocator)
-	defer tensor.free_tensor(x_spatial, allocator = allocator)
-
-	// Partition into windows: [B, H, W, C] -> [n_windows, window_size^2, C]
 	windows := tensor.window_partition(x_spatial, window_size, allocator)
-	defer tensor.free_tensor(windows, allocator = allocator)
-
-	// Apply attention
 	attn_windows := forward_attention(block.attn, windows, allocator)
-	defer tensor.free_tensor(attn_windows, allocator = allocator)
-
-	// Merge windows back and add residual: -> [B, H, W, C]
 	result_4d := tensor.window_unpartition_residual(attn_windows, x, b, {h, w}, window_size, allocator)
-	defer tensor.free_tensor(result_4d, allocator = allocator)
-
 	trace.global_end_scoped(win_attention_trace)
 
-	// Local conv: [B, H, W, C] -> [B, C, H, W]
 	xs_conv := tensor.permute(result_4d, []uint{0, 3, 1, 2}, allocator)
-	defer tensor.free_tensor(xs_conv, allocator = allocator)
 	conv_out := forward_conv_2d_bn(block.local_conv, xs_conv, allocator)
-	defer tensor.free_tensor(conv_out, allocator = allocator)
 	conv_flat := tensor.reshape(conv_out, []uint{b, c, l}, allocator)
-	defer tensor.free_tensor(conv_flat, allocator = allocator)
 	conv_final := tensor.transpose(conv_flat, 1, 2, allocator)
-	defer tensor.free_tensor(conv_final, allocator = allocator)
-
-	// MLP with residual
 	mlp_out := forward_mlp(block.mlp, conv_final, allocator)
-	defer tensor.free_tensor(mlp_out, allocator = allocator)
+	defer {
+		tensor.free_tensor(x_spatial, allocator = allocator)
+		tensor.free_tensor(windows, allocator = allocator)
+		tensor.free_tensor(attn_windows, allocator = allocator)
+		tensor.free_tensor(result_4d, allocator = allocator)
+		tensor.free_tensor(xs_conv, allocator = allocator)
+		tensor.free_tensor(conv_out, conv_flat, conv_final, allocator = allocator)
+		tensor.free_tensor(mlp_out, allocator = allocator)
+	}
 
 	return tensor.add(conv_final, mlp_out, allocator, loc)
 }
@@ -1158,18 +1135,19 @@ forward_tiny_vit_5m :: proc(
 	sequence_length := xs.shape[1]
 	spatial_dim := uint(math.sqrt(f64(sequence_length)))
 	xs_4d := tensor.reshape(xs, []uint{b, spatial_dim, spatial_dim, c}, allocator)
-	defer tensor.free_tensor(xs_4d, allocator = allocator)
 	xs_conv := tensor.permute(xs_4d, []uint{0, 3, 1, 2}, allocator)
-	defer tensor.free_tensor(xs_conv, allocator = allocator)
 
 	// Apply neck convolutions with layer norms
 	conv1_out := nn.forward_conv2d(model.neck_conv1, xs_conv, allocator)
-	defer tensor.free_tensor(conv1_out, allocator = allocator)
 	ln1_out := nn.forward_channel_layer_norm(model.neck_ln1, conv1_out, allocator)
-	defer tensor.free_tensor(ln1_out, allocator = allocator)
-
 	conv2_out := nn.forward_conv2d(model.neck_conv2, ln1_out, allocator)
-	defer tensor.free_tensor(conv2_out, allocator = allocator)
+	defer {
+		tensor.free_tensor(xs_4d, allocator = allocator)
+		tensor.free_tensor(xs_conv, allocator = allocator)
+		tensor.free_tensor(conv1_out, allocator = allocator)
+		tensor.free_tensor(ln1_out, allocator = allocator)
+		tensor.free_tensor(conv2_out, allocator = allocator)
+	}
 
 	result := nn.forward_channel_layer_norm(model.neck_ln2, conv2_out, allocator, loc)
 	trace.global_end_scoped(neck_trace)

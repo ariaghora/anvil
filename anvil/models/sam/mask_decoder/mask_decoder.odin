@@ -90,34 +90,36 @@ forward_attention :: proc(
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
 	q_proj := nn.forward_linear(attn.q_proj, q, allocator)
-	defer tensor.free_tensor(q_proj, allocator = allocator)
 	k_proj := nn.forward_linear(attn.k_proj, k, allocator)
-	defer tensor.free_tensor(k_proj, allocator = allocator)
 	v_proj := nn.forward_linear(attn.v_proj, v, allocator)
-	defer tensor.free_tensor(v_proj, allocator = allocator)
-
 	q_heads := separate_heads(q_proj, attn.num_heads, allocator)
-	defer tensor.free_tensor(q_heads, allocator = allocator)
 	k_heads := separate_heads(k_proj, attn.num_heads, allocator)
-	defer tensor.free_tensor(k_heads, allocator = allocator)
 	v_heads := separate_heads(v_proj, attn.num_heads, allocator)
-	defer tensor.free_tensor(v_heads, allocator = allocator)
+	defer {
+		tensor.free_tensor(q_proj, allocator = allocator)
+		tensor.free_tensor(k_proj, allocator = allocator)
+		tensor.free_tensor(v_proj, allocator = allocator)
+		tensor.free_tensor(q_heads, allocator = allocator)
+		tensor.free_tensor(k_heads, allocator = allocator)
+		tensor.free_tensor(v_heads, allocator = allocator)
+	}
 
 	c_per_head := q_heads.shape[3]
 	kt := tensor.transpose(k_heads, 2, 3, allocator)
-	defer tensor.free_tensor(kt, allocator = allocator)
 	numerator := tensor.matmul(q_heads, kt, allocator)
-	defer tensor.free_tensor(numerator, allocator = allocator)
-	for val, i in numerator.data do numerator.data[i] /= math.sqrt(T(c_per_head))
+	for _, i in numerator.data do numerator.data[i] /= math.sqrt(T(c_per_head))
 	attn_t := tensor.softmax_last_dim(numerator, allocator)
-	defer tensor.free_tensor(attn_t, allocator = allocator)
 	attn_out := tensor.matmul(attn_t, v_heads, allocator)
-	defer tensor.free_tensor(attn_out, allocator = allocator)
-
 	recombined := recombine_heads(attn_out, allocator)
-	defer tensor.free_tensor(recombined, allocator = allocator)
-	out := nn.forward_linear(attn.out_proj, recombined, allocator)
-	return out
+	defer {
+		tensor.free_tensor(kt, allocator = allocator)
+		tensor.free_tensor(numerator, allocator = allocator)
+		tensor.free_tensor(attn_t, allocator = allocator)
+		tensor.free_tensor(attn_out, allocator = allocator)
+		tensor.free_tensor(recombined, allocator = allocator)
+	}
+
+	return nn.forward_linear(attn.out_proj, recombined, allocator)
 }
 
 free_attention :: proc(attn: ^Attention_Mask_Decoder($T)) {
@@ -204,15 +206,14 @@ forward_mlp_block :: proc(
 	mlp: ^MLP_Block($T),
 	x: ^tensor.Tensor(T),
 	allocator := context.allocator,
-) -> (
-	out: ^tensor.Tensor(T),
-) {
+) -> ^tensor.Tensor(T) {
 	lin1_out := nn.forward_linear(mlp.lin1, x, allocator)
-	defer tensor.free_tensor(lin1_out, allocator = allocator)
 	relu_out := tensor.relu(lin1_out, allocator)
-	defer tensor.free_tensor(relu_out, allocator = allocator)
-	out = nn.forward_linear(mlp.lin2, relu_out, allocator)
-	return
+	defer {
+		tensor.free_tensor(lin1_out, allocator = allocator)
+		tensor.free_tensor(relu_out, allocator = allocator)
+	}
+	return nn.forward_linear(mlp.lin2, relu_out, allocator)
 }
 
 free_mlp_block :: proc(mlp: ^MLP_Block($T)) -> ^tensor.Tensor(T) {
@@ -642,93 +643,86 @@ predict_mask :: proc(
 	^tensor.Tensor(T),
 	^tensor.Tensor(T),
 ) {
-	// Concatenate output tokens...
-	output_tokens_cat := tensor.cat(
-		[]^tensor.Tensor(T){md.iou_token.weight, md.mask_tokens.weight},
-		0,
-		allocator,
-	)
-	defer tensor.free_tensor(output_tokens_cat, allocator = allocator)
+	// Prepare tokens
+	output_tokens_cat := tensor.cat([]^tensor.Tensor(T){md.iou_token.weight, md.mask_tokens.weight}, 0, allocator)
 	d1, d2 := output_tokens_cat.shape[0], output_tokens_cat.shape[1]
-	output_tokens_unsq := tensor.unsqueeze(output_tokens_cat, 0, allocator) // [1, d1, d2]
-	defer tensor.free_tensor(output_tokens_unsq, allocator = allocator)
+	output_tokens_unsq := tensor.unsqueeze(output_tokens_cat, 0, allocator)
 	batch_size := sparse_prompt_embeddings.shape[0]
 	output_tokens := tensor.broadcast_as(output_tokens_unsq, []uint{batch_size, d1, d2}, allocator)
-	defer tensor.free_tensor(output_tokens, allocator = allocator)
 	tokens := tensor.cat([]^tensor.Tensor(T){output_tokens, sparse_prompt_embeddings}, 1, allocator)
-	defer tensor.free_tensor(tokens, allocator = allocator)
 	src_repeat := tensor.repeat_interleave(image_embeddings, tokens.shape[0], 0, allocator)
-	defer tensor.free_tensor(src_repeat, allocator = allocator)
 	src := tensor.add(src_repeat, dense_prompt_embeddings, allocator)
-	defer tensor.free_tensor(src, allocator = allocator)
 	pos_src := tensor.repeat_interleave(image_pe, tokens.shape[0], 0, allocator)
-	defer tensor.free_tensor(pos_src, allocator = allocator)
+	defer {
+		tensor.free_tensor(output_tokens_cat, allocator = allocator)
+		tensor.free_tensor(output_tokens_unsq, allocator = allocator)
+		tensor.free_tensor(output_tokens, allocator = allocator)
+		tensor.free_tensor(tokens, allocator = allocator)
+		tensor.free_tensor(src_repeat, allocator = allocator)
+		tensor.free_tensor(src, allocator = allocator)
+		tensor.free_tensor(pos_src, allocator = allocator)
+	}
 
 	// Run the transformer
 	b, c, h, w := src.shape[0], src.shape[1], src.shape[2], src.shape[3]
 	hs, src_out := forward_two_way_transformer(md.transformer, src, pos_src, tokens, allocator)
-	defer tensor.free_tensor(hs, allocator = allocator)
-	defer tensor.free_tensor(src_out, allocator = allocator)
-
 	hs_slice := tensor.slice(hs, {{}, R(1)}, allocator = allocator)
-	defer tensor.free_tensor(hs_slice, allocator = allocator)
 	iou_token_out := tensor.flatten(hs_slice, 1, allocator)
-	defer tensor.free_tensor(iou_token_out, allocator = allocator)
 	mask_tokens_out := tensor.slice(hs, {{}, R(1, 1 + int(md.num_mask_tokens))}, allocator = allocator)
-	defer tensor.free_tensor(mask_tokens_out, allocator = allocator)
+	defer {
+		tensor.free_tensor(hs, allocator = allocator)
+		tensor.free_tensor(src_out, allocator = allocator)
+		tensor.free_tensor(hs_slice, allocator = allocator)
+		tensor.free_tensor(iou_token_out, allocator = allocator)
+		tensor.free_tensor(mask_tokens_out, allocator = allocator)
+	}
 
 	// Upscale mask embeddings
 	src_transposed := tensor.transpose(src_out, 1, 2, allocator)
-	defer tensor.free_tensor(src_transposed, allocator = allocator)
 	src_reshaped := tensor.reshape(src_transposed, {b, c, h, w}, allocator)
-	defer tensor.free_tensor(src_reshaped, allocator = allocator)
 	conv1_out := nn.forward_conv_transpose_2d(md.output_upscaling_conv1, src_reshaped, allocator)
-	defer tensor.free_tensor(conv1_out, allocator = allocator)
 	ln_out := nn.forward_channel_layer_norm(md.output_upscaling_ln, conv1_out, allocator)
-	defer tensor.free_tensor(ln_out, allocator = allocator)
 	gelu1_out := vit.gelu_fast(ln_out, allocator)
-	defer tensor.free_tensor(gelu1_out, allocator = allocator)
 	conv2_out := nn.forward_conv_transpose_2d(md.output_upscaling_conv2, gelu1_out, allocator)
-	defer tensor.free_tensor(conv2_out, allocator = allocator)
 	upscaled_embedding := vit.gelu_fast(conv2_out, allocator)
-	defer tensor.free_tensor(upscaled_embedding, allocator = allocator)
+	defer {
+		tensor.free_tensor(src_transposed, allocator = allocator)
+		tensor.free_tensor(src_reshaped, allocator = allocator)
+		tensor.free_tensor(conv1_out, allocator = allocator)
+		tensor.free_tensor(ln_out, allocator = allocator)
+		tensor.free_tensor(gelu1_out, allocator = allocator)
+		tensor.free_tensor(conv2_out, allocator = allocator)
+		tensor.free_tensor(upscaled_embedding, allocator = allocator)
+	}
 
+	// Build hypernetwork outputs
 	hyper_in_list := make([dynamic]^tensor.Tensor(T), allocator)
 	defer {
-		for h in hyper_in_list {
-			tensor.free_tensor(h, allocator = allocator)
-		}
+		for hp in hyper_in_list do tensor.free_tensor(hp, allocator = allocator)
 		delete(hyper_in_list)
 	}
 	for mlp, i in md.output_hypernetworks_mlps {
 		h_slice := tensor.slice(mask_tokens_out, {{}, i, {}}, keepdims = false, allocator = allocator)
 		defer tensor.free_tensor(h_slice, allocator = allocator)
-		h_mlp := forward_mlp_mask_decoder(mlp, h_slice, allocator)
-		append(&hyper_in_list, h_mlp)
+		append(&hyper_in_list, forward_mlp_mask_decoder(mlp, h_slice, allocator))
 	}
 	hyper_in := tensor.stack(hyper_in_list[:], 1, allocator)
 	defer tensor.free_tensor(hyper_in, allocator = allocator)
 
-	b, c, h, w =
-		upscaled_embedding.shape[0],
-		upscaled_embedding.shape[1],
-		upscaled_embedding.shape[2],
-		upscaled_embedding.shape[3]
+	// Final mask computation
+	b, c, h, w = upscaled_embedding.shape[0], upscaled_embedding.shape[1], upscaled_embedding.shape[2], upscaled_embedding.shape[3]
 	upscaled_reshaped := tensor.reshape(upscaled_embedding, {b, c, h * w}, allocator)
-	defer tensor.free_tensor(upscaled_reshaped, allocator = allocator)
 	masks_flat := tensor.matmul(hyper_in, upscaled_reshaped, allocator)
-	defer tensor.free_tensor(masks_flat, allocator = allocator)
-
-	// Now output channel is something different, thus, gotta recalc according to
-	// current length and divided by product of the original b, h, and w
 	c_out := tensor.shape_to_size(masks_flat.shape) / (b * h * w)
-
 	masks_reshaped := tensor.reshape(masks_flat, {b, c_out, h, w}, allocator)
-	defer tensor.free_tensor(masks_reshaped, allocator = allocator)
 	masks := tensor.clone(masks_reshaped, allocator)
-	iou_pred := forward_mlp_mask_decoder(md.iou_prediction_head, iou_token_out, allocator)
+	defer {
+		tensor.free_tensor(upscaled_reshaped, allocator = allocator)
+		tensor.free_tensor(masks_flat, allocator = allocator)
+		tensor.free_tensor(masks_reshaped, allocator = allocator)
+	}
 
-	return masks, iou_pred
+	return masks, forward_mlp_mask_decoder(md.iou_prediction_head, iou_token_out, allocator)
 }
 
 forward_mask_decoder :: proc(
@@ -751,14 +745,15 @@ forward_mask_decoder :: proc(
 		dense_prompt_embeddings,
 		allocator,
 	)
-	defer tensor.free_tensor(masks_full, allocator = allocator)
-	defer tensor.free_tensor(iou_pred_full, allocator = allocator)
+	defer {
+		tensor.free_tensor(masks_full, allocator = allocator)
+		tensor.free_tensor(iou_pred_full, allocator = allocator)
+	}
 
 	// When multimask is false, just take the first channel from masks and iou_pred
 	// TODO(Aria): implement multimask output
-	masks := tensor.slice(masks_full, {{}, R(1)}, allocator = allocator)
-	iou_pred := tensor.slice(iou_pred_full, {{}, R(1)}, allocator = allocator)
-	return masks, iou_pred
+	return tensor.slice(masks_full, {{}, R(1)}, allocator = allocator),
+	       tensor.slice(iou_pred_full, {{}, R(1)}, allocator = allocator)
 }
 
 free_mask_decoder :: proc(md: ^Mask_Decoder($T), allocator := context.allocator) {
