@@ -202,6 +202,43 @@ elementwise_binary_op :: proc(
 		return result
 	}
 
+	// Fast path 4: Leading dimension broadcast (e.g., [b,h,n,n] + [h,n,n])
+	// When b's shape matches trailing dimensions of a, we can use modulo cycling
+	if a.contiguous && b.contiguous && len(a.shape) > len(b.shape) {
+		trailing_match := true
+		offset := len(a.shape) - len(b.shape)
+		for i in 0 ..< len(b.shape) {
+			if a.shape[offset + i] != b.shape[i] {
+				trailing_match = false
+				break
+			}
+		}
+		if trailing_match {
+			result := tensor_alloc(T, a.shape, true, allocator, loc)
+			b_size := uint(len(b.data))
+			total := uint(len(a.data))
+			switch op {
+			case .ADD:
+				for i in 0 ..< total {
+					result.data[i] = a.data[i] + b.data[i % b_size]
+				}
+			case .MULTIPLY:
+				for i in 0 ..< total {
+					result.data[i] = a.data[i] * b.data[i % b_size]
+				}
+			case .SUBTRACT:
+				for i in 0 ..< total {
+					result.data[i] = a.data[i] - b.data[i % b_size]
+				}
+			case .DIVIDE:
+				for i in 0 ..< total {
+					result.data[i] = a.data[i] / b.data[i % b_size]
+				}
+			}
+			return result
+		}
+	}
+
 	// General case: Full broadcasting
 	result_shape, broadcastable := shape_broadcastable(a.shape, b.shape, allocator, loc)
 	if !broadcastable {

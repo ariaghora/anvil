@@ -1385,8 +1385,12 @@ scalar :: proc(v: $T, allocator := context.allocator) -> ^Tensor(T) {
 }
 
 scale :: proc(x: ^Tensor($T), v: T) {
-	for _, i in x.data {
-		x.data[i] *= v
+	when T == f32 && ODIN_OS == .Darwin {
+		simd_backend.scalef_inplace(x.data, v)
+	} else {
+		for _, i in x.data {
+			x.data[i] *= v
+		}
 	}
 }
 
