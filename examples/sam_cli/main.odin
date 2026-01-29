@@ -5,8 +5,6 @@ import vit "../../anvil/models/sam/vit"
 import st "../../anvil/safetensors"
 import "../../anvil/tensor"
 import "core:fmt"
-import "core:mem"
-import vmem "core:mem/virtual"
 import "core:os"
 import "core:strconv"
 import "core:strings"
@@ -221,11 +219,8 @@ main :: proc() {
 	}
 	defer delete(args.points)
 
-	// Setup arena allocator
-	arena: vmem.Arena
-	assert(vmem.arena_init_growing(&arena) == nil)
-	allocator := vmem.arena_allocator(&arena)
-	defer vmem.arena_destroy(&arena)
+	// Use heap allocator so defer free_tensor actually frees memory
+	allocator := context.allocator
 
 	// Load image
 	fmt.printfln("Loading image: %s", args.image_path)

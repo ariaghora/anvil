@@ -13,7 +13,6 @@ import "core:c/libc"
 import "core:fmt"
 import "core:math"
 import "core:math/rand"
-import vmem "core:mem/virtual"
 import "core:os"
 import "core:os/os2"
 import "core:slice"
@@ -292,14 +291,12 @@ main :: proc() {
 	defer rl.CloseWindow()
 	rl.SetTargetFPS(60)
 
-	arena: vmem.Arena
-	assert(vmem.arena_init_growing(&arena) == nil)
-	arena_alloc := vmem.arena_allocator(&arena)
-	defer vmem.arena_destroy(&arena)
+	// Use heap allocator so defer free_tensor actually frees memory
+	allocator := context.allocator
 
 	state: App_State
-	state.sam, state.image_encoder = load_model(arena_alloc)
-	defer tf.free_tiny(state.sam, arena_alloc)
+	state.sam, state.image_encoder = load_model(allocator)
+	defer tf.free_tiny(state.sam, allocator)
 
 	for !rl.WindowShouldClose() {
 		if rl.IsFileDropped() {
@@ -307,7 +304,7 @@ main :: proc() {
 			defer rl.UnloadDroppedFiles(dropped_files)
 
 			if dropped_files.count > 0 {
-				handle_dropped_image(&state, dropped_files.paths[0], arena_alloc)
+				handle_dropped_image(&state, dropped_files.paths[0], allocator)
 			}
 		}
 
@@ -327,15 +324,23 @@ main :: proc() {
 				state.input.shape[2],
 				state.input.shape[3],
 				points,
-				context.temp_allocator,
+				allocator,
 			)
 			mask_time := time.since(t)
 
+			// Extract values before freeing
+			iou_value := iou_pred.data[0]
+			mask_width := masks.shape[3]
+
 			state.mask_texture = create_mask_texture(masks)
+
+			// Free mask tensors after creating texture and extracting values
+			tensor.free_tensor(masks, allocator)
+			tensor.free_tensor(iou_pred, allocator)
 
 			rl.DrawTexture(state.texture, 0, 0, rl.WHITE)
 
-			scale := f32(rl.GetScreenWidth()) / f32(masks.shape[3])
+			scale := f32(rl.GetScreenWidth()) / f32(mask_width)
 			rl.DrawTextureEx(state.mask_texture, {0, 0}, 0, scale, rl.WHITE)
 
 			screen_x := i32(f32(rl.GetMouseX()))
@@ -343,7 +348,7 @@ main :: proc() {
 			rl.DrawCircle(screen_x, screen_y, 5, rl.GREEN)
 			rl.DrawCircleLines(screen_x, screen_y, 5, rl.WHITE)
 
-			draw_info_panel(iou_pred.data[0], state.embedding_time, mask_time)
+			draw_info_panel(iou_value, state.embedding_time, mask_time)
 
 			free_all(context.temp_allocator)
 		}
