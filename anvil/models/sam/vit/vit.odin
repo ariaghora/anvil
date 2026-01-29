@@ -821,18 +821,14 @@ forward_tiny_vit_block :: proc(
 		xs := tensor.add(attn_out, x, allocator)
 		defer tensor.free_tensor(xs, allocator = allocator)
 
-		// Local conv
-		actual_l := xs.shape[1]
-		actual_spatial_dim := uint(math.sqrt_f64(f64(actual_l)))
-		actual_h, actual_w := actual_spatial_dim, actual_spatial_dim
-
-		xs_transposed := tensor.transpose(xs, 1, 2, allocator) // [b, l, c] → [b, c, l]
+		// Local conv: [b, l, c] -> [b, c, h, w] -> conv -> [b, l, c]
+		xs_transposed := tensor.transpose(xs, 1, 2, allocator)
 		defer tensor.free_tensor(xs_transposed, allocator = allocator)
-		xs_conv := tensor.reshape(xs_transposed, []uint{b, c, h, w}, allocator) // [b, c, l] → [b, c, h, w]
+		xs_conv := tensor.reshape(xs_transposed, []uint{b, c, h, w}, allocator)
 		defer tensor.free_tensor(xs_conv, allocator = allocator)
 		conv_out := forward_conv_2d_bn(block.local_conv, xs_conv, allocator)
 		defer tensor.free_tensor(conv_out, allocator = allocator)
-		conv_flat := tensor.reshape(conv_out, []uint{b, c, actual_l}, allocator)
+		conv_flat := tensor.reshape(conv_out, []uint{b, c, l}, allocator)
 		defer tensor.free_tensor(conv_flat, allocator = allocator)
 		conv_final := tensor.transpose(conv_flat, 1, 2, allocator)
 		defer tensor.free_tensor(conv_final, allocator = allocator)
@@ -847,124 +843,26 @@ forward_tiny_vit_block :: proc(
 
 	win_attention_trace := trace.global_scoped("windowed_attention", "section")
 
-	// Calculate padding
-	pad_h := (window_size - (h % window_size)) % window_size
-	pad_w := (window_size - (w % window_size)) % window_size
-	padded_h := h + pad_h
-	padded_w := w + pad_w
-	n_h := padded_h / window_size
-	n_w := padded_w / window_size
-	n_windows := b * n_h * n_w
+	// Reshape to spatial: [B, L, C] -> [B, H, W, C]
+	x_spatial := tensor.reshape(x, []uint{b, h, w, c}, allocator)
+	defer tensor.free_tensor(x_spatial, allocator = allocator)
 
-	// Single allocation for windowed data
-	windows := tensor.zeros(T, []uint{n_windows, window_size * window_size, c}, allocator)
+	// Partition into windows: [B, H, W, C] -> [n_windows, window_size^2, C]
+	windows := tensor.window_partition(x_spatial, window_size, allocator)
 	defer tensor.free_tensor(windows, allocator = allocator)
-
-	// Extract windows with inline padding (no intermediate tensor)
-	#no_bounds_check {
-		window_idx := uint(0)
-		for batch in 0 ..< b {
-			batch_offset := batch * h * w * c
-			for h_win in 0 ..< n_h {
-				for w_win in 0 ..< n_w {
-					win_h_start := h_win * window_size
-					win_w_start := w_win * window_size
-
-					// Extract window
-					for local_h in 0 ..< window_size {
-						src_h := win_h_start + local_h
-						if src_h >= h {continue} 	// Padding region
-
-						for local_w in 0 ..< window_size {
-							src_w := win_w_start + local_w
-							if src_w >= w {continue} 	// Padding region
-
-							src_idx := batch_offset + (src_h * w + src_w) * c
-							dst_idx :=
-								(window_idx * window_size * window_size +
-									local_h * window_size +
-									local_w) *
-								c
-
-							// Copy channels - unroll for better performance
-							i := uint(0)
-							for ; i + 8 <= c; i += 8 {
-								#unroll for j in 0 ..< 8 {
-									windows.data[dst_idx + i + uint(j)] =
-										x.data[src_idx + i + uint(j)]
-								}
-							}
-							for ; i < c; i += 1 {
-								windows.data[dst_idx + i] = x.data[src_idx + i]
-							}
-						}
-					}
-					window_idx += 1
-				}
-			}
-		}
-	}
 
 	// Apply attention
 	attn_windows := forward_attention(block.attn, windows, allocator)
 	defer tensor.free_tensor(attn_windows, allocator = allocator)
 
-	// Merge windows back AND add residual in one pass
-	result_3d := tensor.zeros(T, []uint{b, l, c}, allocator)
-	defer tensor.free_tensor(result_3d, allocator = allocator)
-
-	#no_bounds_check {
-		window_idx := uint(0)
-		for batch in 0 ..< b {
-			batch_offset := batch * h * w * c
-			for h_win in 0 ..< n_h {
-				for w_win in 0 ..< n_w {
-					win_h_start := h_win * window_size
-					win_w_start := w_win * window_size
-
-					// Merge window back
-					for local_h in 0 ..< window_size {
-						src_h := win_h_start + local_h
-						if src_h >= h {continue} 	// Skip padding
-
-						for local_w in 0 ..< window_size {
-							src_w := win_w_start + local_w
-							if src_w >= w {continue} 	// Skip padding
-
-							src_idx :=
-								(window_idx * window_size * window_size +
-									local_h * window_size +
-									local_w) *
-								c
-							dst_idx := batch_offset + (src_h * w + src_w) * c
-
-							// Merge + residual in one pass
-							i := uint(0)
-							for ; i + 8 <= c; i += 8 {
-								#unroll for j in 0 ..< 8 {
-									idx := dst_idx + i + uint(j)
-									result_3d.data[idx] =
-										attn_windows.data[src_idx + i + uint(j)] + x.data[idx]
-								}
-							}
-							for ; i < c; i += 1 {
-								idx := dst_idx + i
-								result_3d.data[idx] = attn_windows.data[src_idx + i] + x.data[idx]
-							}
-						}
-					}
-					window_idx += 1
-				}
-			}
-		}
-	}
+	// Merge windows back and add residual: -> [B, H, W, C]
+	result_4d := tensor.window_unpartition_residual(attn_windows, x, b, {h, w}, window_size, allocator)
+	defer tensor.free_tensor(result_4d, allocator = allocator)
 
 	trace.global_end_scoped(win_attention_trace)
 
-	// Local conv
-	xs_4d := tensor.reshape(result_3d, []uint{b, h, w, c}, allocator)
-	defer tensor.free_tensor(xs_4d, allocator = allocator)
-	xs_conv := tensor.permute(xs_4d, []uint{0, 3, 1, 2}, allocator)
+	// Local conv: [B, H, W, C] -> [B, C, H, W]
+	xs_conv := tensor.permute(result_4d, []uint{0, 3, 1, 2}, allocator)
 	defer tensor.free_tensor(xs_conv, allocator = allocator)
 	conv_out := forward_conv_2d_bn(block.local_conv, xs_conv, allocator)
 	defer tensor.free_tensor(conv_out, allocator = allocator)
@@ -977,13 +875,7 @@ forward_tiny_vit_block :: proc(
 	mlp_out := forward_mlp(block.mlp, conv_final, allocator)
 	defer tensor.free_tensor(mlp_out, allocator = allocator)
 
-	// Final output - allocate and compute in one pass
-	final_result := tensor.zeros(T, []uint{b, l, c}, allocator, loc)
-	#no_bounds_check for i in 0 ..< b * l * c {
-		final_result.data[i] = conv_final.data[i] + mlp_out.data[i]
-	}
-
-	return final_result
+	return tensor.add(conv_final, mlp_out, allocator, loc)
 }
 
 free_tiny_vit_block :: proc(block: ^Tiny_ViT_Block($T), allocator := context.allocator) {

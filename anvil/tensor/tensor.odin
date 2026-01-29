@@ -2201,3 +2201,342 @@ split :: proc(
 
 	return outputs
 }
+
+// Partitions a tensor into non-overlapping windows for vision transformer attention.
+//
+// Input shape: [B, H, W, C]
+// Output shape: [B * num_h * num_w, window_size * window_size, C]
+//
+// This is optimized for ViT-style windowed attention where windows don't overlap.
+// Padding is applied if H or W is not divisible by window_size.
+//
+// Parameters:
+//   input: 4D tensor [B, H, W, C] in channels-last format
+//   window_size: size of square windows
+window_partition :: proc(
+	input: ^Tensor($T),
+	window_size: uint,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	assert(len(input.shape) == 4, "window_partition requires 4D input [B, H, W, C]")
+
+	b, h, w, c := input.shape[0], input.shape[1], input.shape[2], input.shape[3]
+
+	pad_h := (window_size - (h % window_size)) % window_size
+	pad_w := (window_size - (w % window_size)) % window_size
+	num_h := (h + pad_h) / window_size
+	num_w := (w + pad_w) / window_size
+	n_windows := b * num_h * num_w
+	win_size_sq := window_size * window_size
+
+	output := tensor_alloc(T, []uint{n_windows, win_size_sq, c}, true, allocator, loc)
+
+	#no_bounds_check {
+		window_idx: uint = 0
+		for batch in 0 ..< b {
+			batch_offset := batch * h * w * c
+			for wh in 0 ..< num_h {
+				for ww in 0 ..< num_w {
+					h_start := wh * window_size
+					w_start := ww * window_size
+
+					for lh in 0 ..< window_size {
+						src_h := h_start + lh
+						if src_h >= h {continue}
+
+						for lw in 0 ..< window_size {
+							src_w := w_start + lw
+							if src_w >= w {continue}
+
+							src_idx := batch_offset + (src_h * w + src_w) * c
+							dst_idx := (window_idx * win_size_sq + lh * window_size + lw) * c
+
+							for i in 0 ..< c {
+								output.data[dst_idx + i] = input.data[src_idx + i]
+							}
+						}
+					}
+					window_idx += 1
+				}
+			}
+		}
+	}
+
+	return output
+}
+
+// Merges windowed tensor back to spatial layout.
+//
+// Input shape: [B * num_h * num_w, window_size * window_size, C]
+// Output shape: [B, H, W, C]
+//
+// Parameters:
+//   input: 3D tensor from window_partition
+//   batch_size: original batch size
+//   output_size: [H, W] target spatial dimensions
+//   window_size: size of square windows
+window_unpartition :: proc(
+	input: ^Tensor($T),
+	batch_size: uint,
+	output_size: [2]uint,
+	window_size: uint,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	assert(len(input.shape) == 3, "window_unpartition requires 3D input [n_windows, win_sq, C]")
+
+	h_out, w_out := output_size[0], output_size[1]
+	c := input.shape[2]
+	win_size_sq := window_size * window_size
+
+	pad_h := (window_size - (h_out % window_size)) % window_size
+	pad_w := (window_size - (w_out % window_size)) % window_size
+	num_h := (h_out + pad_h) / window_size
+	num_w := (w_out + pad_w) / window_size
+
+	output := zeros(T, []uint{batch_size, h_out, w_out, c}, allocator, loc)
+
+	#no_bounds_check {
+		window_idx: uint = 0
+		for batch in 0 ..< batch_size {
+			batch_offset := batch * h_out * w_out * c
+			for wh in 0 ..< num_h {
+				for ww in 0 ..< num_w {
+					h_start := wh * window_size
+					w_start := ww * window_size
+
+					for lh in 0 ..< window_size {
+						dst_h := h_start + lh
+						if dst_h >= h_out {continue}
+
+						for lw in 0 ..< window_size {
+							dst_w := w_start + lw
+							if dst_w >= w_out {continue}
+
+							src_idx := (window_idx * win_size_sq + lh * window_size + lw) * c
+							dst_idx := batch_offset + (dst_h * w_out + dst_w) * c
+
+							for i in 0 ..< c {
+								output.data[dst_idx + i] = input.data[src_idx + i]
+							}
+						}
+					}
+					window_idx += 1
+				}
+			}
+		}
+	}
+
+	return output
+}
+
+// Merges windowed tensor back to spatial layout and adds residual in one pass.
+//
+// Input shape: [B * num_h * num_w, window_size * window_size, C]
+// Residual shape: [B, H * W, C] (flattened spatial)
+// Output shape: [B, H, W, C]
+//
+// This fused operation avoids an extra allocation and memory pass.
+window_unpartition_residual :: proc(
+	input: ^Tensor($T),
+	residual: ^Tensor(T),
+	batch_size: uint,
+	output_size: [2]uint,
+	window_size: uint,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	assert(len(input.shape) == 3, "window_unpartition_residual requires 3D input")
+	assert(len(residual.shape) == 3, "residual must be [B, H*W, C]")
+
+	h_out, w_out := output_size[0], output_size[1]
+	c := input.shape[2]
+	win_size_sq := window_size * window_size
+
+	pad_h := (window_size - (h_out % window_size)) % window_size
+	pad_w := (window_size - (w_out % window_size)) % window_size
+	num_h := (h_out + pad_h) / window_size
+	num_w := (w_out + pad_w) / window_size
+
+	output := zeros(T, []uint{batch_size, h_out, w_out, c}, allocator, loc)
+
+	#no_bounds_check {
+		window_idx: uint = 0
+		for batch in 0 ..< batch_size {
+			out_batch_offset := batch * h_out * w_out * c
+			res_batch_offset := batch * h_out * w_out * c
+			for wh in 0 ..< num_h {
+				for ww in 0 ..< num_w {
+					h_start := wh * window_size
+					w_start := ww * window_size
+
+					for lh in 0 ..< window_size {
+						dst_h := h_start + lh
+						if dst_h >= h_out {continue}
+
+						for lw in 0 ..< window_size {
+							dst_w := w_start + lw
+							if dst_w >= w_out {continue}
+
+							src_idx := (window_idx * win_size_sq + lh * window_size + lw) * c
+							dst_idx := out_batch_offset + (dst_h * w_out + dst_w) * c
+							res_idx := res_batch_offset + (dst_h * w_out + dst_w) * c
+
+							for i in 0 ..< c {
+								output.data[dst_idx + i] = input.data[src_idx + i] + residual.data[res_idx + i]
+							}
+						}
+					}
+					window_idx += 1
+				}
+			}
+		}
+	}
+
+	return output
+}
+
+// Extracts sliding windows from a 4D tensor.
+//
+// Input shape: [B, C, H, W]
+// Output shape: [B, num_h, num_w, C, kernel_h, kernel_w]
+//
+// Where:
+//   num_h = (H + 2*padding - dilation*(kernel_h-1) - 1) / stride + 1
+//   num_w = (W + 2*padding - dilation*(kernel_w-1) - 1) / stride + 1
+//
+// Parameters:
+//   input: 4D tensor [B, C, H, W]
+//   kernel_size: [kernel_h, kernel_w]
+//   stride: step between windows (default 1)
+//   padding: zero padding added to input (default 0)
+//   dilation: spacing between kernel elements (default 1)
+unfold :: proc(
+	input: ^Tensor($T),
+	kernel_size: [2]uint,
+	stride: uint = 1,
+	padding: uint = 0,
+	dilation: uint = 1,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	assert(len(input.shape) == 4, "unfold requires 4D input [B, C, H, W]")
+
+	b, c, h, w := input.shape[0], input.shape[1], input.shape[2], input.shape[3]
+	k_h, k_w := kernel_size[0], kernel_size[1]
+
+	h_padded := h + 2 * padding
+	w_padded := w + 2 * padding
+
+	num_h := (h_padded - dilation * (k_h - 1) - 1) / stride + 1
+	num_w := (w_padded - dilation * (k_w - 1) - 1) / stride + 1
+
+	output := tensor_alloc(T, []uint{b, num_h, num_w, c, k_h, k_w}, true, allocator, loc)
+
+	#no_bounds_check for batch in 0 ..< b {
+		for win_h in 0 ..< num_h {
+			for win_w in 0 ..< num_w {
+				h_start := int(win_h * stride) - int(padding)
+				w_start := int(win_w * stride) - int(padding)
+
+				for ch in 0 ..< c {
+					for kh in 0 ..< k_h {
+						for kw in 0 ..< k_w {
+							src_h := h_start + int(kh * dilation)
+							src_w := w_start + int(kw * dilation)
+
+							dst_idx := batch * num_h * num_w * c * k_h * k_w +
+							           win_h * num_w * c * k_h * k_w +
+							           win_w * c * k_h * k_w +
+							           ch * k_h * k_w +
+							           kh * k_w +
+							           kw
+
+							if src_h >= 0 && src_h < int(h) && src_w >= 0 && src_w < int(w) {
+								src_idx := batch * c * h * w + ch * h * w + uint(src_h) * w + uint(src_w)
+								output.data[dst_idx] = input.data[src_idx]
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return output
+}
+
+// Combines sliding windows back into a tensor, summing overlapping regions.
+//
+// Input shape: [B, num_h, num_w, C, kernel_h, kernel_w]
+// Output shape: [B, C, H, W]
+//
+// This is the inverse of unfold. For non-overlapping windows (stride == kernel_size),
+// this is a simple reshape. For overlapping windows, values are summed.
+//
+// Parameters:
+//   input: 6D tensor from unfold [B, num_h, num_w, C, kernel_h, kernel_w]
+//   output_size: [H, W] target spatial dimensions
+//   kernel_size: [kernel_h, kernel_w]
+//   stride: step between windows (default 1)
+//   padding: padding that was used in unfold (default 0)
+//   dilation: spacing between kernel elements (default 1)
+fold :: proc(
+	input: ^Tensor($T),
+	output_size: [2]uint,
+	kernel_size: [2]uint,
+	stride: uint = 1,
+	padding: uint = 0,
+	dilation: uint = 1,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	assert(len(input.shape) == 6, "fold requires 6D input [B, num_h, num_w, C, k_h, k_w]")
+
+	b := input.shape[0]
+	num_h := input.shape[1]
+	num_w := input.shape[2]
+	c := input.shape[3]
+	k_h := input.shape[4]
+	k_w := input.shape[5]
+	h_out, w_out := output_size[0], output_size[1]
+
+	output := zeros(T, []uint{b, c, h_out, w_out}, allocator, loc)
+
+	#no_bounds_check for batch in 0 ..< b {
+		for win_h in 0 ..< num_h {
+			for win_w in 0 ..< num_w {
+				h_start := int(win_h * stride) - int(padding)
+				w_start := int(win_w * stride) - int(padding)
+
+				for ch in 0 ..< c {
+					for kh in 0 ..< k_h {
+						for kw in 0 ..< k_w {
+							dst_h := h_start + int(kh * dilation)
+							dst_w := w_start + int(kw * dilation)
+
+							if dst_h >= 0 && dst_h < int(h_out) && dst_w >= 0 && dst_w < int(w_out) {
+								src_idx := batch * num_h * num_w * c * k_h * k_w +
+								           win_h * num_w * c * k_h * k_w +
+								           win_w * c * k_h * k_w +
+								           ch * k_h * k_w +
+								           kh * k_w +
+								           kw
+
+								dst_idx := batch * c * h_out * w_out +
+								           ch * h_out * w_out +
+								           uint(dst_h) * w_out +
+								           uint(dst_w)
+
+								output.data[dst_idx] += input.data[src_idx]
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return output
+}

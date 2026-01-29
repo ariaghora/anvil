@@ -658,3 +658,95 @@ test_flatten :: proc(t: ^testing.T) {
 	res = flatten(x, 1, context.temp_allocator)
 	testing.expect(t, slice.equal(res.shape, []uint{2, 4}))
 }
+
+@(test)
+test_unfold_fold_non_overlapping :: proc(t: ^testing.T) {
+	// Test non-overlapping windows (stride == kernel_size)
+	// Input: [1, 1, 4, 4] with values 1..16
+	input := new_with_init(
+		[]f32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+		{1, 1, 4, 4},
+		context.temp_allocator,
+	)
+
+	// Unfold with 2x2 windows, stride 2 -> [1, 2, 2, 1, 2, 2]
+	windows := unfold(input, {2, 2}, stride = 2, allocator = context.temp_allocator)
+	testing.expect(t, slice.equal(windows.shape, []uint{1, 2, 2, 1, 2, 2}))
+
+	// Window [0,0] should be [[1,2], [5,6]]
+	testing.expect_value(t, windows.data[0], 1)
+	testing.expect_value(t, windows.data[1], 2)
+	testing.expect_value(t, windows.data[2], 5)
+	testing.expect_value(t, windows.data[3], 6)
+
+	// Window [0,1] should be [[3,4], [7,8]]
+	testing.expect_value(t, windows.data[4], 3)
+	testing.expect_value(t, windows.data[5], 4)
+	testing.expect_value(t, windows.data[6], 7)
+	testing.expect_value(t, windows.data[7], 8)
+
+	// Fold back should recover original
+	recovered := fold(windows, {4, 4}, {2, 2}, stride = 2, allocator = context.temp_allocator)
+	testing.expect(t, slice.equal(recovered.shape, []uint{1, 1, 4, 4}))
+	testing.expect(t, slice.equal(recovered.data, input.data))
+}
+
+@(test)
+test_unfold_with_padding :: proc(t: ^testing.T) {
+	// Input: [1, 1, 3, 3]
+	input := new_with_init(
+		[]f32{1, 2, 3, 4, 5, 6, 7, 8, 9},
+		{1, 1, 3, 3},
+		context.temp_allocator,
+	)
+
+	// Unfold with 2x2 windows, stride 2, padding 1
+	// Padded size: 5x5, num windows: 2x2
+	windows := unfold(input, {2, 2}, stride = 2, padding = 1, allocator = context.temp_allocator)
+	testing.expect(t, slice.equal(windows.shape, []uint{1, 2, 2, 1, 2, 2}))
+
+	// Window [0,0] starts at (-1,-1), should be [[0,0], [0,1]]
+	testing.expect_value(t, windows.data[0], 0) // padding
+	testing.expect_value(t, windows.data[1], 0) // padding
+	testing.expect_value(t, windows.data[2], 0) // padding
+	testing.expect_value(t, windows.data[3], 1) // actual value
+}
+
+@(test)
+test_window_partition_unpartition :: proc(t: ^testing.T) {
+	// Input: [1, 4, 4, 2] - batch 1, 4x4 spatial, 2 channels
+	input := new_with_init(
+		[]f32{
+			// Row 0
+			1, 2, 3, 4, 5, 6, 7, 8,
+			// Row 1
+			9, 10, 11, 12, 13, 14, 15, 16,
+			// Row 2
+			17, 18, 19, 20, 21, 22, 23, 24,
+			// Row 3
+			25, 26, 27, 28, 29, 30, 31, 32,
+		},
+		{1, 4, 4, 2},
+		context.temp_allocator,
+	)
+
+	// Partition into 2x2 windows -> [4, 4, 2]
+	windows := window_partition(input, 2, allocator = context.temp_allocator)
+	testing.expect(t, slice.equal(windows.shape, []uint{4, 4, 2}))
+
+	// Window 0 (top-left 2x2): positions (0,0), (0,1), (1,0), (1,1)
+	// Values: [1,2], [3,4], [9,10], [11,12]
+	testing.expect_value(t, windows.data[0], 1)
+	testing.expect_value(t, windows.data[1], 2)
+	testing.expect_value(t, windows.data[2], 3)
+	testing.expect_value(t, windows.data[3], 4)
+	testing.expect_value(t, windows.data[4], 9)
+	testing.expect_value(t, windows.data[5], 10)
+	testing.expect_value(t, windows.data[6], 11)
+	testing.expect_value(t, windows.data[7], 12)
+
+	// Unpartition back
+	recovered := window_unpartition(windows, 1, {4, 4}, 2, allocator = context.temp_allocator)
+	testing.expect(t, slice.equal(recovered.shape, []uint{1, 4, 4, 2}))
+	testing.expect(t, slice.equal(recovered.data, input.data))
+}
