@@ -4,7 +4,7 @@ import "../tensor"
 import "core:encoding/json"
 import "core:fmt"
 import "core:mem"
-import "core:os"
+import "core:mem/virtual"
 import "core:slice"
 
 Assignment_Incompatible_Shape :: struct {
@@ -38,6 +38,7 @@ Tensor_Info :: struct {
 Safe_Tensors :: struct($T: typeid) {
 	raw_bytes: []u8,
 	tensors:   map[string]^tensor.Tensor(T),
+	_is_mmap:  bool,
 }
 
 read_from_file :: proc(
@@ -49,14 +50,15 @@ read_from_file :: proc(
 	res: ^Safe_Tensors(T),
 	er: Safe_Tensors_Error,
 ) {
-	raw_bytes, ok := os.read_entire_file(fn, allocator)
-	if !ok do return nil, IO_Error{msg = fmt.tprintf("Failed to read safe tensor from %s", fn)}
-	return read_from_bytes(T, raw_bytes, allocator, loc)
+	raw_bytes, map_err := virtual.map_file(fn, {.Read})
+	if map_err != .None do return nil, IO_Error{msg = fmt.tprintf("Failed to mmap safe tensor from %s", fn)}
+	return read_from_bytes(T, raw_bytes, true, allocator, loc)
 }
 
 read_from_bytes :: proc(
 	$T: typeid,
 	raw_bytes: []u8,
+	is_mmap := false,
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> (
@@ -75,55 +77,84 @@ read_from_bytes :: proc(
 	delete_key(&tensors_proto, "__metadata__")
 
 	tensor_data_start := header_size + 8
-	res = new_clone(Safe_Tensors(T){raw_bytes = raw_bytes}, allocator, loc)
+	res = new_clone(Safe_Tensors(T){raw_bytes = raw_bytes, _is_mmap = is_mmap}, allocator, loc)
 
 	for k, v in tensors_proto {
 		raw_data := raw_bytes[tensor_data_start +
 		v.data_offsets[0]:tensor_data_start +
 		v.data_offsets[1]]
 
-		t := tensor.tensor_alloc(T, v.shape, owns_data = true, allocator = allocator, loc = loc)
+		// Check if we can do zero-copy (dtype matches T and data is from mmap)
+		can_zero_copy := is_mmap && dtype_matches_type(T, v.dtype)
 
-		// Convert based on source dtype
-		switch v.dtype {
-		case "U8", "u8", "uint8":
-			src_data := mem.slice_data_cast([]u8, raw_data)
-			for i in 0 ..< len(src_data) {
-				t.data[i] = T(src_data[i])
+		if can_zero_copy {
+			// Zero-copy path: point directly into mmap'd memory
+			t := tensor.tensor_alloc(T, v.shape, owns_data = false, allocator = allocator, loc = loc)
+			t.data = mem.slice_data_cast([]T, raw_data)
+			res.tensors[k] = t
+		} else {
+			// Copy path: allocate and convert
+			t := tensor.tensor_alloc(T, v.shape, owns_data = true, allocator = allocator, loc = loc)
+
+			switch v.dtype {
+			case "U8", "u8", "uint8":
+				src_data := mem.slice_data_cast([]u8, raw_data)
+				for i in 0 ..< len(src_data) {
+					t.data[i] = T(src_data[i])
+				}
+			case "F16", "f16", "float16":
+				src_data := mem.slice_data_cast([]f16, raw_data)
+				for i in 0 ..< len(src_data) {
+					t.data[i] = T(src_data[i])
+				}
+			case "F32", "f32", "float32":
+				src_data := mem.slice_data_cast([]f32, raw_data)
+				for i in 0 ..< len(src_data) {
+					t.data[i] = T(src_data[i])
+				}
+			case "F64", "f64", "float64":
+				src_data := mem.slice_data_cast([]f64, raw_data)
+				for i in 0 ..< len(src_data) {
+					t.data[i] = T(src_data[i])
+				}
+			case "I32", "i32", "int32":
+				src_data := mem.slice_data_cast([]i32, raw_data)
+				for i in 0 ..< len(src_data) {
+					t.data[i] = T(src_data[i])
+				}
+			case "I64", "i64", "int64":
+				src_data := mem.slice_data_cast([]i64, raw_data)
+				for i in 0 ..< len(src_data) {
+					t.data[i] = T(src_data[i])
+				}
+			case:
+				panic(fmt.tprintf("Unsupported dtype: %s", v.dtype))
 			}
-		case "F16", "f16", "float16":
-			src_data := mem.slice_data_cast([]f16, raw_data)
-			for i in 0 ..< len(src_data) {
-				t.data[i] = T(src_data[i])
-			}
-		case "F32", "f32", "float32":
-			src_data := mem.slice_data_cast([]f32, raw_data)
-			for i in 0 ..< len(src_data) {
-				t.data[i] = T(src_data[i])
-			}
-		case "F64", "f64", "float64":
-			src_data := mem.slice_data_cast([]f64, raw_data)
-			for i in 0 ..< len(src_data) {
-				t.data[i] = T(src_data[i])
-			}
-		case "I32", "i32", "int32":
-			src_data := mem.slice_data_cast([]i32, raw_data)
-			for i in 0 ..< len(src_data) {
-				t.data[i] = T(src_data[i])
-			}
-		case "I64", "i64", "int64":
-			src_data := mem.slice_data_cast([]i64, raw_data)
-			for i in 0 ..< len(src_data) {
-				t.data[i] = T(src_data[i])
-			}
-		case:
-			panic(fmt.tprintf("Unsupported dtype: %s", v.dtype))
+
+			res.tensors[k] = t
 		}
-
-		res.tensors[k] = t
 	}
 
 	return res, nil
+}
+
+// Check if safetensor dtype string matches the Odin type T
+dtype_matches_type :: proc($T: typeid, dtype: string) -> bool {
+	when T == f32 {
+		return dtype == "F32" || dtype == "f32" || dtype == "float32"
+	} else when T == f16 {
+		return dtype == "F16" || dtype == "f16" || dtype == "float16"
+	} else when T == f64 {
+		return dtype == "F64" || dtype == "f64" || dtype == "float64"
+	} else when T == i32 {
+		return dtype == "I32" || dtype == "i32" || dtype == "int32"
+	} else when T == i64 {
+		return dtype == "I64" || dtype == "i64" || dtype == "int64"
+	} else when T == u8 {
+		return dtype == "U8" || dtype == "u8" || dtype == "uint8"
+	} else {
+		return false
+	}
 }
 
 free_safe_tensors :: proc(
@@ -131,10 +162,23 @@ free_safe_tensors :: proc(
 	allocator := context.allocator,
 	loc := #caller_location,
 ) {
-	for k, v in st.tensors {
-		tensor.free_tensor(v, allocator)
+	for _, v in st.tensors {
+		if v.owns_data {
+			tensor.free_tensor(v, allocator)
+		} else {
+			// Tensor doesn't own data (points into mmap), just free the struct
+			delete(v.shape, allocator)
+			delete(v.strides, allocator)
+			free(v, allocator)
+		}
 	}
-	delete(st.raw_bytes, allocator)
+
+	if st._is_mmap {
+		virtual.release(raw_data(st.raw_bytes), len(st.raw_bytes))
+	} else {
+		delete(st.raw_bytes, allocator)
+	}
+
 	delete_map(st.tensors)
 	free(st, allocator)
 }
