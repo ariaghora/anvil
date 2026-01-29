@@ -1385,7 +1385,7 @@ scalar :: proc(v: $T, allocator := context.allocator) -> ^Tensor(T) {
 }
 
 scale :: proc(x: ^Tensor($T), v: T) {
-	for v, i in x.data {
+	for _, i in x.data {
 		x.data[i] *= v
 	}
 }

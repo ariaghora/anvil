@@ -619,52 +619,16 @@ forward_attention :: proc(
 	qkv := nn.forward_linear(attn.qkv, xs, allocator)
 	defer tensor.free_tensor(qkv, allocator = allocator)
 
-	// Reshape QKV for easier slicing
+	// Reshape QKV and split into Q, K, V
 	qkv_reshaped := tensor.reshape(qkv, []uint{b, n, h, 2 * d_k + d_v}, allocator)
 	defer tensor.free_tensor(qkv_reshaped, allocator = allocator)
 
-	// Create views for Q, K, V without copying data
-	// This is the key optimization - use tensor slicing/views instead of copying
-	q_shape := []uint{b, n, h, d_k}
-	k_shape := []uint{b, n, h, d_k}
-	v_shape := []uint{b, n, h, d_v}
-
-	// Create Q, K, V as views into the QKV tensor (if your tensor library supports it)
-	// Otherwise, we need to copy but can do it more efficiently
-	q := tensor.zeros(T, q_shape, allocator)
+	q := tensor.slice(qkv_reshaped, {{}, {}, {}, tensor.R(0, int(d_k))}, allocator = allocator)
 	defer tensor.free_tensor(q, allocator = allocator)
-	k := tensor.zeros(T, k_shape, allocator)
+	k := tensor.slice(qkv_reshaped, {{}, {}, {}, tensor.R(int(d_k), int(2 * d_k))}, allocator = allocator)
 	defer tensor.free_tensor(k, allocator = allocator)
-	v := tensor.zeros(T, v_shape, allocator)
+	v := tensor.slice(qkv_reshaped, {{}, {}, {}, tensor.R(int(2 * d_k), int(2 * d_k + d_v))}, allocator = allocator)
 	defer tensor.free_tensor(v, allocator = allocator)
-
-	// Optimized copy - do it in one pass with better memory access
-	qkv_copy_trace := trace.global_scoped("qkv_copy_matmul")
-	total_elements := b * n * h
-	#no_bounds_check for i in 0 ..< total_elements {
-		batch_idx := i / (n * h)
-		remainder := i % (n * h)
-		pos_idx := remainder / h
-		head_idx := remainder % h
-
-		base_src := i * (2 * d_k + d_v)
-		base_q := i * d_k
-		base_k := i * d_k
-		base_v := i * d_v
-
-		// Copy Q
-		copy(q.data[base_q:base_q + d_k], qkv_reshaped.data[base_src:base_src + d_k])
-
-		// Copy K
-		copy(k.data[base_k:base_k + d_k], qkv_reshaped.data[base_src + d_k:base_src + 2 * d_k])
-
-		// Copy V
-		copy(
-			v.data[base_v:base_v + d_v],
-			qkv_reshaped.data[base_src + 2 * d_k:base_src + 2 * d_k + d_v],
-		)
-	}
-	trace.global_end_scoped(qkv_copy_trace)
 
 	qkv_permute_transpose_matmul_trace := trace.global_scoped("qkv_permute_transpose_matmul")
 	// Reshape for attention: (B, N, H, D) -> (B, H, N, D)
@@ -683,24 +647,11 @@ forward_attention :: proc(
 	defer tensor.free_tensor(attn_scores, allocator = allocator)
 	trace.global_end_scoped(qkv_permute_transpose_matmul_trace)
 
-	// Scale scores in-place
-	scale := attn.scale
-	#no_bounds_check for i in 0 ..< b * h * n * n {
-		attn_scores.data[i] *= scale
-	}
+	tensor.scale(attn_scores, attn.scale)
 
-	// Add attention biases - broadcast across batch dimension
-	#no_bounds_check for batch in 0 ..< b {
-		for head in 0 ..< h {
-			for i in 0 ..< n {
-				for j in 0 ..< n {
-					scores_idx := batch * h * n * n + head * n * n + i * n + j
-					bias_idx := head * n * n + i * n + j
-					attn_scores.data[scores_idx] += attn.ab.data[bias_idx]
-				}
-			}
-		}
-	}
+	attn_scores_biased := tensor.add(attn_scores, attn.ab, allocator)
+	tensor.free_tensor(attn_scores, allocator = allocator)
+	attn_scores = attn_scores_biased
 
 	// Softmax - do it in-place to avoid allocation
 	// Process each (batch, head) separately
