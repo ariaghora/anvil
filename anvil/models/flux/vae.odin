@@ -620,7 +620,7 @@ vae_decode :: proc(
 
 	// Post-quant conv (1x1): 32 -> 32
 	_t_pqc := trace.global_scoped("post_quant_conv", "vae")
-	h2 := tensor.conv2d_xwb(h, vae.post_quant_conv_weight, vae.post_quant_conv_bias, 1, 0, 1, 1, allocator)
+	h2 := tensor.conv2d_xwb(h, vae.post_quant_conv_weight, vae.post_quant_conv_bias, 1, 1, 0, 1, allocator)
 	tensor.free_tensor(h, allocator)
 	h = h2
 	trace.global_end_scoped(_t_pqc)
