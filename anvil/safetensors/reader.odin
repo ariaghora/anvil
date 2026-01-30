@@ -36,9 +36,13 @@ Tensor_Info :: struct {
 // Each tensor's data in tensors will point to some offset `raw_bytes` with a
 // certain length. It means that the tensors in Safe_Tensors will not own any data.
 Safe_Tensors :: struct($T: typeid) {
-	raw_bytes: []u8,
-	tensors:   map[string]^tensor.Tensor(T),
-	_is_mmap:  bool,
+	raw_bytes:    []u8,
+	tensors:      map[string]^tensor.Tensor(T),
+	_is_mmap:     bool,
+	// Lazy loading support
+	_lazy:        bool,
+	_tensor_info: map[string]Tensor_Info,
+	_data_start:  uint,
 }
 
 read_from_file :: proc(
@@ -52,13 +56,29 @@ read_from_file :: proc(
 ) {
 	raw_bytes, map_err := virtual.map_file(fn, {.Read})
 	if map_err != .None do return nil, IO_Error{msg = fmt.tprintf("Failed to mmap safe tensor from %s", fn)}
-	return read_from_bytes(T, raw_bytes, true, allocator, loc)
+	return read_from_bytes(T, raw_bytes, true, false, allocator, loc)
+}
+
+// Lazy loading: only parse header, convert tensors on-demand via get_tensor_lazy
+read_from_file_lazy :: proc(
+	$T: typeid,
+	fn: string,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> (
+	res: ^Safe_Tensors(T),
+	er: Safe_Tensors_Error,
+) {
+	raw_bytes, map_err := virtual.map_file(fn, {.Read})
+	if map_err != .None do return nil, IO_Error{msg = fmt.tprintf("Failed to mmap safe tensor from %s", fn)}
+	return read_from_bytes(T, raw_bytes, true, true, allocator, loc)
 }
 
 read_from_bytes :: proc(
 	$T: typeid,
 	raw_bytes: []u8,
 	is_mmap := false,
+	lazy := false,
 	allocator := context.allocator,
 	loc := #caller_location,
 ) -> (
@@ -71,13 +91,19 @@ read_from_bytes :: proc(
 	json.unmarshal_string(
 		header_content,
 		&tensors_proto,
-		allocator = context.temp_allocator,
+		allocator = lazy ? allocator : context.temp_allocator, // Keep for lazy mode
 	) or_return
 
 	delete_key(&tensors_proto, "__metadata__")
 
 	tensor_data_start := header_size + 8
-	res = new_clone(Safe_Tensors(T){raw_bytes = raw_bytes, _is_mmap = is_mmap}, allocator, loc)
+	res = new_clone(Safe_Tensors(T){raw_bytes = raw_bytes, _is_mmap = is_mmap, _lazy = lazy, _data_start = tensor_data_start}, allocator, loc)
+
+	// Lazy mode: just store tensor info, don't convert yet
+	if lazy {
+		res._tensor_info = tensors_proto
+		return res, nil
+	}
 
 	for k, v in tensors_proto {
 		raw_data := raw_bytes[tensor_data_start +
@@ -106,6 +132,14 @@ read_from_bytes :: proc(
 				src_data := mem.slice_data_cast([]f16, raw_data)
 				for i in 0 ..< len(src_data) {
 					t.data[i] = T(src_data[i])
+				}
+			case "BF16", "bf16", "bfloat16":
+				// BF16: same exponent as F32, truncated mantissa
+				// Convert by shifting 16 bits left to get F32
+				src_data := mem.slice_data_cast([]u16, raw_data)
+				for i in 0 ..< len(src_data) {
+					bits := u32(src_data[i]) << 16
+					t.data[i] = T(transmute(f32)bits)
 				}
 			case "F32", "f32", "float32":
 				src_data := mem.slice_data_cast([]f32, raw_data)
@@ -157,6 +191,90 @@ dtype_matches_type :: proc($T: typeid, dtype: string) -> bool {
 	}
 }
 
+// Get tensor with lazy loading - converts from mmap on demand
+get_tensor_lazy :: proc(
+	st: ^Safe_Tensors($T),
+	name: string,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> (t: ^tensor.Tensor(T), ok: bool) {
+	// Check if already loaded
+	if existing, exists := st.tensors[name]; exists {
+		return existing, true
+	}
+
+	// Must be in lazy mode with tensor info
+	if !st._lazy {
+		return nil, false
+	}
+
+	v, info_exists := st._tensor_info[name]
+	if !info_exists {
+		return nil, false
+	}
+
+	raw_data := st.raw_bytes[st._data_start + v.data_offsets[0]:st._data_start + v.data_offsets[1]]
+
+	// Check if we can do zero-copy
+	can_zero_copy := st._is_mmap && dtype_matches_type(T, v.dtype)
+
+	if can_zero_copy {
+		t = tensor.tensor_alloc(T, v.shape, owns_data = false, allocator = allocator, loc = loc)
+		t.data = mem.slice_data_cast([]T, raw_data)
+	} else {
+		t = tensor.tensor_alloc(T, v.shape, owns_data = true, allocator = allocator, loc = loc)
+		convert_tensor_data(t, raw_data, v.dtype)
+	}
+
+	st.tensors[name] = t
+	return t, true
+}
+
+// Helper to convert tensor data from various dtypes
+@(private = "file")
+convert_tensor_data :: proc(t: ^tensor.Tensor($T), raw_data: []u8, dtype: string) {
+	switch dtype {
+	case "U8", "u8", "uint8":
+		src_data := mem.slice_data_cast([]u8, raw_data)
+		for i in 0 ..< len(src_data) {
+			t.data[i] = T(src_data[i])
+		}
+	case "F16", "f16", "float16":
+		src_data := mem.slice_data_cast([]f16, raw_data)
+		for i in 0 ..< len(src_data) {
+			t.data[i] = T(src_data[i])
+		}
+	case "BF16", "bf16", "bfloat16":
+		src_data := mem.slice_data_cast([]u16, raw_data)
+		for i in 0 ..< len(src_data) {
+			bits := u32(src_data[i]) << 16
+			t.data[i] = T(transmute(f32)bits)
+		}
+	case "F32", "f32", "float32":
+		src_data := mem.slice_data_cast([]f32, raw_data)
+		for i in 0 ..< len(src_data) {
+			t.data[i] = T(src_data[i])
+		}
+	case "F64", "f64", "float64":
+		src_data := mem.slice_data_cast([]f64, raw_data)
+		for i in 0 ..< len(src_data) {
+			t.data[i] = T(src_data[i])
+		}
+	case "I32", "i32", "int32":
+		src_data := mem.slice_data_cast([]i32, raw_data)
+		for i in 0 ..< len(src_data) {
+			t.data[i] = T(src_data[i])
+		}
+	case "I64", "i64", "int64":
+		src_data := mem.slice_data_cast([]i64, raw_data)
+		for i in 0 ..< len(src_data) {
+			t.data[i] = T(src_data[i])
+		}
+	case:
+		panic(fmt.tprintf("Unsupported dtype: %s", dtype))
+	}
+}
+
 free_safe_tensors :: proc(
 	st: ^Safe_Tensors($T),
 	allocator := context.allocator,
@@ -171,6 +289,14 @@ free_safe_tensors :: proc(
 			delete(v.strides, allocator)
 			free(v, allocator)
 		}
+	}
+
+	// Free tensor info map if in lazy mode
+	if st._lazy {
+		for k, v in st._tensor_info {
+			delete(v.shape)
+		}
+		delete(st._tensor_info)
 	}
 
 	if st._is_mmap {
@@ -195,7 +321,15 @@ tensor_assign_from_safe_tensors_one :: proc(
 	should_transpose := false,
 	loc := #caller_location,
 ) -> Safe_Tensors_Error {
-	t_from, ok := safe_tensors.tensors[tensor_name]
+	t_from: ^tensor.Tensor(T)
+	ok: bool
+
+	// Try lazy loading first if in lazy mode
+	if safe_tensors._lazy {
+		t_from, ok = get_tensor_lazy(safe_tensors, tensor_name)
+	} else {
+		t_from, ok = safe_tensors.tensors[tensor_name]
+	}
 	if !ok do return Tensor_Not_Found{tensor_name}
 
 	if should_transpose do t_from = tensor.transpose(t_from, 0, 1)
