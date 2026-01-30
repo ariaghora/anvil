@@ -79,17 +79,29 @@ load_tokenizer :: proc(
 		if merges, ok := model["merges"].(json.Array); ok {
 			tok.merges = make([]Merge, len(merges), allocator)
 			for merge_val, i in merges {
-				merge_str := merge_val.(json.String)
-				// Parse "token1 token2" format
-				parts := strings.split(merge_str, " ", context.temp_allocator)
-				if len(parts) >= 2 {
-					tok.merges[i] = Merge {
-						pair      = {strings.clone(parts[0], allocator), strings.clone(parts[1], allocator)},
-						new_token = strings.clone(strings.concatenate(parts[:2], context.temp_allocator), allocator),
-						rank      = i,
+				// Merges can be either ["token1", "token2"] array or "token1 token2" string
+				if merge_arr, is_arr := merge_val.(json.Array); is_arr {
+					if len(merge_arr) >= 2 {
+						t1 := merge_arr[0].(json.String)
+						t2 := merge_arr[1].(json.String)
+						tok.merges[i] = Merge {
+							pair      = {strings.clone(t1, allocator), strings.clone(t2, allocator)},
+							new_token = strings.clone(strings.concatenate({t1, t2}, context.temp_allocator), allocator),
+							rank      = i,
+						}
+						merge_key := strings.concatenate({t1, " ", t2}, context.temp_allocator)
+						tok.merge_ranks[strings.clone(merge_key, allocator)] = i
 					}
-					// Build merge lookup
-					tok.merge_ranks[strings.clone(merge_str, allocator)] = i
+				} else if merge_str, is_str := merge_val.(json.String); is_str {
+					parts := strings.split(merge_str, " ", context.temp_allocator)
+					if len(parts) >= 2 {
+						tok.merges[i] = Merge {
+							pair      = {strings.clone(parts[0], allocator), strings.clone(parts[1], allocator)},
+							new_token = strings.clone(strings.concatenate(parts[:2], context.temp_allocator), allocator),
+							rank      = i,
+						}
+						tok.merge_ranks[strings.clone(merge_str, allocator)] = i
+					}
 				}
 			}
 		}

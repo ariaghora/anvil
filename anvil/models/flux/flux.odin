@@ -16,6 +16,7 @@ import "core:fmt"
 import "core:mem"
 import "core:os"
 import "core:strings"
+import "core:time"
 
 // Model configuration for FLUX.2-klein-4B
 HIDDEN_SIZE :: 3072
@@ -221,11 +222,16 @@ generate :: proc(
 	params: Gen_Params,
 	allocator := context.allocator,
 ) -> (img: ^Image, err: string) {
+	t_start := time.now()
+
 	// Encode text
 	text_emb: ^tensor.Tensor(T)
 	text_emb, err = encode_text(flux, prompt, allocator)
 	if err != "" do return nil, err
 	defer tensor.free_tensor(text_emb, allocator)
+
+	t_text := time.now()
+	fmt.printf("Text encoding: %.2fs\n", time.duration_seconds(time.diff(t_start, t_text)))
 
 	// Release text encoder to free ~8GB before loading transformer
 	release_text_encoder(flux, allocator)
@@ -249,11 +255,20 @@ generate :: proc(
 	defer delete(schedule, allocator)
 
 	// Sample
+	t_sample_start := time.now()
 	latent := euler_sample(flux.transformer, z, text_emb, schedule, params.num_steps, allocator)
 	defer tensor.free_tensor(latent, allocator)
 
+	t_sample := time.now()
+	fmt.printf("Sampling (%d steps): %.2fs\n", params.num_steps, time.duration_seconds(time.diff(t_sample_start, t_sample)))
+
 	// Decode latent to image
 	img = vae_decode_to_image(flux.vae, latent, allocator)
+
+	t_end := time.now()
+	fmt.printf("VAE decode: %.2fs\n", time.duration_seconds(time.diff(t_sample, t_end)))
+	fmt.printf("Total: %.2fs\n", time.duration_seconds(time.diff(t_start, t_end)))
+
 	return img, ""
 }
 
@@ -303,6 +318,7 @@ img2img :: proc(
 	latent := euler_sample_with_ref(
 		flux.transformer, z, text_emb, ref_latent,
 		schedule, params.num_steps, 10, // t_offset=10 for single ref
+		latent_h, latent_w,
 		allocator,
 	)
 	defer tensor.free_tensor(latent, allocator)

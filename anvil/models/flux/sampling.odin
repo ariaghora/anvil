@@ -11,34 +11,51 @@ import "core:math"
 import "core:math/rand"
 import "core:mem"
 
-// Compute FLUX noise schedule
-// Based on flux2.c: shifted sigmoid schedule
+// Compute empirical mu for FLUX.2 official schedule
+// Matches Python's get_schedule() from official flux2 code
+@(private = "file")
+compute_empirical_mu :: proc(image_seq_len: int, num_steps: int) -> f32 {
+	a1 : f32 = 8.73809524e-05
+	b1 : f32 = 1.89833333
+	a2 : f32 = 0.00016927
+	b2 : f32 = 0.45666666
+
+	if image_seq_len > 4300 {
+		return a2 * f32(image_seq_len) + b2
+	}
+
+	m_200 := a2 * f32(image_seq_len) + b2
+	m_10 := a1 * f32(image_seq_len) + b1
+
+	a := (m_200 - m_10) / 190.0
+	b := m_200 - 200.0 * a
+	return a * f32(num_steps) + b
+}
+
+// Generalized time SNR shift
+@(private = "file")
+generalized_time_snr_shift :: proc(t: f32, mu: f32, sigma: f32) -> f32 {
+	if t <= 0.0 do return 0.0
+	if t >= 1.0 do return 1.0
+	return math.exp(mu) / (math.exp(mu) + math.pow(1.0 / t - 1.0, sigma))
+}
+
+// FLUX.2 official schedule with empirical mu calculation
+// Matches antirez's flux_official_schedule
 flux_schedule :: proc(
 	num_steps: int,
 	image_seq_len: int,
 	allocator := context.allocator,
 ) -> []f32 {
 	schedule := make([]f32, num_steps + 1, allocator)
-
-	// FLUX uses a shifted schedule based on image resolution
-	// shift = 1.0 + (image_seq_len / 256) * 0.5
-	shift := f32(1.0) + f32(image_seq_len) / f32(256) * f32(0.5)
+	mu := compute_empirical_mu(image_seq_len, num_steps)
 
 	for i in 0 ..= num_steps {
-		t := f32(i) / f32(num_steps)
-		// Shifted sigmoid: sigma(t) = 1 / (1 + exp(-shift * (t - 0.5)))
-		// But for rectified flow, we use linear interpolation with shift
-		schedule[i] = shift_time(t, shift)
+		t := 1.0 - f32(i) / f32(num_steps)  // Linear from 1 to 0
+		schedule[i] = generalized_time_snr_shift(t, mu, 1.0)
 	}
 
 	return schedule
-}
-
-// Apply shift to timestep
-@(private = "file")
-shift_time :: proc(t: f32, shift: f32) -> f32 {
-	// shift(t) = (shift * t) / (1 + (shift - 1) * t)
-	return (shift * t) / (f32(1.0) + (shift - f32(1.0)) * t)
 }
 
 // Initialize random noise tensor
@@ -81,20 +98,78 @@ init_noise :: proc(
 	return noise
 }
 
+// Patchify: reshape [B, C, H, W] -> [B, H*W, C]
+@(private = "file")
+patchify :: proc(x: ^tensor.Tensor($T), allocator := context.allocator) -> ^tensor.Tensor(T) {
+	batch := x.shape[0]
+	channels := x.shape[1]
+	h := x.shape[2]
+	w := x.shape[3]
+	seq_len := h * w
+
+	result := tensor.tensor_alloc(T, []uint{batch, seq_len, channels}, true, allocator)
+
+	for b in 0 ..< int(batch) {
+		for y in 0 ..< int(h) {
+			for x_pos in 0 ..< int(w) {
+				seq_idx := y * int(w) + x_pos
+				for c in 0 ..< int(channels) {
+					src := b * int(channels * h * w) + c * int(h * w) + y * int(w) + x_pos
+					dst := b * int(seq_len * channels) + seq_idx * int(channels) + c
+					result.data[dst] = x.data[src]
+				}
+			}
+		}
+	}
+	return result
+}
+
+// Unpatchify: reshape [B, H*W, C] -> [B, C, H, W]
+@(private = "file")
+unpatchify :: proc(x: ^tensor.Tensor($T), h, w: uint, allocator := context.allocator) -> ^tensor.Tensor(T) {
+	batch := x.shape[0]
+	channels := x.shape[2]
+	seq_len := h * w
+
+	result := tensor.tensor_alloc(T, []uint{batch, channels, h, w}, true, allocator)
+
+	for b in 0 ..< int(batch) {
+		for y in 0 ..< int(h) {
+			for x_pos in 0 ..< int(w) {
+				seq_idx := y * int(w) + x_pos
+				for c in 0 ..< int(channels) {
+					src := b * int(seq_len * channels) + seq_idx * int(channels) + c
+					dst := b * int(channels * h * w) + c * int(h * w) + y * int(w) + x_pos
+					result.data[dst] = x.data[src]
+				}
+			}
+		}
+	}
+	return result
+}
+
 // Euler sampler for rectified flow
 // z_t = (1-t) * z_0 + t * x  (where x is data, z_0 is noise)
 // v = x - z_0 (velocity field)
 // ODE: dz/dt = v
 euler_sample :: proc(
 	tf: ^Transformer($T),
-	z: ^tensor.Tensor(T), // Initial noise
+	z: ^tensor.Tensor(T), // Initial noise [B, C, H, W]
 	txt_emb: ^tensor.Tensor(T), // Text embeddings
 	schedule: []T, // Timestep schedule
 	num_steps: int,
 	allocator := context.allocator,
 ) -> ^tensor.Tensor(T) {
-	// Clone initial noise as working tensor
-	z_t := tensor.clone(z, allocator)
+	// Get spatial dimensions for unpatchify later
+	h := z.shape[2]
+	w := z.shape[3]
+
+	// Patchify to sequence format [B, C, H, W] -> [B, H*W, C]
+	z_seq := patchify(z, allocator)
+	defer tensor.free_tensor(z_seq, allocator)
+
+	// Clone as working tensor
+	z_t := tensor.clone(z_seq, allocator)
 
 	for step in 0 ..< num_steps {
 		// Current and next timesteps
@@ -103,7 +178,7 @@ euler_sample :: proc(
 		dt := t_next - t
 
 		// Predict velocity at current timestep
-		v := transformer_forward(tf, z_t, txt_emb, t, allocator)
+		v := transformer_forward(tf, z_t, txt_emb, t, h, w, allocator)
 		defer tensor.free_tensor(v, allocator)
 
 		// Euler step: z_{t+dt} = z_t + dt * v
@@ -112,7 +187,11 @@ euler_sample :: proc(
 		}
 	}
 
-	return z_t
+	// Unpatchify back to spatial format [B, H*W, C] -> [B, C, H, W]
+	result := unpatchify(z_t, h, w, allocator)
+	tensor.free_tensor(z_t, allocator)
+
+	return result
 }
 
 // Euler sampler with reference image (for img2img)
@@ -125,6 +204,7 @@ euler_sample_with_ref :: proc(
 	schedule: []T,
 	num_steps: int,
 	t_offset: int, // Skip first t_offset steps (strength control)
+	img_height, img_width: uint, // Image dimensions for RoPE
 	allocator := context.allocator,
 ) -> ^tensor.Tensor(T) {
 	// Mix noise with reference based on t_offset
@@ -144,7 +224,7 @@ euler_sample_with_ref :: proc(
 		t_next := schedule[step + 1]
 		dt := t_next - t
 
-		v := transformer_forward(tf, z_t, txt_emb, t, allocator)
+		v := transformer_forward(tf, z_t, txt_emb, t, img_height, img_width, allocator)
 		defer tensor.free_tensor(v, allocator)
 
 		for i in 0 ..< len(z_t.data) {
@@ -197,6 +277,7 @@ ddim_sample :: proc(
 	num_steps: int,
 	eta: T, // Stochasticity (0 = deterministic)
 	seed: i64,
+	img_height, img_width: uint, // Image dimensions for RoPE
 	allocator := context.allocator,
 ) -> ^tensor.Tensor(T) {
 	z_t := tensor.clone(z, allocator)
@@ -214,7 +295,7 @@ ddim_sample :: proc(
 		t_next := schedule[step + 1]
 
 		// Predict velocity
-		v := transformer_forward(tf, z_t, txt_emb, t, allocator)
+		v := transformer_forward(tf, z_t, txt_emb, t, img_height, img_width, allocator)
 		defer tensor.free_tensor(v, allocator)
 
 		// DDIM update
@@ -261,6 +342,7 @@ euler_sample_cfg :: proc(
 	schedule: []T,
 	num_steps: int,
 	guidance_scale: T,
+	img_height, img_width: uint, // Image dimensions for RoPE
 	allocator := context.allocator,
 ) -> ^tensor.Tensor(T) {
 	z_t := tensor.clone(z, allocator)
@@ -271,11 +353,11 @@ euler_sample_cfg :: proc(
 		dt := t_next - t
 
 		// Conditional prediction
-		v_cond := transformer_forward(tf, z_t, txt_emb, t, allocator)
+		v_cond := transformer_forward(tf, z_t, txt_emb, t, img_height, img_width, allocator)
 		defer tensor.free_tensor(v_cond, allocator)
 
 		// Unconditional prediction
-		v_uncond := transformer_forward(tf, z_t, null_emb, t, allocator)
+		v_uncond := transformer_forward(tf, z_t, null_emb, t, img_height, img_width, allocator)
 		defer tensor.free_tensor(v_uncond, allocator)
 
 		// Apply CFG

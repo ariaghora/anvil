@@ -48,8 +48,7 @@ Single_Block_Weights :: struct($T: typeid) {
 
 // Transformer context
 Transformer :: struct($T: typeid) {
-	config:     Transformer_Config,
-	rope_freqs: ^tensor.Tensor(T),
+	config: Transformer_Config,
 
 	// Safetensors file (kept open for lazy loading)
 	_sf: ^st.Safe_Tensors(T),
@@ -103,9 +102,6 @@ load_transformer :: proc(
 
 	tf._sf = sf
 
-	// Only precompute RoPE (small, needed for all forward passes)
-	tf.rope_freqs = compute_rope_freqs(T, 4096, tf.config.rope_dim, tf.config.rope_theta, allocator)
-
 	return tf, ""
 }
 
@@ -122,8 +118,6 @@ free_transformer :: proc(tf: ^Transformer($T), allocator := context.allocator) {
 	if tf.mod_img != nil do nn.free_linear(tf.mod_img, allocator)
 	if tf.mod_txt != nil do nn.free_linear(tf.mod_txt, allocator)
 	if tf.mod_single != nil do nn.free_linear(tf.mod_single, allocator)
-
-	tensor.free_tensor(tf.rope_freqs, allocator)
 
 	if tf._sf != nil {
 		st.free_safe_tensors(tf._sf, allocator)
@@ -285,25 +279,39 @@ silu :: proc(x: $T) -> T {
 }
 
 // SwiGLU MLP
+// x: [batch, seq, hidden] -> [batch, seq, hidden]
 swiglu_mlp :: proc(x: ^tensor.Tensor($T), fc1, fc2: ^nn.Linear(T), allocator := context.allocator) -> ^tensor.Tensor(T) {
+	// fc1: [batch, seq, hidden] -> [batch, seq, mlp_h*2]
 	hidden := nn.forward_linear(fc1, x, allocator)
 	defer tensor.free_tensor(hidden, allocator)
 
-	hidden_size := hidden.shape[len(hidden.shape) - 1] / 2
-	batch_size := 1
+	// Preserve original shape structure
+	mlp_hidden := hidden.shape[len(hidden.shape) - 1] / 2
+
+	// Allocate gated with same shape as hidden but half the last dim
+	gated_shape := make([]uint, len(hidden.shape), context.temp_allocator)
 	for i in 0 ..< len(hidden.shape) - 1 {
-		batch_size *= int(hidden.shape[i])
+		gated_shape[i] = hidden.shape[i]
+	}
+	gated_shape[len(hidden.shape) - 1] = mlp_hidden
+
+	gated := tensor.tensor_alloc(T, gated_shape, true, allocator)
+
+	// Compute SiLU(gate) * up for each position
+	num_positions := 1
+	for i in 0 ..< len(hidden.shape) - 1 {
+		num_positions *= int(hidden.shape[i])
 	}
 
-	gated := tensor.tensor_alloc(T, []uint{uint(batch_size), hidden_size}, true, allocator)
-	for b in 0 ..< batch_size {
-		for i in 0 ..< int(hidden_size) {
-			gate_val := hidden.data[b * int(hidden_size * 2) + i]
-			up_val := hidden.data[b * int(hidden_size * 2) + int(hidden_size) + i]
-			gated.data[b * int(hidden_size) + i] = silu(gate_val) * up_val
+	for p in 0 ..< num_positions {
+		for i in 0 ..< int(mlp_hidden) {
+			gate_val := hidden.data[p * int(mlp_hidden * 2) + i]
+			up_val := hidden.data[p * int(mlp_hidden * 2) + int(mlp_hidden) + i]
+			gated.data[p * int(mlp_hidden) + i] = silu(gate_val) * up_val
 		}
 	}
 
+	// fc2: [batch, seq, mlp_h] -> [batch, seq, hidden]
 	result := nn.forward_linear(fc2, gated, allocator)
 	tensor.free_tensor(gated, allocator)
 	return result
@@ -360,6 +368,34 @@ slice_dim :: proc(t: ^tensor.Tensor($T), dim: int, start, end: uint, allocator :
 	return tensor.slice(t, slices, false, allocator)
 }
 
+// QK-Norm: RMSNorm applied per-head
+// x: [batch, seq, num_heads * head_dim], weight: [head_dim]
+qk_norm :: proc(x: ^tensor.Tensor($T), weight: ^tensor.Tensor(T), num_heads, head_dim: uint, eps: T, allocator := context.allocator) -> ^tensor.Tensor(T) {
+	result := tensor.tensor_alloc(T, x.shape, true, allocator)
+	batch := x.shape[0]
+	seq_len := x.shape[1]
+
+	for b in 0 ..< int(batch) {
+		for s in 0 ..< int(seq_len) {
+			for h in 0 ..< int(num_heads) {
+				base := b * int(seq_len * num_heads * head_dim) + s * int(num_heads * head_dim) + h * int(head_dim)
+				// Compute RMS for this head
+				sq_sum: T = 0
+				for d in 0 ..< int(head_dim) {
+					val := x.data[base + d]
+					sq_sum += val * val
+				}
+				inv_rms := T(1.0) / math.sqrt(sq_sum / T(head_dim) + eps)
+				// Apply norm with weight
+				for d in 0 ..< int(head_dim) {
+					result.data[base + d] = x.data[base + d] * inv_rms * weight.data[d]
+				}
+			}
+		}
+	}
+	return result
+}
+
 // Attention with QK-Norm and RoPE
 attention_with_rope :: proc(
 	q, k, v: ^tensor.Tensor($T),
@@ -372,13 +408,13 @@ attention_with_rope :: proc(
 	seq_len := q.shape[1]
 	eps := T(1e-6)
 
-	q_normed := rms_norm(q, q_norm, eps, allocator)
+	q_normed := qk_norm(q, q_norm, num_heads, head_dim, eps, allocator)
 	defer tensor.free_tensor(q_normed, allocator)
-	k_normed := rms_norm(k, k_norm, eps, allocator)
+	k_normed := qk_norm(k, k_norm, num_heads, head_dim, eps, allocator)
 	defer tensor.free_tensor(k_normed, allocator)
 
-	apply_rope_inplace(q_normed, freqs, num_heads, head_dim)
-	apply_rope_inplace(k_normed, freqs, num_heads, head_dim)
+	apply_rope_flux_inplace(q_normed, freqs, num_heads, head_dim)
+	apply_rope_flux_inplace(k_normed, freqs, num_heads, head_dim)
 
 	q_heads := tensor.reshape(q_normed, []uint{batch, seq_len, num_heads, head_dim}, allocator)
 	defer tensor.free_tensor(q_heads, allocator)
@@ -417,17 +453,74 @@ attention_with_rope :: proc(
 	return result
 }
 
+// Attention without QK-Norm or RoPE (already applied externally)
+// q: [batch, q_seq, hidden], k/v: [batch, kv_seq, hidden]
+// Supports different sequence lengths for Q vs K/V (cross-attention style)
+attention_no_rope :: proc(
+	q, k, v: ^tensor.Tensor($T),
+	num_heads, head_dim: uint,
+	allocator := context.allocator,
+) -> ^tensor.Tensor(T) {
+	batch := q.shape[0]
+	q_seq := q.shape[1]
+	kv_seq := k.shape[1]
+
+	// Reshape to [batch, seq, num_heads, head_dim]
+	q_heads := tensor.reshape(q, []uint{batch, q_seq, num_heads, head_dim}, allocator)
+	defer tensor.free_tensor(q_heads, allocator)
+	k_heads := tensor.reshape(k, []uint{batch, kv_seq, num_heads, head_dim}, allocator)
+	defer tensor.free_tensor(k_heads, allocator)
+	v_heads := tensor.reshape(v, []uint{batch, kv_seq, num_heads, head_dim}, allocator)
+	defer tensor.free_tensor(v_heads, allocator)
+
+	// Transpose to [batch, num_heads, seq, head_dim]
+	q_t := tensor.transpose(q_heads, 1, 2, allocator)
+	defer tensor.free_tensor(q_t, allocator)
+	k_t := tensor.transpose(k_heads, 1, 2, allocator)
+	defer tensor.free_tensor(k_t, allocator)
+	v_t := tensor.transpose(v_heads, 1, 2, allocator)
+	defer tensor.free_tensor(v_t, allocator)
+
+	scale := T(1.0) / math.sqrt(T(head_dim))
+
+	// K^T: [batch, num_heads, head_dim, kv_seq]
+	k_transposed := tensor.transpose(k_t, 2, 3, allocator)
+	defer tensor.free_tensor(k_transposed, allocator)
+
+	// scores: [batch, num_heads, q_seq, kv_seq]
+	scores := tensor.matmul(q_t, k_transposed, allocator)
+	defer tensor.free_tensor(scores, allocator)
+
+	for i in 0 ..< len(scores.data) {
+		scores.data[i] *= scale
+	}
+	tensor.softmax_last_dim_inplace(scores)
+
+	// attn_out: [batch, num_heads, q_seq, head_dim]
+	attn_out := tensor.matmul(scores, v_t, allocator)
+	// Transpose back: [batch, q_seq, num_heads, head_dim]
+	attn_t := tensor.transpose(attn_out, 1, 2, allocator)
+	tensor.free_tensor(attn_out, allocator)
+
+	// Reshape to [batch, q_seq, hidden]
+	result := tensor.reshape(attn_t, []uint{batch, q_seq, num_heads * head_dim}, allocator)
+	tensor.free_tensor(attn_t, allocator)
+
+	return result
+}
+
 // ============================================================================
 // Block Forward Passes
 // ============================================================================
 
 // Double block forward (MM-DiT: separate img/txt streams, joint attention)
+// Per antirez: Q stays separate, only K/V concatenated, RoPE applied BEFORE concat
 double_block_forward :: proc(
 	b: ^Double_Block_Weights($T),
 	img, txt: ^tensor.Tensor(T),
 	t_emb: ^tensor.Tensor(T),
 	mod_img, mod_txt: ^nn.Linear(T),
-	freqs: ^tensor.Tensor(T),
+	img_rope, txt_rope: ^tensor.Tensor(T),  // Separate RoPE for each stream
 	num_heads, head_dim: uint,
 	allocator := context.allocator,
 ) -> (img_out, txt_out: ^tensor.Tensor(T)) {
@@ -474,8 +567,7 @@ double_block_forward :: proc(
 	txt_gate2 := slice_last_dim(txt_mod, 5*mod_dim, 6*mod_dim, allocator)
 	defer tensor.free_tensor(txt_gate2, allocator)
 
-	// === Image stream attention ===
-	// AdaLN: (1 + scale) * LayerNorm(x) + shift
+	// === Image stream: AdaLN + QKV projection ===
 	img_normed := layer_norm_adaln(img, img_shift1, img_scale1, eps, allocator)
 	defer tensor.free_tensor(img_normed, allocator)
 
@@ -486,7 +578,7 @@ double_block_forward :: proc(
 	img_v := nn.forward_linear(b.img_to_v, img_normed, allocator)
 	defer tensor.free_tensor(img_v, allocator)
 
-	// === Text stream attention ===
+	// === Text stream: AdaLN + QKV projection ===
 	txt_normed := layer_norm_adaln(txt, txt_shift1, txt_scale1, eps, allocator)
 	defer tensor.free_tensor(txt_normed, allocator)
 
@@ -497,22 +589,35 @@ double_block_forward :: proc(
 	txt_v := nn.forward_linear(b.txt_to_v, txt_normed, allocator)
 	defer tensor.free_tensor(txt_v, allocator)
 
-	// Joint attention
-	joint_q := tensor.cat([]^tensor.Tensor(T){img_q, txt_q}, 1, allocator)
-	defer tensor.free_tensor(joint_q, allocator)
-	joint_k := tensor.cat([]^tensor.Tensor(T){img_k, txt_k}, 1, allocator)
-	defer tensor.free_tensor(joint_k, allocator)
-	joint_v := tensor.cat([]^tensor.Tensor(T){img_v, txt_v}, 1, allocator)
-	defer tensor.free_tensor(joint_v, allocator)
+	// === Apply QK-norm SEPARATELY with correct weights per stream ===
+	img_q_normed := qk_norm(img_q, b.img_norm_q, num_heads, head_dim, eps, allocator)
+	defer tensor.free_tensor(img_q_normed, allocator)
+	img_k_normed := qk_norm(img_k, b.img_norm_k, num_heads, head_dim, eps, allocator)
+	defer tensor.free_tensor(img_k_normed, allocator)
 
-	joint_attn := attention_with_rope(joint_q, joint_k, joint_v, b.img_norm_q, b.img_norm_k, freqs, num_heads, head_dim, allocator)
-	defer tensor.free_tensor(joint_attn, allocator)
+	txt_q_normed := qk_norm(txt_q, b.txt_norm_q, num_heads, head_dim, eps, allocator)
+	defer tensor.free_tensor(txt_q_normed, allocator)
+	txt_k_normed := qk_norm(txt_k, b.txt_norm_k, num_heads, head_dim, eps, allocator)
+	defer tensor.free_tensor(txt_k_normed, allocator)
 
-	// Split back
-	img_seq_len := img.shape[1]
-	img_attn := slice_dim(joint_attn, 1, 0, img_seq_len, allocator)
+	// === Apply RoPE SEPARATELY before concatenation ===
+	// img uses 2D spatial (axes 1,2), txt uses 1D sequential (axis 3)
+	apply_rope_flux_inplace(img_q_normed, img_rope, num_heads, head_dim)
+	apply_rope_flux_inplace(img_k_normed, img_rope, num_heads, head_dim)
+	apply_rope_flux_inplace(txt_q_normed, txt_rope, num_heads, head_dim)
+	apply_rope_flux_inplace(txt_k_normed, txt_rope, num_heads, head_dim)
+
+	// === Joint attention: concatenate ONLY K and V (Q stays separate!) ===
+	// Order: [txt, img] per antirez
+	cat_k := tensor.cat([]^tensor.Tensor(T){txt_k_normed, img_k_normed}, 1, allocator)
+	defer tensor.free_tensor(cat_k, allocator)
+	cat_v := tensor.cat([]^tensor.Tensor(T){txt_v, img_v}, 1, allocator)
+	defer tensor.free_tensor(cat_v, allocator)
+
+	// === Two SEPARATE attention calls ===
+	img_attn := attention_no_rope(img_q_normed, cat_k, cat_v, num_heads, head_dim, allocator)
 	defer tensor.free_tensor(img_attn, allocator)
-	txt_attn := slice_dim(joint_attn, 1, img_seq_len, joint_attn.shape[1], allocator)
+	txt_attn := attention_no_rope(txt_q_normed, cat_k, cat_v, num_heads, head_dim, allocator)
 	defer tensor.free_tensor(txt_attn, allocator)
 
 	// Project and gate
@@ -676,12 +781,25 @@ transformer_forward :: proc(
 	img_latent: ^tensor.Tensor(T),
 	txt_emb: ^tensor.Tensor(T),
 	timestep: T,
+	img_height, img_width: uint,  // Needed for 4-axis RoPE
 	allocator := context.allocator,
 ) -> ^tensor.Tensor(T) {
 	// Load shared weights on first call
 	ensure_shared_loaded(tf, allocator)
 
-	// Time embedding
+	txt_len := txt_emb.shape[1]
+
+	// Compute separate RoPE for double blocks (applied before K/V concat)
+	img_rope := compute_rope_freqs_img(T, img_height, img_width, tf.config.head_dim, tf.config.rope_theta, allocator)
+	defer tensor.free_tensor(img_rope, allocator)
+	txt_rope := compute_rope_freqs_txt(T, txt_len, tf.config.head_dim, tf.config.rope_theta, allocator)
+	defer tensor.free_tensor(txt_rope, allocator)
+
+	// Compute unified RoPE for single blocks (txt first, then img)
+	rope_freqs := compute_rope_freqs_flux(T, txt_len, img_height, img_width, tf.config.head_dim, tf.config.rope_theta, allocator)
+	defer tensor.free_tensor(rope_freqs, allocator)
+
+	// Time embedding (used only for modulation, NOT added directly to img)
 	t_emb := time_embed_forward(&tf.time_embed, timestep, allocator)
 	defer tensor.free_tensor(t_emb, allocator)
 
@@ -689,13 +807,10 @@ transformer_forward :: proc(
 	img := nn.forward_linear(tf.img_in, img_latent, allocator)
 	txt := nn.forward_linear(tf.txt_in, txt_emb, allocator)
 
-	// Add time embedding to image
-	tensor.add_inplace(img, t_emb)
-
 	// Double blocks (load -> forward -> free)
 	for i in 0 ..< int(tf.config.num_double_layers) {
 		block := load_double_block(tf._sf, i, tf.config.hidden_size, tf.config.mlp_hidden, tf.config.head_dim, allocator)
-		img_new, txt_new := double_block_forward(&block, img, txt, t_emb, tf.mod_img, tf.mod_txt, tf.rope_freqs, tf.config.num_heads, tf.config.head_dim, allocator)
+		img_new, txt_new := double_block_forward(&block, img, txt, t_emb, tf.mod_img, tf.mod_txt, img_rope, txt_rope, tf.config.num_heads, tf.config.head_dim, allocator)
 		free_double_block(&block, allocator)
 
 		tensor.free_tensor(img, allocator)
@@ -704,24 +819,24 @@ transformer_forward :: proc(
 		txt = txt_new
 	}
 
-	// Concatenate for single blocks
-	combined := tensor.cat([]^tensor.Tensor(T){img, txt}, 1, allocator)
+	// Concatenate for single blocks - [txt, img] order to match double blocks
+	txt_seq_len := txt_emb.shape[1]
+	combined := tensor.cat([]^tensor.Tensor(T){txt, img}, 1, allocator)
 	tensor.free_tensor(img, allocator)
 	tensor.free_tensor(txt, allocator)
 
 	// Single blocks (load -> forward -> free)
 	for i in 0 ..< int(tf.config.num_single_layers) {
 		block := load_single_block(tf._sf, i, tf.config.hidden_size, tf.config.mlp_hidden, tf.config.head_dim, allocator)
-		combined_new := single_block_forward(&block, combined, t_emb, tf.mod_single, tf.rope_freqs, tf.config.num_heads, tf.config.head_dim, tf.config.mlp_hidden, allocator)
+		combined_new := single_block_forward(&block, combined, t_emb, tf.mod_single, rope_freqs, tf.config.num_heads, tf.config.head_dim, tf.config.mlp_hidden, allocator)
 		free_single_block(&block, allocator)
 
 		tensor.free_tensor(combined, allocator)
 		combined = combined_new
 	}
 
-	// Extract image portion
-	img_seq_len := img_latent.shape[1]
-	img_out := slice_dim(combined, 1, 0, img_seq_len, allocator)
+	// Extract image portion (comes after txt in [txt, img] order)
+	img_out := slice_dim(combined, 1, txt_seq_len, combined.shape[1], allocator)
 	tensor.free_tensor(combined, allocator)
 
 	// Final modulation

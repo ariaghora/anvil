@@ -716,6 +716,8 @@ matmul :: proc(
 
 	// Validate inner matrix dimensions match
 	if a_k != b_k {
+		fmt.eprintln("matmul error: a.shape =", a.shape, "b.shape =", b.shape)
+		fmt.eprintln("  a_k =", a_k, "b_k =", b_k)
 		panic("Matrix dimensions incompatible for multiplication")
 	}
 

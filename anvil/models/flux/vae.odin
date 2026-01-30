@@ -87,6 +87,8 @@ VAE :: struct($T: typeid) {
 	// Quantization convs
 	quant_conv_weight, quant_conv_bias:           ^tensor.Tensor(T),
 	post_quant_conv_weight, post_quant_conv_bias: ^tensor.Tensor(T),
+	// Batch norm for latent denormalization
+	bn_running_mean, bn_running_var: ^tensor.Tensor(T),
 }
 
 // Load VAE from safetensors file
@@ -194,6 +196,9 @@ load_vae_decoder_weights :: proc(vae: ^VAE($T), sf: ^st.Safe_Tensors(T), allocat
 	// Post quant conv
 	vae.post_quant_conv_weight = get_tensor(sf, "post_quant_conv.weight", allocator)
 	vae.post_quant_conv_bias = get_tensor(sf, "post_quant_conv.bias", allocator)
+	// Batch norm stats for latent denormalization (FLUX.2-klein specific)
+	vae.bn_running_mean = get_tensor(sf, "bn.running_mean", allocator)
+	vae.bn_running_var = get_tensor(sf, "bn.running_var", allocator)
 
 	// Conv in
 	vae.dec_conv_in_weight = get_tensor(sf, "decoder.conv_in.weight", allocator)
@@ -533,17 +538,94 @@ vae_encode :: proc(
 	return latent
 }
 
+// Denormalize latent using batch norm statistics
+// x = x * sqrt(var + eps) + mean
+@(private = "file")
+denormalize_latent :: proc(x: ^tensor.Tensor($T), mean, var_: ^tensor.Tensor(T), allocator := context.allocator) -> ^tensor.Tensor(T) {
+	batch := x.shape[0]
+	channels := x.shape[1]
+	h := x.shape[2]
+	w := x.shape[3]
+	eps := T(1e-5)
+
+	result := tensor.tensor_alloc(T, x.shape, true, allocator)
+
+	for b in 0 ..< int(batch) {
+		for c in 0 ..< int(channels) {
+			std := math.sqrt(var_.data[c] + eps)
+			m := mean.data[c]
+			for y in 0 ..< int(h) {
+				for x_pos in 0 ..< int(w) {
+					idx := b * int(channels * h * w) + c * int(h * w) + y * int(w) + x_pos
+					result.data[idx] = x.data[idx] * std + m
+				}
+			}
+		}
+	}
+	return result
+}
+
+// Unpatchify: [B, 128, H/16, W/16] -> [B, 32, H/8, W/8]
+// Reverses the 2x2 patchify operation
+@(private = "file")
+vae_unpatchify :: proc(x: ^tensor.Tensor($T), z_channels: uint, allocator := context.allocator) -> ^tensor.Tensor(T) {
+	batch := x.shape[0]
+	in_channels := x.shape[1] // 128
+	in_h := x.shape[2]
+	in_w := x.shape[3]
+	patch_size : uint = 2
+	out_channels := z_channels // 32
+	out_h := in_h * patch_size
+	out_w := in_w * patch_size
+
+	result := tensor.tensor_alloc(T, []uint{batch, out_channels, out_h, out_w}, true, allocator)
+
+	// in_channels = out_channels * patch_size * patch_size = 32 * 4 = 128
+	for b in 0 ..< int(batch) {
+		for c in 0 ..< int(out_channels) {
+			for y in 0 ..< int(in_h) {
+				for x_pos in 0 ..< int(in_w) {
+					for py in 0 ..< int(patch_size) {
+						for px in 0 ..< int(patch_size) {
+							// Source channel = c * patch_size^2 + py * patch_size + px
+							src_c := c * int(patch_size * patch_size) + py * int(patch_size) + px
+							src_idx := b * int(in_channels * in_h * in_w) + src_c * int(in_h * in_w) + y * int(in_w) + x_pos
+
+							// Destination position
+							dst_y := y * int(patch_size) + py
+							dst_x := x_pos * int(patch_size) + px
+							dst_idx := b * int(out_channels * out_h * out_w) + c * int(out_h * out_w) + dst_y * int(out_w) + dst_x
+
+							result.data[dst_idx] = x.data[src_idx]
+						}
+					}
+				}
+			}
+		}
+	}
+	return result
+}
+
 // VAE decode: latent -> image tensor
 vae_decode :: proc(
 	vae: ^VAE($T),
 	latent: ^tensor.Tensor(T),
 	allocator := context.allocator,
 ) -> ^tensor.Tensor(T) {
-	// Post quant conv
-	h := tensor.conv2d_xwb(latent, vae.post_quant_conv_weight, vae.post_quant_conv_bias, 1, 1, 0, 1, allocator)
+	// Denormalize: x = x * sqrt(var + eps) + mean
+	denorm := denormalize_latent(latent, vae.bn_running_mean, vae.bn_running_var, allocator)
+	defer tensor.free_tensor(denorm, allocator)
+
+	// Unpatchify: [B, 128, H/16, W/16] -> [B, 32, H/8, W/8]
+	h := vae_unpatchify(denorm, vae.z_channels, allocator)
+
+	// Post-quant conv (1x1): 32 -> 32
+	h2 := tensor.conv2d_xwb(h, vae.post_quant_conv_weight, vae.post_quant_conv_bias, 1, 0, 1, 1, allocator)
+	tensor.free_tensor(h, allocator)
+	h = h2
 
 	// Conv in
-	h2 := tensor.conv2d_xwb(h, vae.dec_conv_in_weight, vae.dec_conv_in_bias, 1, 1, 1, 1, allocator)
+	h2 = tensor.conv2d_xwb(h, vae.dec_conv_in_weight, vae.dec_conv_in_bias, 1, 1, 1, 1, allocator)
 	tensor.free_tensor(h, allocator)
 	h = h2
 

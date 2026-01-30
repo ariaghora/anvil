@@ -1,7 +1,13 @@
-// 2D Rotary Position Embedding (RoPE) for FLUX
+// 4-Axis Rotary Position Embedding (RoPE) for FLUX
 //
-// FLUX uses 2D RoPE for image patches - positions are encoded
-// based on (x, y) coordinates in the image grid.
+// FLUX uses 4-axis RoPE with head_dim=128 split into 4 axes of 32 dims each:
+// - Axis 0 (dims 0-31): T position (always 0 for both img and txt)
+// - Axis 1 (dims 32-63): H position (y for images, 0 for text)
+// - Axis 2 (dims 64-95): W position (x for images, 0 for text)
+// - Axis 3 (dims 96-127): L position (0 for images, seq_idx for text)
+//
+// Each axis has 16 frequency pairs (half of 32 dims).
+// Rotation pairs elements [d, d+16] within each 32-dim axis.
 
 package flux
 
@@ -9,8 +15,7 @@ import "../../tensor"
 import "core:math"
 import "core:mem"
 
-// Precompute RoPE frequencies for a given max sequence length
-// Returns tensor of shape [max_seq, dim] containing cos/sin pairs
+// Precompute 1D RoPE frequencies (for Qwen3 text encoder, not FLUX transformer)
 compute_rope_freqs :: proc(
 	$T: typeid,
 	max_seq: uint,
@@ -20,8 +25,8 @@ compute_rope_freqs :: proc(
 ) -> ^tensor.Tensor(T) {
 	half_dim := dim / 2
 
-	// Allocate [max_seq, dim] - stores interleaved cos/sin
-	freqs := tensor.tensor_alloc(T, []uint{max_seq, dim}, true, allocator)
+	// Allocate [max_seq, half_dim * 2] for cos/sin pairs
+	freqs := tensor.tensor_alloc(T, []uint{max_seq, half_dim * 2}, true, allocator)
 
 	// Compute inverse frequencies: 1 / (theta^(2i/dim))
 	inv_freqs := make([]T, half_dim, context.temp_allocator)
@@ -31,56 +36,116 @@ compute_rope_freqs :: proc(
 
 	// Compute cos/sin for each position
 	for pos in 0 ..< int(max_seq) {
-		for i in 0 ..< int(half_dim) {
-			angle := T(pos) * inv_freqs[i]
-			// Store as [cos, sin] pairs
-			freqs.data[pos * int(dim) + 2 * i] = math.cos(angle)
-			freqs.data[pos * int(dim) + 2 * i + 1] = math.sin(angle)
+		for d in 0 ..< int(half_dim) {
+			angle := T(pos) * inv_freqs[d]
+			freqs.data[pos * int(half_dim) * 2 + d * 2] = math.cos(angle)
+			freqs.data[pos * int(half_dim) * 2 + d * 2 + 1] = math.sin(angle)
 		}
 	}
 
 	return freqs
 }
 
-// Compute 2D RoPE frequencies for image patches
-// Positions are based on (x, y) grid coordinates
-compute_rope_freqs_2d :: proc(
+// Compute 4-axis RoPE frequencies for FLUX joint txt+img sequence
+// Returns [total_seq, head_dim*2] tensor with separate cos and sin arrays
+// Order: text tokens first, then image tokens (matching antirez)
+// Per antirez: cos[d] == cos[d+1] (repeat_interleave for pairs)
+compute_rope_freqs_flux :: proc(
 	$T: typeid,
-	height, width: uint,
-	dim: uint,
+	txt_len: uint,
+	img_height, img_width: uint,
+	head_dim: uint,  // Should be 128
 	theta: f32,
 	allocator := context.allocator,
 ) -> ^tensor.Tensor(T) {
-	seq_len := height * width
-	half_dim := dim / 2
-	quarter_dim := dim / 4
+	img_seq := img_height * img_width
+	total_seq := txt_len + img_seq
+	axis_dim : uint = 32  // head_dim / 4
+	half_axis : uint = 16  // axis_dim / 2
 
-	// Allocate [seq_len, dim]
-	freqs := tensor.tensor_alloc(T, []uint{seq_len, dim}, true, allocator)
+	// Allocate [total_seq, head_dim*2] - cos then sin for each position
+	freqs := tensor.tensor_alloc(T, []uint{total_seq, head_dim * 2}, true, allocator)
 
-	// Compute inverse frequencies
-	inv_freqs := make([]T, quarter_dim, context.temp_allocator)
-	for i in 0 ..< int(quarter_dim) {
-		inv_freqs[i] = T(1.0) / math.pow(T(theta), T(4 * i) / T(dim))
+	// Compute base frequencies for each axis (16 frequencies per axis)
+	base_freqs := make([]T, half_axis, context.temp_allocator)
+	for i in 0 ..< int(half_axis) {
+		base_freqs[i] = T(1.0) / math.pow(T(theta), T(2 * i) / T(axis_dim))
 	}
 
-	// For each position in the 2D grid
-	for y in 0 ..< int(height) {
-		for x in 0 ..< int(width) {
-			pos := y * int(width) + x
+	// Text tokens: only axis 3 (L) rotates, axes 0,1,2 are identity
+	for t in 0 ..< int(txt_len) {
+		cos_offset := t * int(head_dim * 2)
+		sin_offset := cos_offset + int(head_dim)
 
-			// First half: x-axis frequencies
-			for i in 0 ..< int(quarter_dim) {
-				angle_x := T(x) * inv_freqs[i]
-				freqs.data[pos * int(dim) + 2 * i] = math.cos(angle_x)
-				freqs.data[pos * int(dim) + 2 * i + 1] = math.sin(angle_x)
+		// Axis 0 (dims 0-31): T=0 -> identity
+		for d in 0 ..< int(axis_dim) {
+			freqs.data[cos_offset + d] = T(1.0)
+			freqs.data[sin_offset + d] = T(0.0)
+		}
+
+		// Axis 1 (dims 32-63): H=0 -> identity
+		for d in 0 ..< int(axis_dim) {
+			freqs.data[cos_offset + int(axis_dim) + d] = T(1.0)
+			freqs.data[sin_offset + int(axis_dim) + d] = T(0.0)
+		}
+
+		// Axis 2 (dims 64-95): W=0 -> identity
+		for d in 0 ..< int(axis_dim) {
+			freqs.data[cos_offset + int(axis_dim) * 2 + d] = T(1.0)
+			freqs.data[sin_offset + int(axis_dim) * 2 + d] = T(0.0)
+		}
+
+		// Axis 3 (dims 96-127): L=t -> rotate
+		for d in 0 ..< int(half_axis) {
+			angle := T(t) * base_freqs[d]
+			c := math.cos(angle)
+			s := math.sin(angle)
+			freqs.data[cos_offset + int(axis_dim) * 3 + d * 2] = c
+			freqs.data[cos_offset + int(axis_dim) * 3 + d * 2 + 1] = c
+			freqs.data[sin_offset + int(axis_dim) * 3 + d * 2] = s
+			freqs.data[sin_offset + int(axis_dim) * 3 + d * 2 + 1] = s
+		}
+	}
+
+	// Image tokens: axes 1 (H) and 2 (W) rotate, axes 0 and 3 are identity
+	for y in 0 ..< int(img_height) {
+		for x in 0 ..< int(img_width) {
+			pos := int(txt_len) + y * int(img_width) + x
+			cos_offset := pos * int(head_dim * 2)
+			sin_offset := cos_offset + int(head_dim)
+
+			// Axis 0 (dims 0-31): T=0 -> identity
+			for d in 0 ..< int(axis_dim) {
+				freqs.data[cos_offset + d] = T(1.0)
+				freqs.data[sin_offset + d] = T(0.0)
 			}
 
-			// Second half: y-axis frequencies
-			for i in 0 ..< int(quarter_dim) {
-				angle_y := T(y) * inv_freqs[i]
-				freqs.data[pos * int(dim) + int(half_dim) + 2 * i] = math.cos(angle_y)
-				freqs.data[pos * int(dim) + int(half_dim) + 2 * i + 1] = math.sin(angle_y)
+			// Axis 1 (dims 32-63): H=y -> rotate
+			for d in 0 ..< int(half_axis) {
+				angle := T(y) * base_freqs[d]
+				c := math.cos(angle)
+				s := math.sin(angle)
+				freqs.data[cos_offset + int(axis_dim) + d * 2] = c
+				freqs.data[cos_offset + int(axis_dim) + d * 2 + 1] = c
+				freqs.data[sin_offset + int(axis_dim) + d * 2] = s
+				freqs.data[sin_offset + int(axis_dim) + d * 2 + 1] = s
+			}
+
+			// Axis 2 (dims 64-95): W=x -> rotate
+			for d in 0 ..< int(half_axis) {
+				angle := T(x) * base_freqs[d]
+				c := math.cos(angle)
+				s := math.sin(angle)
+				freqs.data[cos_offset + int(axis_dim) * 2 + d * 2] = c
+				freqs.data[cos_offset + int(axis_dim) * 2 + d * 2 + 1] = c
+				freqs.data[sin_offset + int(axis_dim) * 2 + d * 2] = s
+				freqs.data[sin_offset + int(axis_dim) * 2 + d * 2 + 1] = s
+			}
+
+			// Axis 3 (dims 96-127): L=0 -> identity
+			for d in 0 ..< int(axis_dim) {
+				freqs.data[cos_offset + int(axis_dim) * 3 + d] = T(1.0)
+				freqs.data[sin_offset + int(axis_dim) * 3 + d] = T(0.0)
 			}
 		}
 	}
@@ -88,9 +153,10 @@ compute_rope_freqs_2d :: proc(
 	return freqs
 }
 
-// Apply RoPE to query/key tensors in-place
+// Apply 1D RoPE to query/key tensors in-place (for Qwen3)
 // x: [batch, seq, num_heads * head_dim]
-// freqs: [seq, head_dim] with interleaved cos/sin
+// freqs: [seq, half_dim * 2] with [cos, sin] pairs
+// Pairs x[d] with x[d + half_dim]
 apply_rope_inplace :: proc(
 	x: ^tensor.Tensor($T),
 	freqs: ^tensor.Tensor(T),
@@ -104,22 +170,61 @@ apply_rope_inplace :: proc(
 	for b in 0 ..< int(batch) {
 		for s in 0 ..< int(seq_len) {
 			// Get frequency row for this position
-			freq_offset := min(s, int(freqs.shape[0]) - 1) * int(head_dim)
+			freq_offset := min(s, int(freqs.shape[0]) - 1) * int(half_dim) * 2
 
 			for h in 0 ..< int(num_heads) {
 				head_offset := b * int(seq_len * num_heads * head_dim) + s * int(num_heads * head_dim) + h * int(head_dim)
 
-				// Apply rotation to pairs of elements
-				for i in 0 ..< int(half_dim) {
-					cos_val := freqs.data[freq_offset + 2 * i]
-					sin_val := freqs.data[freq_offset + 2 * i + 1]
+				// Apply rotation: pair x[d] with x[d + half_dim]
+				for d in 0 ..< int(half_dim) {
+					cos_val := freqs.data[freq_offset + d * 2]
+					sin_val := freqs.data[freq_offset + d * 2 + 1]
 
-					x0 := x.data[head_offset + 2 * i]
-					x1 := x.data[head_offset + 2 * i + 1]
+					x0 := x.data[head_offset + d]
+					x1 := x.data[head_offset + d + int(half_dim)]
 
-					// Rotate: [cos, -sin; sin, cos] @ [x0, x1]
-					x.data[head_offset + 2 * i] = x0 * cos_val - x1 * sin_val
-					x.data[head_offset + 2 * i + 1] = x0 * sin_val + x1 * cos_val
+					// Rotate
+					x.data[head_offset + d] = x0 * cos_val - x1 * sin_val
+					x.data[head_offset + d + int(half_dim)] = x0 * sin_val + x1 * cos_val
+				}
+			}
+		}
+	}
+}
+
+// Apply 4-axis RoPE for FLUX transformer
+// x: [batch, seq, num_heads * head_dim] where head_dim=128
+// freqs: [seq, head_dim*2] with cos array then sin array
+// Per antirez: cos[d] == cos[d+1] due to repeat_interleave
+apply_rope_flux_inplace :: proc(
+	x: ^tensor.Tensor($T),
+	freqs: ^tensor.Tensor(T),
+	num_heads: uint,
+	head_dim: uint,
+) {
+	batch := x.shape[0]
+	seq_len := x.shape[1]
+
+	for b in 0 ..< int(batch) {
+		for s in 0 ..< int(seq_len) {
+			freq_s := min(s, int(freqs.shape[0]) - 1)
+			cos_offset := freq_s * int(head_dim * 2)
+			sin_offset := cos_offset + int(head_dim)
+
+			for h in 0 ..< int(num_heads) {
+				head_offset := b * int(seq_len * num_heads * head_dim) + s * int(num_heads * head_dim) + h * int(head_dim)
+
+				// Process consecutive pairs across all 128 dims
+				// Pairs: (0,1), (2,3), ..., (126,127)
+				for d := 0; d < int(head_dim); d += 2 {
+					cos_val := freqs.data[cos_offset + d]  // cos[d] == cos[d+1]
+					sin_val := freqs.data[sin_offset + d]  // sin[d] == sin[d+1]
+
+					x0 := x.data[head_offset + d]
+					x1 := x.data[head_offset + d + 1]
+
+					x.data[head_offset + d] = x0 * cos_val - x1 * sin_val
+					x.data[head_offset + d + 1] = x1 * cos_val + x0 * sin_val
 				}
 			}
 		}
@@ -139,57 +244,131 @@ apply_rope :: proc(
 	return result
 }
 
-// Compute RoPE frequencies for joint img+txt sequence
-// Image positions use 2D coordinates, text uses sequential 1D positions
-compute_rope_freqs_joint :: proc(
+// Compute RoPE frequencies for IMAGE tokens only (double blocks)
+// Returns [img_seq, head_dim*2] tensor with separate cos and sin arrays
+// Axes 1 (H) and 2 (W) rotate, axes 0 and 3 are identity
+// Per antirez: cos[d] == cos[d+1] (repeat_interleave for pairs)
+compute_rope_freqs_img :: proc(
 	$T: typeid,
 	img_height, img_width: uint,
-	txt_len: uint,
-	dim: uint,
+	head_dim: uint,
 	theta: f32,
 	allocator := context.allocator,
 ) -> ^tensor.Tensor(T) {
 	img_seq := img_height * img_width
-	total_seq := img_seq + txt_len
-	half_dim := dim / 2
-	quarter_dim := dim / 4
+	axis_dim : uint = 32
+	half_axis : uint = 16
 
-	freqs := tensor.tensor_alloc(T, []uint{total_seq, dim}, true, allocator)
+	// Store cos and sin separately, each with head_dim elements (duplicated for pairs)
+	freqs := tensor.tensor_alloc(T, []uint{img_seq, head_dim * 2}, true, allocator)
 
-	// Compute inverse frequencies
-	inv_freqs := make([]T, quarter_dim, context.temp_allocator)
-	for i in 0 ..< int(quarter_dim) {
-		inv_freqs[i] = T(1.0) / math.pow(T(theta), T(4 * i) / T(dim))
+	base_freqs := make([]T, half_axis, context.temp_allocator)
+	for i in 0 ..< int(half_axis) {
+		base_freqs[i] = T(1.0) / math.pow(T(theta), T(2 * i) / T(axis_dim))
 	}
 
-	// Image positions: 2D coordinates
 	for y in 0 ..< int(img_height) {
 		for x in 0 ..< int(img_width) {
 			pos := y * int(img_width) + x
+			cos_offset := pos * int(head_dim * 2)
+			sin_offset := cos_offset + int(head_dim)
 
-			for i in 0 ..< int(quarter_dim) {
-				angle_x := T(x) * inv_freqs[i]
-				freqs.data[pos * int(dim) + 2 * i] = math.cos(angle_x)
-				freqs.data[pos * int(dim) + 2 * i + 1] = math.sin(angle_x)
-
-				angle_y := T(y) * inv_freqs[i]
-				freqs.data[pos * int(dim) + int(half_dim) + 2 * i] = math.cos(angle_y)
-				freqs.data[pos * int(dim) + int(half_dim) + 2 * i + 1] = math.sin(angle_y)
+			// Axis 0 (dims 0-31): T=0 -> identity (cos=1, sin=0)
+			for d in 0 ..< int(axis_dim) {
+				freqs.data[cos_offset + d] = T(1.0)
+				freqs.data[sin_offset + d] = T(0.0)
 			}
-		}
-	}
 
-	// Text positions: 1D sequential (starting after image)
-	for t in 0 ..< int(txt_len) {
-		pos := int(img_seq) + t
+			// Axis 1 (dims 32-63): H=y -> rotate
+			for d in 0 ..< int(half_axis) {
+				angle := T(y) * base_freqs[d]
+				c := math.cos(angle)
+				s := math.sin(angle)
+				// Duplicate for consecutive pairs
+				freqs.data[cos_offset + int(axis_dim) + d * 2] = c
+				freqs.data[cos_offset + int(axis_dim) + d * 2 + 1] = c
+				freqs.data[sin_offset + int(axis_dim) + d * 2] = s
+				freqs.data[sin_offset + int(axis_dim) + d * 2 + 1] = s
+			}
 
-		for i in 0 ..< int(half_dim) {
-			// Use same frequency pattern but with sequential position
-			angle := T(t) * inv_freqs[i % int(quarter_dim)]
-			freqs.data[pos * int(dim) + 2 * i] = math.cos(angle)
-			freqs.data[pos * int(dim) + 2 * i + 1] = math.sin(angle)
+			// Axis 2 (dims 64-95): W=x -> rotate
+			for d in 0 ..< int(half_axis) {
+				angle := T(x) * base_freqs[d]
+				c := math.cos(angle)
+				s := math.sin(angle)
+				freqs.data[cos_offset + int(axis_dim) * 2 + d * 2] = c
+				freqs.data[cos_offset + int(axis_dim) * 2 + d * 2 + 1] = c
+				freqs.data[sin_offset + int(axis_dim) * 2 + d * 2] = s
+				freqs.data[sin_offset + int(axis_dim) * 2 + d * 2 + 1] = s
+			}
+
+			// Axis 3 (dims 96-127): L=0 -> identity
+			for d in 0 ..< int(axis_dim) {
+				freqs.data[cos_offset + int(axis_dim) * 3 + d] = T(1.0)
+				freqs.data[sin_offset + int(axis_dim) * 3 + d] = T(0.0)
+			}
 		}
 	}
 
 	return freqs
 }
+
+// Compute RoPE frequencies for TEXT tokens only (double blocks)
+// Returns [txt_len, head_dim*2] tensor with separate cos and sin arrays
+// Only axis 3 (L) rotates, axes 0,1,2 are identity
+// Per antirez: cos[d] == cos[d+1] (repeat_interleave for pairs)
+compute_rope_freqs_txt :: proc(
+	$T: typeid,
+	txt_len: uint,
+	head_dim: uint,
+	theta: f32,
+	allocator := context.allocator,
+) -> ^tensor.Tensor(T) {
+	axis_dim : uint = 32
+	half_axis : uint = 16
+
+	freqs := tensor.tensor_alloc(T, []uint{txt_len, head_dim * 2}, true, allocator)
+
+	base_freqs := make([]T, half_axis, context.temp_allocator)
+	for i in 0 ..< int(half_axis) {
+		base_freqs[i] = T(1.0) / math.pow(T(theta), T(2 * i) / T(axis_dim))
+	}
+
+	for t in 0 ..< int(txt_len) {
+		cos_offset := t * int(head_dim * 2)
+		sin_offset := cos_offset + int(head_dim)
+
+		// Axis 0 (dims 0-31): T=0 -> identity
+		for d in 0 ..< int(axis_dim) {
+			freqs.data[cos_offset + d] = T(1.0)
+			freqs.data[sin_offset + d] = T(0.0)
+		}
+
+		// Axis 1 (dims 32-63): H=0 -> identity
+		for d in 0 ..< int(axis_dim) {
+			freqs.data[cos_offset + int(axis_dim) + d] = T(1.0)
+			freqs.data[sin_offset + int(axis_dim) + d] = T(0.0)
+		}
+
+		// Axis 2 (dims 64-95): W=0 -> identity
+		for d in 0 ..< int(axis_dim) {
+			freqs.data[cos_offset + int(axis_dim) * 2 + d] = T(1.0)
+			freqs.data[sin_offset + int(axis_dim) * 2 + d] = T(0.0)
+		}
+
+		// Axis 3 (dims 96-127): L=t -> rotate
+		for d in 0 ..< int(half_axis) {
+			angle := T(t) * base_freqs[d]
+			c := math.cos(angle)
+			s := math.sin(angle)
+			freqs.data[cos_offset + int(axis_dim) * 3 + d * 2] = c
+			freqs.data[cos_offset + int(axis_dim) * 3 + d * 2 + 1] = c
+			freqs.data[sin_offset + int(axis_dim) * 3 + d * 2] = s
+			freqs.data[sin_offset + int(axis_dim) * 3 + d * 2 + 1] = s
+		}
+	}
+
+	return freqs
+}
+
+
