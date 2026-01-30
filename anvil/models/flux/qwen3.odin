@@ -13,6 +13,7 @@ package flux
 
 import "../../nn"
 import "../../tensor"
+import "../../trace"
 import st "../../safetensors"
 import "core:fmt"
 import "core:math"
@@ -159,10 +160,10 @@ load_qwen3_shared_weights :: proc(enc: ^Qwen3($T), allocator := context.allocato
 	cfg := enc.config
 
 	// Load embeddings
-	enc.embed_tokens = get_tensor_from_shards(enc._sf_shards[:], "model.embed_tokens.weight", []uint{cfg.vocab_size, cfg.hidden_size}, false, allocator)
+	enc.embed_tokens = get_tensor_from_shards(enc._sf_shards[:], "model.embed_tokens.weight", []uint{cfg.vocab_size, cfg.hidden_size}, allocator)
 
 	// Load final norm
-	enc.norm = get_tensor_from_shards(enc._sf_shards[:], "model.norm.weight", []uint{cfg.hidden_size}, false, allocator)
+	enc.norm = get_tensor_from_shards(enc._sf_shards[:], "model.norm.weight", []uint{cfg.hidden_size}, allocator)
 }
 
 // Get tensor from shards - searches all shards for the tensor
@@ -171,7 +172,6 @@ get_tensor_from_shards :: proc(
 	shards: []^st.Safe_Tensors($T),
 	name: string,
 	expected_shape: []uint,
-	transpose: bool,
 	allocator := context.allocator,
 ) -> ^tensor.Tensor(T) {
 	for sf in shards {
@@ -193,10 +193,6 @@ get_tensor_from_shards :: proc(
 			continue
 		}
 
-		if transpose && len(t.shape) == 2 {
-			t_transposed := tensor.transpose(t, 0, 1, allocator)
-			return t_transposed
-		}
 		return tensor.clone(t, allocator)
 	}
 	return nil
@@ -212,7 +208,9 @@ load_linear_from_shards :: proc(
 	allocator := context.allocator,
 ) -> ^nn.Linear(T) {
 	weight_name := fmt.tprintf("%s.weight", name)
-	w := get_tensor_from_shards(shards, weight_name, []uint{out_features, in_features}, true, allocator)
+	// PyTorch convention: weight is [out_features, in_features], no transpose needed
+	// get_tensor_from_shards already clones, so Linear owns the tensor
+	w := get_tensor_from_shards(shards, weight_name, []uint{out_features, in_features}, allocator)
 	if w == nil do return nil
 
 	lin := new(nn.Linear(T), allocator)
@@ -220,8 +218,7 @@ load_linear_from_shards :: proc(
 
 	if has_bias {
 		bias_name := fmt.tprintf("%s.bias", name)
-		b := get_tensor_from_shards(shards, bias_name, []uint{out_features}, false, allocator)
-		lin.b = b
+		lin.b = get_tensor_from_shards(shards, bias_name, []uint{out_features}, allocator)
 	}
 
 	return lin
@@ -249,8 +246,8 @@ load_qwen3_layer :: proc(
 	layer.self_attn.o_proj = load_linear_from_shards(shards, fmt.tprintf("%s.self_attn.o_proj", prefix), q_dim, hidden, false, allocator)
 
 	// QK-Norm
-	layer.self_attn.q_norm = get_tensor_from_shards(shards, fmt.tprintf("%s.self_attn.q_norm.weight", prefix), []uint{cfg.head_dim}, false, allocator)
-	layer.self_attn.k_norm = get_tensor_from_shards(shards, fmt.tprintf("%s.self_attn.k_norm.weight", prefix), []uint{cfg.head_dim}, false, allocator)
+	layer.self_attn.q_norm = get_tensor_from_shards(shards, fmt.tprintf("%s.self_attn.q_norm.weight", prefix), []uint{cfg.head_dim}, allocator)
+	layer.self_attn.k_norm = get_tensor_from_shards(shards, fmt.tprintf("%s.self_attn.k_norm.weight", prefix), []uint{cfg.head_dim}, allocator)
 
 	// MLP
 	layer.mlp.gate_proj = load_linear_from_shards(shards, fmt.tprintf("%s.mlp.gate_proj", prefix), hidden, cfg.intermediate_size, false, allocator)
@@ -258,8 +255,8 @@ load_qwen3_layer :: proc(
 	layer.mlp.down_proj = load_linear_from_shards(shards, fmt.tprintf("%s.mlp.down_proj", prefix), cfg.intermediate_size, hidden, false, allocator)
 
 	// Norms
-	layer.input_layernorm = get_tensor_from_shards(shards, fmt.tprintf("%s.input_layernorm.weight", prefix), []uint{hidden}, false, allocator)
-	layer.post_attention_layernorm = get_tensor_from_shards(shards, fmt.tprintf("%s.post_attention_layernorm.weight", prefix), []uint{hidden}, false, allocator)
+	layer.input_layernorm = get_tensor_from_shards(shards, fmt.tprintf("%s.input_layernorm.weight", prefix), []uint{hidden}, allocator)
+	layer.post_attention_layernorm = get_tensor_from_shards(shards, fmt.tprintf("%s.post_attention_layernorm.weight", prefix), []uint{hidden}, allocator)
 
 	return layer
 }
@@ -267,20 +264,18 @@ load_qwen3_layer :: proc(
 // Free a single layer's weights
 @(private = "file")
 free_qwen3_layer_weights :: proc(layer: ^Qwen3_Layer_Weights($T), allocator := context.allocator) {
-	// Attention
+	// Free Linear layers (they own cloned weights)
 	if layer.self_attn.q_proj != nil do nn.free_linear(layer.self_attn.q_proj, allocator)
 	if layer.self_attn.k_proj != nil do nn.free_linear(layer.self_attn.k_proj, allocator)
 	if layer.self_attn.v_proj != nil do nn.free_linear(layer.self_attn.v_proj, allocator)
 	if layer.self_attn.o_proj != nil do nn.free_linear(layer.self_attn.o_proj, allocator)
-	tensor.free_tensor(layer.self_attn.q_norm, layer.self_attn.k_norm, allocator = allocator)
+	// q_norm, k_norm point to cache - don't free
 
-	// MLP
 	if layer.mlp.gate_proj != nil do nn.free_linear(layer.mlp.gate_proj, allocator)
 	if layer.mlp.up_proj != nil do nn.free_linear(layer.mlp.up_proj, allocator)
 	if layer.mlp.down_proj != nil do nn.free_linear(layer.mlp.down_proj, allocator)
 
-	// Norms
-	tensor.free_tensor(layer.input_layernorm, layer.post_attention_layernorm, allocator = allocator)
+	// input_layernorm, post_attention_layernorm point to cache - don't free
 }
 
 // Free Qwen3 encoder
@@ -578,20 +573,28 @@ qwen3_encode :: proc(
 	tokens: []i32,
 	allocator := context.allocator,
 ) -> ^tensor.Tensor(T) {
+	_t := trace.global_scoped("qwen3_encode", "text_encoder")
+	defer trace.global_end_scoped(_t)
+
 	// Embedding lookup
+	_t_emb := trace.global_scoped("embed_tokens", "text_encoder")
 	h := embed_tokens(enc.embed_tokens, tokens, allocator)
+	trace.global_end_scoped(_t_emb)
 
 	// Storage for layer outputs to concatenate (layers 9, 18, 27 = indices 8, 17, 26)
 	layer_outputs: [3]^tensor.Tensor(T)
 	output_layers := QWEN3_OUTPUT_LAYERS
 
 	// Run through all layers - load, forward, free each layer
+	_t_layers := trace.global_scoped("qwen3_layers", "text_encoder")
 	for i in 0 ..< int(enc.config.num_layers) {
+		_t_layer := trace.global_scoped("qwen3_layer", "text_encoder")
 		layer := load_qwen3_layer(enc._sf_shards[:], i, enc.config, allocator)
 		h_new := qwen3_layer_forward(&layer, h, enc.rope_freqs, enc.config, allocator)
 		free_qwen3_layer_weights(&layer, allocator)
 		tensor.free_tensor(h, allocator)
 		h = h_new
+		trace.global_end_scoped(_t_layer)
 
 		// Save outputs at designated layers
 		if i == output_layers[0] {
@@ -602,6 +605,7 @@ qwen3_encode :: proc(
 			layer_outputs[2] = tensor.clone(h, allocator)
 		}
 	}
+	trace.global_end_scoped(_t_layers)
 
 	// Free final hidden state (not needed)
 	tensor.free_tensor(h, allocator)

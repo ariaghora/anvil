@@ -161,3 +161,44 @@ dgemm_naive :: proc(
 	}
 	gemm_generic(f64, order, transa, transb, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc)
 }
+
+// Naive fallback for matmul_2d_trans_b (A @ B^T)
+matmul_2d_trans_b_naive :: proc(a: []$T, b: []T, m, n, k: uint, c: []T) {
+	when T == f32 {
+		sgemm_naive(
+			CBLAS_ORDER.RowMajor,
+			CBLAS_TRANSPOSE.NoTrans,
+			CBLAS_TRANSPOSE.Trans,
+			i32(m),
+			i32(n),
+			i32(k),
+			1.0,
+			raw_data(a),
+			i32(k),
+			raw_data(b),
+			i32(k),
+			0.0,
+			raw_data(c),
+			i32(n),
+		)
+	} else when T == f64 {
+		dgemm_naive(
+			CBLAS_ORDER.RowMajor,
+			CBLAS_TRANSPOSE.NoTrans,
+			CBLAS_TRANSPOSE.Trans,
+			i32(m),
+			i32(n),
+			i32(k),
+			1.0,
+			raw_data(a),
+			i32(k),
+			raw_data(b),
+			i32(k),
+			0.0,
+			raw_data(c),
+			i32(n),
+		)
+	} else {
+		#panic("matmul only supports f32 and f64")
+	}
+}

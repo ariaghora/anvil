@@ -4,8 +4,10 @@ import "../simd_backend"
 import "../tensor"
 import "../trace"
 
+// Linear layer with PyTorch convention: weight is [out_features, in_features]
+// Forward computes: y = x @ W^T + b
 Linear :: struct($T: typeid) {
-	w: ^tensor.Tensor(T),
+	w: ^tensor.Tensor(T),  // Shape: [out_features, in_features]
 	b: Maybe(^tensor.Tensor(T)),
 }
 
@@ -18,10 +20,11 @@ new_linear :: proc(
 	loc := #caller_location,
 ) -> ^Linear(T) {
 	w: ^tensor.Tensor(T)
+	// PyTorch convention: weight shape is [out_features, in_features]
 	if init {
-		w = tensor.randn(T, {in_feat, out_feat}, T(0), T(1), allocator, loc)
+		w = tensor.randn(T, {out_feat, in_feat}, T(0), T(1), allocator, loc)
 	} else {
-		w = tensor.tensor_alloc(T, {in_feat, out_feat}, true, allocator, loc)
+		w = tensor.tensor_alloc(T, {out_feat, in_feat}, true, allocator, loc)
 	}
 	b: Maybe(^tensor.Tensor(T)) = nil
 	if use_bias do b = tensor.zeros(T, []uint{out_feat}, allocator)
@@ -29,9 +32,13 @@ new_linear :: proc(
 }
 
 free_linear :: proc(l: ^Linear($T), allocator := context.allocator) {
-	tensor.free_tensor(l.w, allocator)
+	// Free weight if it owns its data (dtype-converted or from new_linear)
+	// If owns_data=false, tensor points into mmap and is managed by safetensors
+	if l.w.owns_data {
+		tensor.free_tensor(l.w, allocator)
+	}
 	b, ok := l.b.?
-	if ok do tensor.free_tensor(b, allocator)
+	if ok && b.owns_data do tensor.free_tensor(b, allocator)
 	free(l, allocator)
 }
 
@@ -44,7 +51,8 @@ forward_linear :: proc(
 	forward_linear_trace := trace.global_scoped("forward_linear")
 	defer trace.global_end_scoped(forward_linear_trace)
 
-	out := tensor.matmul(x, l.w, allocator, loc)
+	// PyTorch convention: y = x @ W^T where W is [out_features, in_features]
+	out := tensor.matmul_transposed_b(x, l.w, allocator, loc)
 
 
 	// Add bias in-place

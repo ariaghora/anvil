@@ -77,3 +77,48 @@ matmul_2d :: proc(a: []$T, b: []T, m, n, k: uint, c: []T, allocator := context.a
 		#panic("matmul only supports f32 and f64")
 	}
 }
+
+// Computes C = A @ B^T where A is [M, K] and B is [N, K] (stored row-major), result C is [M, N]
+// This avoids materializing the transpose of B.
+matmul_2d_trans_b :: proc(a: []$T, b: []T, m, n, k: uint, c: []T) {
+	assert(len(a) == int(m * k), "A matrix size mismatch")
+	assert(len(b) == int(n * k), "B matrix size mismatch (should be [N, K])")
+
+	when T == f32 {
+		sgemm(
+			CBLAS_ORDER.RowMajor,
+			CBLAS_TRANSPOSE.NoTrans,
+			CBLAS_TRANSPOSE.Trans,
+			i32(m),
+			i32(n),
+			i32(k),
+			1.0,
+			raw_data(a),
+			i32(k),   // lda = K (A is [M, K])
+			raw_data(b),
+			i32(k),   // ldb = K (B is stored as [N, K], accessed as [K, N])
+			0.0,
+			raw_data(c),
+			i32(n),   // ldc = N
+		)
+	} else when T == f64 {
+		dgemm(
+			CBLAS_ORDER.RowMajor,
+			CBLAS_TRANSPOSE.NoTrans,
+			CBLAS_TRANSPOSE.Trans,
+			i32(m),
+			i32(n),
+			i32(k),
+			1.0,
+			raw_data(a),
+			i32(k),
+			raw_data(b),
+			i32(k),
+			0.0,
+			raw_data(c),
+			i32(n),
+		)
+	} else {
+		#panic("matmul only supports f32 and f64")
+	}
+}

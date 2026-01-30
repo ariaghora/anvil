@@ -530,11 +530,11 @@ new_attention :: proc(
 	vb.assign(vb_root, "norm.bias", norm.bias)
 
 	qkv := nn.new_linear(T, dim, h, true, init, allocator)
-	vb.assign(vb_root, "qkv.weight", qkv.w, true)
+	vb.assign(vb_root, "qkv.weight", qkv.w)
 	vb.assign(vb_root, "qkv.bias", qkv.b.?)
 
 	proj := nn.new_linear(T, dh, dim, true, init, allocator)
-	vb.assign(vb_root, "proj.weight", proj.w, true)
+	vb.assign(vb_root, "proj.weight", proj.w)
 	vb.assign(vb_root, "proj.bias", proj.b.?)
 
 	// Build relative position bias indices
@@ -696,9 +696,9 @@ new_mlp :: proc(
 
 	fc1 := nn.new_linear(T, in_features, hidden_features, true, init, allocator)
 	fc2 := nn.new_linear(T, hidden_features, in_features, true, init, allocator)
-	// Should transpose since pytorch's way of fc is tranposed matmul
-	vb.assign(vb_root, "fc1.weight", fc1.w, should_transpose = true)
-	vb.assign(vb_root, "fc2.weight", fc2.w, should_transpose = true)
+	// PyTorch convention: weight is [out, in], no transpose needed
+	vb.assign(vb_root, "fc1.weight", fc1.w)
+	vb.assign(vb_root, "fc2.weight", fc2.w)
 	vb.assign(vb_root, "fc1.bias", fc1.b.?)
 	vb.assign(vb_root, "fc2.bias", fc2.b.?)
 

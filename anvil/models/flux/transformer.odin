@@ -13,6 +13,7 @@
 package flux
 
 import "../../tensor"
+import "../../trace"
 import "../../nn"
 import st "../../safetensors"
 import "core:fmt"
@@ -150,14 +151,11 @@ get_tensor :: proc(sf: ^st.Safe_Tensors($T), name: string, expected_shape: []uin
 }
 
 @(private = "file")
-get_tensor_transposed :: proc(sf: ^st.Safe_Tensors($T), name: string, expected_shape: []uint = nil, allocator := context.allocator) -> ^tensor.Tensor(T) {
-	t := get_tensor(sf, name, expected_shape)
-	return tensor.transpose(t, 0, 1, allocator)
-}
-
-@(private = "file")
 load_linear :: proc(sf: ^st.Safe_Tensors($T), weight_name: string, in_features, out_features: uint, allocator := context.allocator) -> ^nn.Linear(T) {
-	w := get_tensor_transposed(sf, weight_name, []uint{out_features, in_features}, allocator)
+	// PyTorch convention: weight is [out_features, in_features], no transpose needed
+	// Clone tensor so Linear owns it (original is in safetensors cache)
+	cached := get_tensor(sf, weight_name, []uint{out_features, in_features})
+	w := tensor.clone(cached, allocator)
 	return new_clone(nn.Linear(T){w = w, b = nil}, allocator)
 }
 
@@ -187,6 +185,9 @@ ensure_shared_loaded :: proc(tf: ^Transformer($T), allocator := context.allocato
 // Load double block weights
 @(private = "file")
 load_double_block :: proc(sf: ^st.Safe_Tensors($T), idx: int, h, mlp_h, head_dim: uint, allocator := context.allocator) -> Double_Block_Weights(T) {
+	_t := trace.global_scoped("load_double_block", "weight_loading")
+	defer trace.global_end_scoped(_t)
+
 	prefix := fmt.tprintf("transformer_blocks.%d", idx)
 	return Double_Block_Weights(T){
 		img_to_q    = load_linear(sf, fmt.tprintf("%s.attn.to_q.weight", prefix), h, h, allocator),
@@ -211,6 +212,9 @@ load_double_block :: proc(sf: ^st.Safe_Tensors($T), idx: int, h, mlp_h, head_dim
 // Free double block weights
 @(private = "file")
 free_double_block :: proc(b: ^Double_Block_Weights($T), allocator := context.allocator) {
+	_t := trace.global_scoped("free_double_block", "weight_loading")
+	defer trace.global_end_scoped(_t)
+
 	nn.free_linear(b.img_to_q, allocator)
 	nn.free_linear(b.img_to_k, allocator)
 	nn.free_linear(b.img_to_v, allocator)
@@ -227,8 +231,12 @@ free_double_block :: proc(b: ^Double_Block_Weights($T), allocator := context.all
 }
 
 // Load single block weights
+// NOTE(Aria): This is slow, but intentional design to make things run in limited memory.
 @(private = "file")
 load_single_block :: proc(sf: ^st.Safe_Tensors($T), idx: int, h, mlp_h, head_dim: uint, allocator := context.allocator) -> Single_Block_Weights(T) {
+	_t := trace.global_scoped("load_single_block", "weight_loading")
+	defer trace.global_end_scoped(_t)
+
 	prefix := fmt.tprintf("single_transformer_blocks.%d", idx)
 	return Single_Block_Weights(T){
 		qkv_mlp = load_linear(sf, fmt.tprintf("%s.attn.to_qkv_mlp_proj.weight", prefix), h, h * 3 + mlp_h * 2, allocator),
@@ -241,6 +249,9 @@ load_single_block :: proc(sf: ^st.Safe_Tensors($T), idx: int, h, mlp_h, head_dim
 // Free single block weights
 @(private = "file")
 free_single_block :: proc(b: ^Single_Block_Weights($T), allocator := context.allocator) {
+	_t := trace.global_scoped("free_single_block", "weight_loading")
+	defer trace.global_end_scoped(_t)
+
 	nn.free_linear(b.qkv_mlp, allocator)
 	nn.free_linear(b.proj, allocator)
 	// norm tensors point into mmap, don't free
@@ -404,6 +415,9 @@ attention_with_rope :: proc(
 	num_heads, head_dim: uint,
 	allocator := context.allocator,
 ) -> ^tensor.Tensor(T) {
+	_t := trace.global_scoped("attention_with_rope", "attention")
+	defer trace.global_end_scoped(_t)
+
 	batch := q.shape[0]
 	seq_len := q.shape[1]
 	eps := T(1e-6)
@@ -461,6 +475,9 @@ attention_no_rope :: proc(
 	num_heads, head_dim: uint,
 	allocator := context.allocator,
 ) -> ^tensor.Tensor(T) {
+	_t := trace.global_scoped("attention_no_rope", "attention")
+	defer trace.global_end_scoped(_t)
+
 	batch := q.shape[0]
 	q_seq := q.shape[1]
 	kv_seq := k.shape[1]
@@ -524,6 +541,9 @@ double_block_forward :: proc(
 	num_heads, head_dim: uint,
 	allocator := context.allocator,
 ) -> (img_out, txt_out: ^tensor.Tensor(T)) {
+	_t := trace.global_scoped("double_block", "transformer")
+	defer trace.global_end_scoped(_t)
+
 	hidden := num_heads * head_dim
 	eps := T(1e-6)
 
@@ -663,6 +683,9 @@ single_block_forward :: proc(
 	num_heads, head_dim, mlp_hidden: uint,
 	allocator := context.allocator,
 ) -> ^tensor.Tensor(T) {
+	_t := trace.global_scoped("single_block", "transformer")
+	defer trace.global_end_scoped(_t)
+
 	hidden := num_heads * head_dim
 	eps := T(1e-6)
 
@@ -784,6 +807,9 @@ transformer_forward :: proc(
 	img_height, img_width: uint,  // Needed for 4-axis RoPE
 	allocator := context.allocator,
 ) -> ^tensor.Tensor(T) {
+	_t := trace.global_scoped("transformer_forward", "transformer")
+	defer trace.global_end_scoped(_t)
+
 	// Load shared weights on first call
 	ensure_shared_loaded(tf, allocator)
 

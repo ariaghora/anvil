@@ -10,6 +10,7 @@ package flux
 
 import "../../nn"
 import "../../tensor"
+import "../../trace"
 import st "../../safetensors"
 import "core:fmt"
 import "core:math"
@@ -280,14 +281,14 @@ load_attn_block :: proc(
 	block.channels = channels
 	block.norm_weight = get_tensor(sf, fmt.tprintf("%s.group_norm.weight", prefix), allocator)
 	block.norm_bias = get_tensor(sf, fmt.tprintf("%s.group_norm.bias", prefix), allocator)
-	// Linear weights: use should_transpose=true to convert [out, in] -> [in, out]
-	block.q_weight = get_tensor_transposed(sf, fmt.tprintf("%s.to_q.weight", prefix), allocator)
+	// PyTorch convention: Linear weights are [out, in], no transpose needed
+	block.q_weight = get_tensor(sf, fmt.tprintf("%s.to_q.weight", prefix), allocator)
 	block.q_bias = get_tensor(sf, fmt.tprintf("%s.to_q.bias", prefix), allocator)
-	block.k_weight = get_tensor_transposed(sf, fmt.tprintf("%s.to_k.weight", prefix), allocator)
+	block.k_weight = get_tensor(sf, fmt.tprintf("%s.to_k.weight", prefix), allocator)
 	block.k_bias = get_tensor(sf, fmt.tprintf("%s.to_k.bias", prefix), allocator)
-	block.v_weight = get_tensor_transposed(sf, fmt.tprintf("%s.to_v.weight", prefix), allocator)
+	block.v_weight = get_tensor(sf, fmt.tprintf("%s.to_v.weight", prefix), allocator)
 	block.v_bias = get_tensor(sf, fmt.tprintf("%s.to_v.bias", prefix), allocator)
-	block.out_weight = get_tensor_transposed(sf, fmt.tprintf("%s.to_out.0.weight", prefix), allocator)
+	block.out_weight = get_tensor(sf, fmt.tprintf("%s.to_out.0.weight", prefix), allocator)
 	block.out_bias = get_tensor(sf, fmt.tprintf("%s.to_out.0.bias", prefix), allocator)
 }
 
@@ -298,15 +299,6 @@ get_tensor :: proc(sf: ^st.Safe_Tensors($T), name: string, allocator := context.
 		fmt.panicf("Tensor not found: %s", name)
 	}
 	return t
-}
-
-@(private = "file")
-get_tensor_transposed :: proc(sf: ^st.Safe_Tensors($T), name: string, allocator := context.allocator) -> ^tensor.Tensor(T) {
-	t, exists := sf.tensors[name]
-	if !exists {
-		fmt.panicf("Tensor not found: %s", name)
-	}
-	return tensor.transpose(t, 0, 1, allocator)
 }
 
 // Swish/SiLU activation in-place
@@ -612,24 +604,36 @@ vae_decode :: proc(
 	latent: ^tensor.Tensor(T),
 	allocator := context.allocator,
 ) -> ^tensor.Tensor(T) {
+	_t := trace.global_scoped("vae_decode", "vae")
+	defer trace.global_end_scoped(_t)
+
 	// Denormalize: x = x * sqrt(var + eps) + mean
+	_t_denorm := trace.global_scoped("denormalize", "vae")
 	denorm := denormalize_latent(latent, vae.bn_running_mean, vae.bn_running_var, allocator)
+	trace.global_end_scoped(_t_denorm)
 	defer tensor.free_tensor(denorm, allocator)
 
 	// Unpatchify: [B, 128, H/16, W/16] -> [B, 32, H/8, W/8]
+	_t_unpatch := trace.global_scoped("unpatchify", "vae")
 	h := vae_unpatchify(denorm, vae.z_channels, allocator)
+	trace.global_end_scoped(_t_unpatch)
 
 	// Post-quant conv (1x1): 32 -> 32
+	_t_pqc := trace.global_scoped("post_quant_conv", "vae")
 	h2 := tensor.conv2d_xwb(h, vae.post_quant_conv_weight, vae.post_quant_conv_bias, 1, 0, 1, 1, allocator)
 	tensor.free_tensor(h, allocator)
 	h = h2
+	trace.global_end_scoped(_t_pqc)
 
 	// Conv in
+	_t_cin := trace.global_scoped("conv_in", "vae")
 	h2 = tensor.conv2d_xwb(h, vae.dec_conv_in_weight, vae.dec_conv_in_bias, 1, 1, 1, 1, allocator)
 	tensor.free_tensor(h, allocator)
 	h = h2
+	trace.global_end_scoped(_t_cin)
 
 	// Mid block
+	_t_mid := trace.global_scoped("mid_block", "vae")
 	h2 = res_block_forward(&vae.dec_mid.block1, h, vae.num_groups, vae.eps, allocator)
 	tensor.free_tensor(h, allocator)
 	h = attn_block_forward(&vae.dec_mid.attn, h2, vae.num_groups, vae.eps, allocator)
@@ -637,8 +641,10 @@ vae_decode :: proc(
 	h2 = res_block_forward(&vae.dec_mid.block2, h, vae.num_groups, vae.eps, allocator)
 	tensor.free_tensor(h, allocator)
 	h = h2
+	trace.global_end_scoped(_t_mid)
 
 	// Up blocks
+	_t_up := trace.global_scoped("up_blocks", "vae")
 	block_idx := 0
 	for level in 0 ..< 4 {
 		for i in 0 ..< int(vae.num_res_blocks) + 1 {
@@ -660,13 +666,16 @@ vae_decode :: proc(
 			tensor.free_tensor(h2, allocator)
 		}
 	}
+	trace.global_end_scoped(_t_up)
 
 	// Output
+	_t_out := trace.global_scoped("conv_out", "vae")
 	h2 = group_norm(h, vae.dec_norm_out_weight, vae.dec_norm_out_bias, vae.num_groups, vae.eps, allocator)
 	tensor.free_tensor(h, allocator)
 	swish_inplace(h2)
 	img := tensor.conv2d_xwb(h2, vae.dec_conv_out_weight, vae.dec_conv_out_bias, 1, 1, 1, 1, allocator)
 	tensor.free_tensor(h2, allocator)
+	trace.global_end_scoped(_t_out)
 
 	return img
 }

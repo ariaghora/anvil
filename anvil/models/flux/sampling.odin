@@ -6,6 +6,7 @@
 package flux
 
 import "../../tensor"
+import "../../trace"
 import "core:fmt"
 import "core:math"
 import "core:math/rand"
@@ -160,6 +161,9 @@ euler_sample :: proc(
 	num_steps: int,
 	allocator := context.allocator,
 ) -> ^tensor.Tensor(T) {
+	_t := trace.global_scoped("euler_sample", "sampling")
+	defer trace.global_end_scoped(_t)
+
 	// Get spatial dimensions for unpatchify later
 	h := z.shape[2]
 	w := z.shape[3]
@@ -172,6 +176,8 @@ euler_sample :: proc(
 	z_t := tensor.clone(z_seq, allocator)
 
 	for step in 0 ..< num_steps {
+		_t_step := trace.global_scoped(fmt.tprintf("step_%d", step), "sampling")
+
 		// Current and next timesteps
 		t := schedule[step]
 		t_next := schedule[step + 1]
@@ -185,6 +191,8 @@ euler_sample :: proc(
 		for i in 0 ..< len(z_t.data) {
 			z_t.data[i] += dt * v.data[i]
 		}
+
+		trace.global_end_scoped(_t_step)
 	}
 
 	// Unpatchify back to spatial format [B, H*W, C] -> [B, C, H, W]

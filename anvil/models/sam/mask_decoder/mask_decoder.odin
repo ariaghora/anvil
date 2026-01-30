@@ -32,13 +32,13 @@ new_attention :: proc(
 	v_proj := nn.new_linear(T, embedding_dim, internal_dim, true, false, allocator)
 	out_proj := nn.new_linear(T, internal_dim, embedding_dim, true, false, allocator)
 
-	vb.assign(vb_parent, "q_proj.weight", q_proj.w, true)
+	vb.assign(vb_parent, "q_proj.weight", q_proj.w)
 	vb.assign(vb_parent, "q_proj.bias", q_proj.b.?)
-	vb.assign(vb_parent, "k_proj.weight", k_proj.w, true)
+	vb.assign(vb_parent, "k_proj.weight", k_proj.w)
 	vb.assign(vb_parent, "k_proj.bias", k_proj.b.?)
-	vb.assign(vb_parent, "v_proj.weight", v_proj.w, true)
+	vb.assign(vb_parent, "v_proj.weight", v_proj.w)
 	vb.assign(vb_parent, "v_proj.bias", v_proj.b.?)
-	vb.assign(vb_parent, "out_proj.weight", out_proj.w, true)
+	vb.assign(vb_parent, "out_proj.weight", out_proj.w)
 	vb.assign(vb_parent, "out_proj.bias", out_proj.b.?)
 
 	return new_clone(
@@ -145,7 +145,7 @@ new_mlp_mask_decoder :: proc(
 		_in_dim := i == 0 ? input_dim : hidden_dim
 		_out_dim := i + 1 == num_layers ? output_dim : hidden_dim
 		layer := nn.new_linear(T, _in_dim, _out_dim, true, false, allocator)
-		vb.assign(vb_parent, fmt.tprintf("layers.%d.weight", i), layer.w, true, loc)
+		vb.assign(vb_parent, fmt.tprintf("layers.%d.weight", i), layer.w, false, loc)
 		vb.assign(vb_parent, fmt.tprintf("layers.%d.bias", i), layer.b.?, false, loc)
 		append(&layers, layer)
 	}
@@ -286,9 +286,9 @@ new_two_way_attention_block :: proc(
 		},
 		allocator,
 	)
-	vb.assign(vb_parent, "mlp.lin1.weight", mlp.lin1.w, true)
+	vb.assign(vb_parent, "mlp.lin1.weight", mlp.lin1.w)
 	vb.assign(vb_parent, "mlp.lin1.bias", mlp.lin1.b.?)
-	vb.assign(vb_parent, "mlp.lin2.weight", mlp.lin2.w, true)
+	vb.assign(vb_parent, "mlp.lin2.weight", mlp.lin2.w)
 	vb.assign(vb_parent, "mlp.lin2.bias", mlp.lin2.b.?)
 
 	return new_clone(

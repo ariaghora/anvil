@@ -832,6 +832,68 @@ matmul :: proc(
 	return result
 }
 
+// Computes A @ B^T without materializing the transpose of B.
+// A: [...batch_dims, M, K], B: [N, K] -> result: [...batch_dims, M, N]
+// This is the PyTorch Linear convention: y = x @ W^T where W is [out_features, in_features]
+matmul_transposed_b :: proc(
+	a, b: ^Tensor($T),
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	// Validate minimum dimensions
+	if len(a.shape) < 2 || len(b.shape) != 2 {
+		panic("matmul_transposed_b requires A to be 2D+ and B to be exactly 2D")
+	}
+
+	// Extract dimensions
+	// A: [...batch, M, K], B: [N, K] -> result: [...batch, M, N]
+	a_matrix_dims := a.shape[len(a.shape) - 2:]
+	a_m, a_k := a_matrix_dims[0], a_matrix_dims[1]
+	b_n, b_k := b.shape[0], b.shape[1]  // B is [N, K], will be accessed as [K, N]
+
+	// Validate inner dimensions match
+	if a_k != b_k {
+		fmt.eprintln("matmul_transposed_b error: a.shape =", a.shape, "b.shape =", b.shape)
+		fmt.eprintln("  a_k =", a_k, "b_k =", b_k)
+		panic("Matrix dimensions incompatible for A @ B^T")
+	}
+
+	// Extract batch dimensions from A (B has no batch dims)
+	a_batch := a.shape[:len(a.shape) - 2] if len(a.shape) > 2 else []uint{}
+
+	// Construct result shape: [...batch_dims, M, N]
+	result_shape := make([]uint, len(a_batch) + 2, context.temp_allocator, loc)
+	copy(result_shape[:len(a_batch)], a_batch)
+	result_shape[len(a_batch)] = a_m
+	result_shape[len(a_batch) + 1] = b_n
+
+	// Create result tensor
+	result := tensor_alloc(T, result_shape, true, allocator, loc)
+
+	// Calculate sizes
+	batch_size := shape_to_size(a_batch) if len(a_batch) > 0 else 1
+	matrix_size_a := a_m * a_k
+	matrix_size_result := a_m * b_n
+
+	// Get contiguous data
+	a_data, _ := get_strided_data(a, a.shape, a.strides, context.temp_allocator)
+	b_data, _ := get_strided_data(b, b.shape, b.strides, context.temp_allocator)
+
+	// Process each batch
+	for batch_idx in 0 ..< batch_size {
+		a_offset := batch_idx * matrix_size_a
+		result_offset := batch_idx * matrix_size_result
+
+		a_matrix := a_data[a_offset:a_offset + matrix_size_a]
+		result_matrix := result.data[result_offset:result_offset + matrix_size_result]
+
+		// A @ B^T using BLAS with trans_b
+		matmul_backend.matmul_2d_trans_b(a_matrix, b_data, a_m, b_n, a_k, result_matrix)
+	}
+
+	return result
+}
+
 gemm :: proc(
 	a, b: ^Tensor($T),
 	c: Maybe(^Tensor(T)),
