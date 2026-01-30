@@ -290,6 +290,38 @@ add :: proc(
 	return elementwise_binary_op(a, b, .ADD, allocator, loc)
 }
 
+// Add b to a in-place. Both must have same shape and be contiguous.
+// Returns true on success, false if shapes don't match or tensors aren't suitable.
+add_inplace :: proc(a, b: ^Tensor($T)) -> bool {
+	if !a.contiguous || !b.contiguous do return false
+	if !slice.equal(a.shape, b.shape) do return false
+
+	when T == f32 && ODIN_OS == .Darwin {
+		simd_backend.addf_batch(a.data, a.data, b.data)
+	} else {
+		for i in 0 ..< len(a.data) {
+			a.data[i] += b.data[i]
+		}
+	}
+	return true
+}
+
+// Add a + b, storing result in dst. All must have same shape and be contiguous.
+// Returns true on success.
+add_into :: proc(dst, a, b: ^Tensor($T)) -> bool {
+	if !dst.contiguous || !a.contiguous || !b.contiguous do return false
+	if !slice.equal(dst.shape, a.shape) || !slice.equal(a.shape, b.shape) do return false
+
+	when T == f32 && ODIN_OS == .Darwin {
+		simd_backend.addf_batch(dst.data, a.data, b.data)
+	} else {
+		for i in 0 ..< len(a.data) {
+			dst.data[i] = a.data[i] + b.data[i]
+		}
+	}
+	return true
+}
+
 // Multiplication operation
 mul :: proc(
 	a, b: ^Tensor($T),

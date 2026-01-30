@@ -59,14 +59,10 @@ separate_heads :: proc(
 	num_heads: uint,
 	allocator := context.allocator,
 	loc := #caller_location,
-) -> (
-	out: ^tensor.Tensor(T),
-) {
+) -> ^tensor.Tensor(T) {
 	b, n, c := x.shape[0], x.shape[1], x.shape[2]
-	reshaped := tensor.reshape(x, {b, n, num_heads, c / num_heads}, allocator, loc)
-	defer tensor.free_tensor(reshaped, allocator = allocator)
-	out = tensor.transpose(reshaped, 1, 2, allocator)
-	return
+	// Fused reshape [b,n,c] -> [b,n,h,c/h] then transpose dims 1,2 -> [b,h,n,c/h]
+	return tensor.reshape_transpose(x, {b, n, num_heads, c / num_heads}, 1, 2, allocator, loc)
 }
 
 @(private = "file")
@@ -76,11 +72,8 @@ recombine_heads :: proc(
 	loc := #caller_location,
 ) -> ^tensor.Tensor(T) {
 	b, n_heads, n_tokens, c_per_head := x.shape[0], x.shape[1], x.shape[2], x.shape[3]
-	transposed := tensor.transpose(x, 1, 2, allocator, loc)
-	defer tensor.free_tensor(transposed, allocator = allocator)
-	reshaped := tensor.reshape(transposed, {b, n_tokens, n_heads * c_per_head}, allocator)
-	defer tensor.free_tensor(reshaped, allocator = allocator)
-	return tensor.clone(reshaped, allocator)
+	// Fused transpose dims 1,2 then reshape to [b, n_tokens, n_heads*c_per_head]
+	return tensor.transpose_reshape(x, 1, 2, {b, n_tokens, n_heads * c_per_head}, allocator, loc)
 }
 
 forward_attention :: proc(
@@ -326,49 +319,49 @@ forward_two_way_attention_block :: proc(
 	^tensor.Tensor(T),
 	^tensor.Tensor(T),
 ) {
+	// Pre-compute keys + key_pe once (used twice in this block)
+	keys_with_pe := tensor.add(keys_in, key_pe, allocator)
+	defer tensor.free_tensor(keys_with_pe, allocator = allocator)
+
 	queries: ^tensor.Tensor(T)
 	if tt.skip_first_layer_pe {
 		queries = forward_attention(tt.self_attn, queries_in, queries_in, queries_in, allocator)
 	} else {
 		q := tensor.add(queries_in, query_pe, allocator)
-		defer tensor.free_tensor(q, allocator = allocator)
 		attn_out := forward_attention(tt.self_attn, q, q, queries_in, allocator)
-		defer tensor.free_tensor(attn_out, allocator = allocator)
-		queries = tensor.add(queries_in, attn_out, allocator)
+		tensor.free_tensor(q, allocator = allocator)
+		queries = tensor.clone(queries_in, allocator)
+		tensor.add_inplace(queries, attn_out)
+		tensor.free_tensor(attn_out, allocator = allocator)
 	}
 	queries_norm1 := nn.forward_layer_norm_1d(tt.norm1, queries, allocator)
 	tensor.free_tensor(queries, allocator = allocator)
 
 	// Cross attention block, tokens attending to image embedding
 	q1 := tensor.add(queries_norm1, query_pe, allocator)
-	defer tensor.free_tensor(q1, allocator = allocator)
-	k1 := tensor.add(keys_in, key_pe, allocator)
-	defer tensor.free_tensor(k1, allocator = allocator)
-	attn_out1 := forward_attention(tt.cross_attn_token_to_image, q1, k1, keys_in, allocator)
-	defer tensor.free_tensor(attn_out1, allocator = allocator)
-	queries_add1 := tensor.add(queries_norm1, attn_out1, allocator)
+	attn_out1 := forward_attention(tt.cross_attn_token_to_image, q1, keys_with_pe, keys_in, allocator)
+	tensor.free_tensor(q1, allocator = allocator)
+	tensor.add_inplace(queries_norm1, attn_out1)
+	tensor.free_tensor(attn_out1, allocator = allocator)
+	queries_norm2 := nn.forward_layer_norm_1d(tt.norm2, queries_norm1, allocator)
 	tensor.free_tensor(queries_norm1, allocator = allocator)
-	queries_norm2 := nn.forward_layer_norm_1d(tt.norm2, queries_add1, allocator)
-	tensor.free_tensor(queries_add1, allocator = allocator)
 
 	// MLP block
 	mlp_out := forward_mlp_block(tt.mlp, queries_norm2, allocator)
-	defer tensor.free_tensor(mlp_out, allocator = allocator)
-	queries_add2 := tensor.add(queries_norm2, mlp_out, allocator)
+	tensor.add_inplace(queries_norm2, mlp_out)
+	tensor.free_tensor(mlp_out, allocator = allocator)
+	queries_out := nn.forward_layer_norm_1d(tt.norm3, queries_norm2, allocator)
 	tensor.free_tensor(queries_norm2, allocator = allocator)
-	queries_out := nn.forward_layer_norm_1d(tt.norm3, queries_add2, allocator)
-	tensor.free_tensor(queries_add2, allocator = allocator)
 
 	// Cross attention block, image embedding attending to tokens
 	q2 := tensor.add(queries_out, query_pe, allocator)
-	defer tensor.free_tensor(q2, allocator = allocator)
-	k2 := tensor.add(keys_in, key_pe, allocator)
-	defer tensor.free_tensor(k2, allocator = allocator)
-	attn_out2 := forward_attention(tt.cross_attn_image_to_token, k2, q2, queries_out, allocator)
-	defer tensor.free_tensor(attn_out2, allocator = allocator)
-	keys_add := tensor.add(keys_in, attn_out2, allocator)
-	defer tensor.free_tensor(keys_add, allocator = allocator)
-	keys_out := nn.forward_layer_norm_1d(tt.norm4, keys_add, allocator)
+	attn_out2 := forward_attention(tt.cross_attn_image_to_token, keys_with_pe, q2, queries_out, allocator)
+	tensor.free_tensor(q2, allocator = allocator)
+	keys_out_tmp := tensor.clone(keys_in, allocator)
+	tensor.add_inplace(keys_out_tmp, attn_out2)
+	tensor.free_tensor(attn_out2, allocator = allocator)
+	keys_out := nn.forward_layer_norm_1d(tt.norm4, keys_out_tmp, allocator)
+	tensor.free_tensor(keys_out_tmp, allocator = allocator)
 
 	return queries_out, keys_out
 }

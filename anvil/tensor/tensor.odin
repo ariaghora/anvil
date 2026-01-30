@@ -1059,6 +1059,154 @@ matrix_transpose :: proc(
 	// }
 }
 
+// Create a non-owning view of tensor (shares data, no copy).
+view :: proc(
+	t: ^Tensor($T),
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	result := new(Tensor(T), allocator)
+	result.data = t.data
+	result.owns_data = false
+	result.shape = make([]uint, len(t.shape), allocator)
+	result.strides = make([]uint, len(t.strides), allocator)
+	copy(result.shape, t.shape)
+	copy(result.strides, t.strides)
+	result.contiguous = t.contiguous
+	return result
+}
+
+// Create a view of tensor with transposed dimensions (no data copy).
+// Result shares data with input and is marked non-contiguous.
+transpose_view :: proc(
+	t: ^Tensor($T),
+	dim0, dim1: int,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	if dim0 == dim1 {
+		return view(t, allocator, loc)
+	}
+	if dim0 < 0 || dim0 >= len(t.shape) || dim1 < 0 || dim1 >= len(t.shape) {
+		panic("Dimension indices out of range")
+	}
+
+	result := new(Tensor(T), allocator)
+	result.data = t.data
+	result.owns_data = false
+	result.shape = make([]uint, len(t.shape), allocator)
+	result.strides = make([]uint, len(t.strides), allocator)
+
+	copy(result.shape, t.shape)
+	copy(result.strides, t.strides)
+
+	result.shape[dim0], result.shape[dim1] = result.shape[dim1], result.shape[dim0]
+	result.strides[dim0], result.strides[dim1] = result.strides[dim1], result.strides[dim0]
+	result.contiguous = false
+
+	return result
+}
+
+// Materialize a non-contiguous tensor into contiguous form.
+// If already contiguous, returns a clone.
+contiguous :: proc(
+	t: ^Tensor($T),
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	if t.contiguous {
+		return clone(t, allocator)
+	}
+
+	result := tensor_alloc(T, t.shape, true, allocator, loc)
+	data, allocated := get_strided_data(t, nil, nil, allocator)
+	defer if allocated do delete(data, allocator)
+	copy(result.data, data)
+	return result
+}
+
+// Reshape then transpose in a single materialization pass.
+// Avoids intermediate allocation from separate reshape + transpose.
+reshape_transpose :: proc(
+	t: ^Tensor($T),
+	new_shape: []uint,
+	dim0, dim1: int,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	// Validate reshape
+	old_size := shape_to_size(t.shape)
+	new_size := shape_to_size(new_shape)
+	if old_size != new_size {
+		panic(fmt.tprintf("Cannot reshape tensor of size %v to shape %v", old_size, new_shape))
+	}
+
+	// Validate transpose dims
+	if dim0 < 0 || dim0 >= len(new_shape) || dim1 < 0 || dim1 >= len(new_shape) {
+		panic("Dimension indices out of range for transpose")
+	}
+
+	// Compute strides for reshaped tensor (virtual reshape)
+	reshaped_strides := make([]uint, len(new_shape), context.temp_allocator)
+	stride: uint = 1
+	for i := len(new_shape) - 1; i >= 0; i -= 1 {
+		reshaped_strides[i] = stride
+		stride *= new_shape[i]
+	}
+
+	// Apply virtual transpose by swapping shape and strides
+	transposed_shape := make([]uint, len(new_shape), context.temp_allocator)
+	transposed_strides := make([]uint, len(new_shape), context.temp_allocator)
+	copy(transposed_shape, new_shape)
+	copy(transposed_strides, reshaped_strides)
+	transposed_shape[dim0], transposed_shape[dim1] = transposed_shape[dim1], transposed_shape[dim0]
+	transposed_strides[dim0], transposed_strides[dim1] = transposed_strides[dim1], transposed_strides[dim0]
+
+	// Allocate result and materialize in single pass
+	result := tensor_alloc(T, transposed_shape, true, allocator, loc)
+	data, allocated := get_strided_data(t, transposed_shape, transposed_strides, allocator)
+	defer if allocated do delete(data, allocator)
+	copy(result.data, data)
+	return result
+}
+
+// Transpose then reshape in a single materialization pass.
+// Avoids intermediate allocation from separate transpose + reshape.
+transpose_reshape :: proc(
+	t: ^Tensor($T),
+	dim0, dim1: int,
+	new_shape: []uint,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> ^Tensor(T) {
+	// Validate transpose dims on input
+	if dim0 < 0 || dim0 >= len(t.shape) || dim1 < 0 || dim1 >= len(t.shape) {
+		panic("Dimension indices out of range for transpose")
+	}
+
+	// Compute transposed shape and strides (virtual transpose)
+	transposed_shape := make([]uint, len(t.shape), context.temp_allocator)
+	transposed_strides := make([]uint, len(t.strides), context.temp_allocator)
+	copy(transposed_shape, t.shape)
+	copy(transposed_strides, t.strides)
+	transposed_shape[dim0], transposed_shape[dim1] = transposed_shape[dim1], transposed_shape[dim0]
+	transposed_strides[dim0], transposed_strides[dim1] = transposed_strides[dim1], transposed_strides[dim0]
+
+	// Validate reshape
+	old_size := shape_to_size(transposed_shape)
+	new_size := shape_to_size(new_shape)
+	if old_size != new_size {
+		panic(fmt.tprintf("Cannot reshape tensor of size %v to shape %v", old_size, new_shape))
+	}
+
+	// Materialize the transposed data, then reshape is just metadata change
+	result := tensor_alloc(T, new_shape, true, allocator, loc)
+	data, allocated := get_strided_data(t, transposed_shape, transposed_strides, allocator)
+	defer if allocated do delete(data, allocator)
+	copy(result.data, data)
+	return result
+}
+
 // Split tensor into chunks along specified dimension
 chunk :: proc(
 	tensor: ^Tensor($T),

@@ -4,6 +4,7 @@ import sam "../../anvil/models/sam"
 import vit "../../anvil/models/sam/vit"
 import st "../../anvil/safetensors"
 import "../../anvil/tensor"
+import "../../anvil/trace"
 import "core:fmt"
 import "core:os"
 import "core:strconv"
@@ -213,6 +214,17 @@ save_mask_png :: proc(mask: ^tensor.Tensor(f32), path: string, allocator := cont
 }
 
 main :: proc() {
+	// Initialize tracer (only active if built with -define:TRACE=true)
+	trace.global_init()
+	defer {
+		trace_json := trace.global_finish()
+		if len(trace_json) > 0 {
+			os.write_entire_file("trace.json", transmute([]u8)trace_json)
+			fmt.println("Trace saved to: trace.json")
+		}
+		trace.global_destroy()
+	}
+
 	args, args_ok := parse_args()
 	if !args_ok {
 		os.exit(1)
@@ -250,7 +262,9 @@ main :: proc() {
 	// Compute image embedding
 	fmt.println("Computing image embedding...")
 	t_embed := time.now()
+	embed_trace := trace.global_scoped("image_embedding", "inference")
 	embedding := vit.forward_tiny_vit_5m(encoder, input, allocator)
+	trace.global_end_scoped(embed_trace)
 	fmt.printfln("Embedding computed in %.2fs", time.duration_seconds(time.since(t_embed)))
 
 	// Convert points to normalized coordinates and SAM format
@@ -268,6 +282,7 @@ main :: proc() {
 	// Run mask decoder
 	fmt.println("Generating mask...")
 	t_mask := time.now()
+	mask_trace := trace.global_scoped("mask_prediction", "inference")
 	masks, iou_pred := sam.forward_sam_for_embedding(
 		sam_model,
 		embedding,
@@ -276,6 +291,7 @@ main :: proc() {
 		sam_points,
 		context.temp_allocator,
 	)
+	trace.global_end_scoped(mask_trace)
 	fmt.printfln("Mask generated in %.3fs", time.duration_seconds(time.since(t_mask)))
 
 	// Get best mask (highest IoU)
